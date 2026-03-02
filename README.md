@@ -27,6 +27,7 @@ npm ci
 npm run check
 npm test
 npm run build
+npm run test:questions
 ```
 
 ### stdio transport
@@ -58,4 +59,4 @@ docker build -f docker/Dockerfile -t nl-gov-mcp .
 docker run --rm -p 3333:3333 nl-gov-mcp
 ```
 
-See `docs/SOURCES.md` and `docs/TOOLS.md`.
+See `docs/SOURCES.md`, `docs/TOOLS.md`, and `docs/BACKLOG-SOURCES.md`.

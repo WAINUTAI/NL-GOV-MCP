@@ -11,6 +11,7 @@
     "start:sse": "node dist/src/index.js --sse",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:questions": "tsx scripts/run-question-suite.ts",
     "check": "tsc -p tsconfig.json --noEmit"
   },
   "repository": {
