@@ -1,0 +1,5 @@
+{
+  "KNMI_API_KEY": "your_knmi_api_key_here",
+  "OVERHEID_API_KEY": "your_developer_overheid_api_key_here",
+  "BAG_API_KEY": "optional_bag_api_key"
+}

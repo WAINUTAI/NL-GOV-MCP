@@ -1,0 +1,33 @@
+{
+  "server": {
+    "name": "nl-gov-mcp",
+    "version": "0.1.0",
+    "httpPort": 3333
+  },
+  "cacheTtlMs": {
+    "default": 900000,
+    "cbsCatalog": 86400000,
+    "tkEntityLists": 3600000,
+    "knmiObservations": 600000,
+    "knmiHistorical": 86400000,
+    "dataOverheidDatasetList": 21600000,
+    "rijksoverheidLists": 86400000
+  },
+  "limits": {
+    "defaultRows": 25,
+    "maxRows": 200
+  },
+  "endpoints": {
+    "dataOverheid": "https://data.overheid.nl/data/api/3/action",
+    "cbsV4": "https://odata4.cbs.nl/CBS",
+    "cbsV3": "https://opendata.cbs.nl/ODataApi/OData",
+    "tweedeKamer": "https://gegevensmagazijn.tweedekamer.nl/OData/v4/2.0",
+    "bekendmakingenSru": "https://repository.overheid.nl/sru",
+    "rijksoverheid": "https://opendata.rijksoverheid.nl/v1",
+    "knmi": "https://api.dataplatform.knmi.nl/open-data/v1",
+    "rijksbegroting": "https://opendata.rijksbegroting.nl",
+    "duoDatasets": "https://onderwijsdata.duo.nl",
+    "duoRio": "https://lod.onderwijsregistratie.nl/rio-api",
+    "apiRegister": "https://apis.developer.overheid.nl"
+  }
+}

@@ -1,0 +1,6 @@
+[
+  { "tool": "nl_gov_ask", "args": { "question": "CBS inflatie 2024", "top": 5 } },
+  { "tool": "data_overheid_datasets_search", "args": { "query": "klimaat", "rows": 5 } },
+  { "tool": "officiele_bekendmakingen_search", "args": { "query": "stikstof", "top": 5 } },
+  { "tool": "tweede_kamer_documents", "args": { "query": "jeugdzorg", "top": 5 } }
+]

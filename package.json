@@ -1,0 +1,43 @@
+{
+  "name": "nl-gov-mcp",
+  "version": "0.1.0",
+  "description": "Unified MCP server for Dutch government open data sources",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/index.ts",
+    "dev:sse": "tsx src/index.ts --sse",
+    "start": "node dist/index.js",
+    "start:sse": "node dist/index.js --sse",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WAINUTAI/NL-GOV-MCP.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/WAINUTAI/NL-GOV-MCP/issues"
+  },
+  "homepage": "https://github.com/WAINUTAI/NL-GOV-MCP#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "fast-xml-parser": "^5.4.1",
+    "pino": "^10.3.1",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.3.3",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  },
+  "type": "module"
+}
