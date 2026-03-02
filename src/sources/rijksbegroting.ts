@@ -15,7 +15,7 @@ function decodeSlug(slug: string): string {
 export class RijksbegrotingSource {
   constructor(private readonly config: AppConfig) {}
 
-  async search(query: string, top: number) {
+  private async openDataIndex() {
     const endpoint = `${this.config.endpoints.rijksbegroting}/api`;
     const params: Record<string, string> = {};
 
@@ -28,18 +28,23 @@ export class RijksbegrotingSource {
       matches.add(m[0]);
     }
 
-    const allItems = Array.from(matches)
-      .map((path) => {
-        const slug = path.split("/").pop() ?? path;
-        return {
-          id: slug,
-          name: decodeSlug(slug),
-          url: `https://www.rijksfinancien.nl/${path}`,
-          source: "rijksbegroting-open-data-index",
-        } as Record<string, unknown>;
-      });
+    const items = Array.from(matches).map((path) => {
+      const slug = path.split("/").pop() ?? path;
+      return {
+        id: slug,
+        name: decodeSlug(slug),
+        url: `https://www.rijksfinancien.nl/${path}`,
+        source: "rijksbegroting-open-data-index",
+      } as Record<string, unknown>;
+    });
 
-    const filteredItems = allItems.filter((item) => {
+    return { items, endpoint: meta.url, params };
+  }
+
+  async search(query: string, top: number) {
+    const index = await this.openDataIndex();
+
+    const filteredItems = index.items.filter((item) => {
       if (!query.trim()) return true;
       const q = query.toLowerCase();
       const hay = `${String(item.name ?? "")} ${String(item.id ?? "")}`.toLowerCase();
@@ -49,13 +54,42 @@ export class RijksbegrotingSource {
         .every((term) => hay.includes(term));
     });
 
-    const items = (filteredItems.length ? filteredItems : allItems).slice(0, top);
+    const items = (filteredItems.length ? filteredItems : index.items).slice(0, top);
 
     return {
       items,
       total: filteredItems.length,
-      endpoint: meta.url,
-      params,
+      endpoint: index.endpoint,
+      params: index.params,
+    };
+  }
+
+  async getChapter(year: number, chapter: string) {
+    const index = await this.openDataIndex();
+    const query = `${year} ${chapter}`.trim().toLowerCase();
+
+    const filtered = index.items.filter((item) => {
+      const hay = `${String(item.name ?? "")} ${String(item.id ?? "")}`.toLowerCase();
+      return query
+        .split(/\s+/)
+        .filter(Boolean)
+        .every((term) => hay.includes(term));
+    });
+
+    const items = (filtered.length ? filtered : index.items.slice(0, 10)).map((item) => ({
+      ...item,
+      requested_year: year,
+      requested_chapter: chapter,
+    }));
+
+    return {
+      items,
+      endpoint: index.endpoint,
+      params: {
+        ...index.params,
+        year: String(year),
+        chapter,
+      },
     };
   }
 }

@@ -14,6 +14,37 @@ export class DuoSource {
     return { items, total, endpoint: meta.url, params };
   }
 
+  async getSchools(args: {
+    name?: string;
+    municipality?: string;
+    type?: string;
+    top: number;
+  }) {
+    const query = [args.name, args.municipality, args.type, "school"]
+      .filter(Boolean)
+      .join(" ");
+    return this.datasetsCatalog(query, args.top);
+  }
+
+  async getExamResults(args: {
+    year?: number;
+    school?: string;
+    municipality?: string;
+    top: number;
+  }) {
+    const query = [
+      "exam",
+      "slagingspercentage",
+      args.year ? String(args.year) : undefined,
+      args.school,
+      args.municipality,
+    ]
+      .filter(Boolean)
+      .join(" ");
+
+    return this.datasetsCatalog(query, args.top);
+  }
+
   async rioSearch(query: string, top: number) {
     const endpoint = `${this.config.endpoints.duoRio}/search`;
     const params = { q: query, limit: String(top) };

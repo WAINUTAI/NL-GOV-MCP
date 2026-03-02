@@ -1,6 +1,6 @@
 # Tool Catalog
 
-## Core data.overheid tools
+## data.overheid.nl
 - `data_overheid_datasets_search`
 - `data_overheid_dataset_get`
 - `data_overheid_organizations`
@@ -11,32 +11,56 @@
 - `cbs_table_info`
 - `cbs_observations`
 
-## Parliamentary / publications
+## Tweede Kamer
 - `tweede_kamer_documents`
-- `officiele_bekendmakingen_search`
+- `tweede_kamer_search`
+- `tweede_kamer_document_get`
+- `tweede_kamer_votes`
+- `tweede_kamer_members`
 
-## Other Dutch government sources
+## Officiële Bekendmakingen
+- `officiele_bekendmakingen_search`
+- `officiele_bekendmakingen_record_get`
+
+## Rijksoverheid
 - `rijksoverheid_search`
+- `rijksoverheid_document`
+- `rijksoverheid_topics`
+- `rijksoverheid_ministries`
+- `rijksoverheid_schoolholidays`
+
+## Rijksbegroting
 - `rijksbegroting_search`
+- `rijksbegroting_chapter`
+
+## DUO
 - `duo_datasets_search`
+- `duo_schools`
+- `duo_exam_results`
 - `duo_rio_search`
 
-## Key-gated tools
+## API register (key required)
 - `overheid_api_register_search` (`OVERHEID_API_KEY`)
-- `knmi_datasets` (`KNMI_API_KEY`)
-- `knmi_latest_files` (`KNMI_API_KEY`)
 
-## Meta tool
-- `nl_gov_ask` keyword router (NL/EN keywords) with fallback to `data_overheid_datasets_search`
+## KNMI (key required)
+- `knmi_datasets` (`KNMI_API_KEY`)
+- `knmi_search_datasets` (`KNMI_API_KEY`)
+- `knmi_latest_files` (`KNMI_API_KEY`)
+- `knmi_latest_observations` (`KNMI_API_KEY`)
+- `knmi_warnings` (`KNMI_API_KEY`)
+- `knmi_earthquakes` (`KNMI_API_KEY`)
+
+## Meta router
+- `nl_gov_ask`
 
 ## Response contract
-All tools return:
+All success responses return:
 - `summary`
 - `records`
 - `provenance`
 - optional `access_note`
 
-Error shape:
+Error responses return:
 - `error`
 - `message`
 - optional `suggestion`, `retry_after`, `details`
