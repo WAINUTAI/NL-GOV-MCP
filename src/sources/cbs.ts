@@ -69,6 +69,66 @@ export class CbsSource {
     };
   }
 
+  private async tryCatalogViaDataOverheid(query: string, limit: number) {
+    const endpoint = `${this.config.endpoints.dataOverheid}/package_search`;
+
+    const attemptParams: Array<Record<string, string>> = [
+      { q: query, rows: String(limit), fq: "organization:cbs" },
+      { q: query, rows: String(limit) },
+    ];
+
+    let chosenMetaUrl = endpoint;
+    let chosenParams = attemptParams[0];
+    let rows: Array<Record<string, unknown>> = [];
+
+    for (const params of attemptParams) {
+      const { data, meta } = await getJson<Record<string, unknown>>(endpoint, {
+        query: params,
+      });
+      const result = (data.result as Record<string, unknown> | undefined) ?? {};
+      const candidateRows = Array.isArray(result.results)
+        ? (result.results as Array<Record<string, unknown>>)
+        : [];
+
+      chosenMetaUrl = meta.url;
+      chosenParams = params;
+
+      if (!candidateRows.length) {
+        rows = candidateRows;
+        continue;
+      }
+
+      // Prefer obvious CBS matches when broad search is used.
+      const preferred = candidateRows.filter((row) => {
+        const text = `${String(row.title ?? "")} ${String(row.organization ? (row.organization as Record<string, unknown>).title ?? "" : "")}`.toLowerCase();
+        return text.includes("cbs") || text.includes("centraal bureau voor de statistiek");
+      });
+
+      rows = (preferred.length ? preferred : candidateRows).slice(0, limit);
+      break;
+    }
+
+    const items = rows.map((row) => {
+      const title = (row.title as string | undefined) ?? (row.name as string | undefined);
+      const identifier = (row.id as string | undefined) ?? (row.name as string | undefined);
+      return {
+        Identifier: identifier,
+        Title: title,
+        Summary: row.notes,
+        Modified: row.metadata_modified,
+        Source: "data.overheid.nl (CBS fallback)",
+        Raw: row,
+      } as Record<string, unknown>;
+    });
+
+    return {
+      items,
+      endpoint: chosenMetaUrl,
+      params: chosenParams,
+      base: "data.overheid.nl/cbs-fallback",
+    };
+  }
+
   async searchTables(query: string, limit: number): Promise<{
     items: Array<Record<string, unknown>>;
     endpoint: string;
@@ -88,7 +148,11 @@ export class CbsSource {
     try {
       result = await this.tryCatalogRequest(query, limit);
     } catch {
-      result = await this.tryCatalogRequestV3(query, limit);
+      try {
+        result = await this.tryCatalogRequestV3(query, limit);
+      } catch {
+        result = await this.tryCatalogViaDataOverheid(query, limit);
+      }
     }
 
     appCache.set(cacheKey, result, this.config.cacheTtlMs.cbsCatalog);
