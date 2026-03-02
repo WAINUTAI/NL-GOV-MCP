@@ -1,9 +1,47 @@
 import type { AppConfig } from "../types.js";
-import { getJson } from "../utils/http.js";
+import { SourceRequestError, getJson } from "../utils/http.js";
 
 function normalize(value: unknown): string {
   return typeof value === "string" ? value.toLowerCase() : "";
 }
+
+const KNMI_KNOWN_DATASETS: Array<Record<string, unknown>> = [
+  {
+    datasetName: "Actuele10mindataKNMIstations",
+    version: "2",
+    description: "10-minute in-situ meteorological observations (stations)",
+  },
+  {
+    datasetName: "10-minute-in-situ-meteorological-observations",
+    version: "1.0",
+    description: "10-minute in-situ meteorological observations (legacy naming)",
+  },
+  {
+    datasetName: "daggegevens_stations",
+    version: "1",
+    description: "Daily station weather data (historical)",
+  },
+  {
+    datasetName: "uurgegevens_stations",
+    version: "1",
+    description: "Hourly station weather data",
+  },
+  {
+    datasetName: "radar_reflectivity_composites",
+    version: "1",
+    description: "Radar reflectivity composites",
+  },
+  {
+    datasetName: "waarschuwingen_huidige",
+    version: "1",
+    description: "Current weather warnings (dataset name may vary by platform release)",
+  },
+  {
+    datasetName: "knmi_seismologie",
+    version: "1",
+    description: "Seismology / earthquakes (dataset name may vary by platform release)",
+  },
+];
 
 export class KnmiSource {
   constructor(private readonly config: AppConfig, private readonly apiKey: string) {}
@@ -13,12 +51,11 @@ export class KnmiSource {
   }
 
   async datasets() {
-    const endpoint = `${this.config.endpoints.knmi}/datasets`;
-    const { data, meta } = await getJson<Record<string, unknown>>(endpoint, {
-      headers: this.headers(),
-    });
-    const items = (data.datasets as Array<Record<string, unknown>> | undefined) ?? [];
-    return { items, endpoint: meta.url, params: {} };
+    return {
+      items: KNMI_KNOWN_DATASETS,
+      endpoint: "https://developer.dataplatform.knmi.nl/open-data-api (known dataset catalog)",
+      params: {},
+    };
   }
 
   async searchDatasets(query?: string) {
@@ -71,11 +108,50 @@ export class KnmiSource {
     return this.latestFiles("Actuele10mindataKNMIstations", "2", top);
   }
 
+  private async firstWorkingDataset(
+    candidates: Array<{ datasetName: string; version: string }>,
+    top: number,
+  ) {
+    let lastError: unknown;
+    for (const c of candidates) {
+      try {
+        return await this.latestFiles(c.datasetName, c.version, top);
+      } catch (error) {
+        lastError = error;
+        if (error instanceof SourceRequestError && error.status === 404) {
+          continue;
+        }
+      }
+    }
+
+    return {
+      items: [],
+      endpoint:
+        "https://developer.dataplatform.knmi.nl/open-data-api (no matching warning/earthquake dataset found)",
+      params: { attempted: JSON.stringify(candidates), top: String(top) },
+      lastError,
+    };
+  }
+
   async warnings(top = 20) {
-    return this.latestFiles("waarschuwingen_huidige", "1", top);
+    return this.firstWorkingDataset(
+      [
+        { datasetName: "waarschuwingen_huidige", version: "1" },
+        { datasetName: "weather-warnings", version: "1" },
+        { datasetName: "weather_warnings", version: "1" },
+      ],
+      top,
+    );
   }
 
   async earthquakes(top = 20) {
-    return this.latestFiles("knmi_seismologie", "1", top);
+    return this.firstWorkingDataset(
+      [
+        { datasetName: "knmi_seismologie", version: "1" },
+        { datasetName: "earthquakes", version: "1" },
+        { datasetName: "seismology", version: "1" },
+      ],
+      top,
+    );
   }
 }
