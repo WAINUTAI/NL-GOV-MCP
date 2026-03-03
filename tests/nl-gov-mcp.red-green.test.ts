@@ -12,7 +12,7 @@ describe("NL-GOV-MCP RED/GREEN contract tests", () => {
     vi.restoreAllMocks();
   });
 
-  it("routeert CBS-vraag naar cbs_statline (niet naar RDW/BAG)", async () => {
+  it("routeert een CBS/StatLine vraag naar cbs_statline (en NIET naar RDW/BAG)", async () => {
     vi.spyOn(cbs, "search").mockResolvedValue({
       data: {
         dataset: "Bevolking; kerncijfers",
@@ -28,14 +28,8 @@ describe("NL-GOV-MCP RED/GREEN contract tests", () => {
       ],
     });
 
-    const rdwSpy = vi.spyOn(rdw, "search").mockResolvedValue({
-      data: null,
-      citations: [],
-    });
-    const bagSpy = vi.spyOn(bag, "search").mockResolvedValue({
-      data: null,
-      citations: [],
-    });
+    const rdwSpy = vi.spyOn(rdw, "search").mockResolvedValue({ data: null, citations: [] });
+    const bagSpy = vi.spyOn(bag, "search").mockResolvedValue({ data: null, citations: [] });
 
     const res = await nlGovMcpQuery("Wat is de bevolking van Amsterdam in 2024?");
 
@@ -51,13 +45,9 @@ describe("NL-GOV-MCP RED/GREEN contract tests", () => {
     expect(bagSpy).not.toHaveBeenCalled();
   });
 
-  it("routeert kenteken-vraag naar rdw", async () => {
+  it("routeert kenteken/voertuig-vraag naar rdw", async () => {
     vi.spyOn(rdw, "search").mockResolvedValue({
-      data: {
-        kenteken: "12ABCD",
-        merk: "TESLA",
-        voertuigsoort: "Personenauto",
-      },
+      data: { kenteken: "12ABCD", merk: "TESLA", voertuigsoort: "Personenauto" },
       citations: [
         {
           source: "rdw",
@@ -75,7 +65,7 @@ describe("NL-GOV-MCP RED/GREEN contract tests", () => {
     expect(res.citations.map((c) => c.source)).toContain("rdw");
   });
 
-  it("routeert BAG/adres-vraag naar pdok_bag", async () => {
+  it("routeert BAG/Adres-vraag naar pdok_bag", async () => {
     vi.spyOn(bag, "search").mockResolvedValue({
       data: { adres: "Dam 1, 1012JS Amsterdam", bagId: "0363010000..." },
       citations: [
@@ -91,13 +81,13 @@ describe("NL-GOV-MCP RED/GREEN contract tests", () => {
     const res = await nlGovMcpQuery("Wat is het BAG-id van Dam 1, 1012JS Amsterdam?");
 
     expect(res.routedTo).toEqual(["pdok_bag"]);
-    expect(res.citations[0]?.source).toBe("pdok_bag");
-    expect(res.answer.toLowerCase()).toContain("dam");
+    expect(res.citations.length).toBeGreaterThan(0);
+    expect(res.citations[0]?.url).toContain("pdok");
   });
 
-  it("routeert juridische publicatie-vraag naar officiele_bekendmakingen", async () => {
+  it("kan multi-source routeren: regeling/wet + cijfers => OB + CBS", async () => {
     vi.spyOn(ob, "search").mockResolvedValue({
-      data: [{ identifier: "stcrt-2024-12345", title: "Staatscourant test" }],
+      data: { documents: [{ title: "Regeling XYZ", id: "gmb-2025-..." }] },
       citations: [
         {
           source: "officiele_bekendmakingen",
@@ -108,49 +98,58 @@ describe("NL-GOV-MCP RED/GREEN contract tests", () => {
       ],
     });
 
-    const res = await nlGovMcpQuery("Zoek bekendmaking over vergunning en verordening");
-
-    expect(res.routedTo).toEqual(["officiele_bekendmakingen"]);
-    expect(res.citations[0]?.source).toBe("officiele_bekendmakingen");
-  });
-
-  it("foutafhandeling: bij bronfout valt terug op data.overheid met errors gevuld", async () => {
-    vi.spyOn(cbs, "search").mockRejectedValue(new Error("CBS timeout"));
-    vi.spyOn(catalog, "search").mockResolvedValue({
-      data: [{ id: "dataset-1", title: "Fallback dataset" }],
+    vi.spyOn(cbs, "search").mockResolvedValue({
+      data: { dataset: "Emissies", rows: [{ jaar: 2024, waarde: 123.4 }] },
       citations: [
         {
-          source: "data.overheid.nl",
-          title: "data.overheid.nl",
-          url: "https://data.overheid.nl",
+          source: "cbs_statline",
+          title: "CBS StatLine",
+          url: "https://opendata.cbs.nl",
           retrievedAt: new Date().toISOString(),
         },
       ],
     });
 
-    const res = await nlGovMcpQuery("CBS bevolking Nederland");
+    const res = await nlGovMcpQuery(
+      "Wat zegt de regeling XYZ en hoe verhouden de emissiecijfers zich in 2024?",
+    );
 
-    expect(res.routedTo).toEqual(["data.overheid.nl"]);
-    expect(res.citations[0]?.source).toBe("data.overheid.nl");
-    expect(Array.isArray(res.errors)).toBe(true);
-    expect(res.errors?.some((e) => e.source === "cbs_statline")).toBe(true);
+    expect(res.routedTo).toEqual(
+      expect.arrayContaining(["officiele_bekendmakingen", "cbs_statline"]),
+    );
+    expect(res.citations.map((c) => c.source)).toEqual(
+      expect.arrayContaining(["officiele_bekendmakingen", "cbs_statline"]),
+    );
   });
 
-  it("succesresultaten bevatten altijd minimaal 1 citation", async () => {
-    vi.spyOn(catalog, "search").mockResolvedValue({
-      data: [{ id: "abc", title: "Open dataset" }],
+  it("geeft nette fout met bronlabel als expliciete bron faalt, maar blijft structured", async () => {
+    vi.spyOn(cbs, "search").mockRejectedValue(new Error("Timeout"));
+    const fallbackSpy = vi.spyOn(catalog, "search");
+
+    const res = await nlGovMcpQuery("CBS: bevolking Amsterdam 2024");
+
+    expect(res.errors?.length).toBeGreaterThan(0);
+    expect(res.errors?.[0]?.source).toBe("cbs_statline");
+    expect(res.citations).toEqual([]);
+    expect(fallbackSpy).not.toHaveBeenCalled();
+  });
+
+  it("enforce: succes => altijd minstens 1 citation met url + retrievedAt", async () => {
+    vi.spyOn(rdw, "search").mockResolvedValue({
+      data: { kenteken: "12ABCD" },
       citations: [
         {
-          source: "data.overheid.nl",
-          title: "data.overheid.nl",
-          url: "https://data.overheid.nl",
+          source: "rdw",
+          title: "RDW",
+          url: "https://opendata.rdw.nl",
           retrievedAt: new Date().toISOString(),
         },
       ],
     });
 
-    const res = await nlGovMcpQuery("is er data over luchtkwaliteit");
+    const res = await nlGovMcpQuery("kenteken 12ABCD");
     expect(res.citations.length).toBeGreaterThan(0);
-    expect(typeof res.citations[0]?.url).toBe("string");
+    expect(res.citations[0]?.url).toMatch(/^https?:\/\//);
+    expect(res.citations[0]?.retrievedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 });

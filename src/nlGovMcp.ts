@@ -46,128 +46,163 @@ function hasAny(haystack: string, terms: string[]): boolean {
 
 function buildAnswer(query: string, data: unknown): string {
   const raw = JSON.stringify(data);
-  const short = raw.length > 220 ? `${raw.slice(0, 220)}…` : raw;
+  const short = raw.length > 260 ? `${raw.slice(0, 260)}…` : raw;
   return `Resultaten voor: ${query}. ${short}`;
 }
 
-async function callWithSafety<T>(
-  source: NLSource,
-  fn: () => Promise<{ data: T; citations: Citation[] }>,
-  errors: Array<{ source: NLSource; message: string }>,
-) {
-  try {
-    return await fn();
-  } catch (error) {
-    errors.push({
-      source,
-      message: error instanceof Error ? error.message : "unknown source error",
-    });
-    return undefined;
+function detectSources(query: string): { sources: NLSource[]; explicit: boolean } {
+  const q = query.toLowerCase();
+
+  const explicitMap: Array<[RegExp, NLSource]> = [
+    [/^\s*cbs\s*:/i, "cbs_statline"],
+    [/^\s*rdw\s*:/i, "rdw"],
+    [/^\s*(bag|pdok)\s*:/i, "pdok_bag"],
+    [/^\s*(ob|offici[eë]le\s+bekendmakingen)\s*:/i, "officiele_bekendmakingen"],
+  ];
+
+  for (const [rx, source] of explicitMap) {
+    if (rx.test(query)) {
+      return { sources: [source], explicit: true };
+    }
+  }
+
+  const sources: NLSource[] = [];
+
+  const isCbs = hasAny(q, [
+    "cbs",
+    "statline",
+    "bevolking",
+    "inwoners",
+    "cijfers",
+    "kerncijfers",
+    "emissie",
+    "econom",
+    "opleidingsniveau",
+    "werkloos",
+    "inflatie",
+  ]);
+
+  const plateLike = /\b([A-Z]{2}-\d{2}-[A-Z]{2}|\d{2}-[A-Z]{2}-\d{2}|[A-Z]{2}-[A-Z]{2}-\d{2}|\d{2}-\d{2}-[A-Z]{2}|[A-Z]{2}-\d{2}-\d{2}|\d{2}-[A-Z]{2}-[A-Z]{2})\b/i.test(
+    query,
+  );
+
+  const isRdw =
+    hasAny(q, ["rdw", "kenteken", "voertuig", "apk", "bouwjaar", "merk", "typegoedkeuring", "nummerplaat", "license plate"]) ||
+    plateLike;
+
+  const isBag = hasAny(q, [
+    "bag",
+    "pdok",
+    "adres",
+    "postcode",
+    "huisnummer",
+    "woonplaats",
+    "pand",
+    "verblijfsobject",
+  ]);
+
+  const isOb = hasAny(q, [
+    "officiële bekendmakingen",
+    "officiele bekendmakingen",
+    "regeling",
+    "wet",
+    "ministeriële regeling",
+    "ministeriele regeling",
+    "staatscourant",
+    "staatsblad",
+    "gmb",
+    "trb",
+    "verordening",
+  ]);
+
+  if (isCbs) sources.push("cbs_statline");
+  if (isRdw) sources.push("rdw");
+  if (isBag) sources.push("pdok_bag");
+  if (isOb) sources.push("officiele_bekendmakingen");
+
+  if (!sources.length) {
+    sources.push("data.overheid.nl");
+  }
+
+  return { sources, explicit: false };
+}
+
+async function callSource(source: NLSource, query: string): Promise<{ data: unknown; citations: Citation[] }> {
+  switch (source) {
+    case "cbs_statline":
+      return cbs.search(query);
+    case "rdw":
+      return rdw.search(query);
+    case "pdok_bag":
+      return bag.search(query);
+    case "officiele_bekendmakingen":
+      return ob.search(query);
+    case "data.overheid.nl":
+      return catalog.search(query);
+    default:
+      throw new Error(`Unsupported source: ${source}`);
   }
 }
 
 export async function nlGovMcpQuery(query: string): Promise<MCPResult> {
-  const q = query.toLowerCase();
   const errors: Array<{ source: NLSource; message: string }> = [];
+  const { sources, explicit } = detectSources(query);
 
-  const looksLikeDutchPlate = (() => {
-    const tokens = query
-      .toUpperCase()
-      .split(/\s+/)
-      .map((t) => t.replace(/[^A-Z0-9-]/g, ""))
-      .filter(Boolean);
+  const successfulSources: NLSource[] = [];
+  const citations: Citation[] = [];
+  const payloadBySource: Record<string, unknown> = {};
 
-    return tokens.some((token) => {
-      const compact = token.replace(/-/g, "");
-      if (!/^[A-Z0-9]{6}$/.test(compact)) return false;
-      const letters = (compact.match(/[A-Z]/g) ?? []).length;
-      const digits = (compact.match(/[0-9]/g) ?? []).length;
-      return letters >= 2 && digits >= 2;
-    });
-  })();
-
-  const isRdw =
-    hasAny(q, ["kenteken", "voertuig", "rdw", "nummerplaat", "license plate"]) ||
-    looksLikeDutchPlate;
-
-  const isBag = hasAny(q, ["bag", "adres", "postcode", "huisnummer"]);
-  const isCbs = hasAny(q, ["cbs", "bevolking", "inwoners", "statistiek", "werkloos", "inflatie", "opleidingsniveau"]);
-  const isOb = hasAny(q, ["staatsblad", "staatscourant", "gemeenteblad", "bekendmaking", "verordening", "regeling"]);
-
-  if (isBag) {
-    const out = await callWithSafety("pdok_bag", () => bag.search(query), errors);
-    if (out) {
-      return {
-        query,
-        routedTo: ["pdok_bag"],
-        data: out.data,
-        answer: buildAnswer(query, out.data),
-        citations: out.citations,
-        ...(errors.length ? { errors } : {}),
-      };
+  for (const source of sources) {
+    try {
+      const out = await callSource(source, query);
+      successfulSources.push(source);
+      payloadBySource[source] = out.data;
+      citations.push(...out.citations);
+    } catch (error) {
+      errors.push({
+        source,
+        message: error instanceof Error ? error.message : "unknown source error",
+      });
     }
   }
 
-  if (isRdw) {
-    const out = await callWithSafety("rdw", () => rdw.search(query), errors);
-    if (out) {
-      return {
-        query,
-        routedTo: ["rdw"],
-        data: out.data,
-        answer: buildAnswer(query, out.data),
-        citations: out.citations,
-        ...(errors.length ? { errors } : {}),
-      };
+  // Fallback only when non-explicit route had source failures and no successes
+  if (!explicit && !successfulSources.length && !sources.includes("data.overheid.nl")) {
+    try {
+      const fallback = await callSource("data.overheid.nl", query);
+      successfulSources.push("data.overheid.nl");
+      payloadBySource["data.overheid.nl"] = fallback.data;
+      citations.push(...fallback.citations);
+    } catch (error) {
+      errors.push({
+        source: "data.overheid.nl",
+        message: error instanceof Error ? error.message : "unknown source error",
+      });
     }
   }
 
-  if (isOb) {
-    const out = await callWithSafety("officiele_bekendmakingen", () => ob.search(query), errors);
-    if (out) {
-      return {
-        query,
-        routedTo: ["officiele_bekendmakingen"],
-        data: out.data,
-        answer: buildAnswer(query, out.data),
-        citations: out.citations,
-        ...(errors.length ? { errors } : {}),
-      };
-    }
-  }
-
-  if (isCbs) {
-    const out = await callWithSafety("cbs_statline", () => cbs.search(query), errors);
-    if (out) {
-      return {
-        query,
-        routedTo: ["cbs_statline"],
-        data: out.data,
-        answer: buildAnswer(query, out.data),
-        citations: out.citations,
-        ...(errors.length ? { errors } : {}),
-      };
-    }
-  }
-
-  const fallback = await callWithSafety("data.overheid.nl", () => catalog.search(query), errors);
-  if (fallback) {
+  if (!successfulSources.length) {
     return {
       query,
-      routedTo: ["data.overheid.nl"],
-      data: fallback.data,
-      answer: buildAnswer(query, fallback.data),
-      citations: fallback.citations,
+      routedTo: [],
+      data: null,
+      answer: "Geen resultaten beschikbaar op dit moment.",
+      citations: [],
       ...(errors.length ? { errors } : {}),
     };
   }
 
+  const data =
+    successfulSources.length === 1
+      ? payloadBySource[successfulSources[0]]
+      : payloadBySource;
+
   return {
     query,
-    routedTo: [],
-    data: null,
-    answer: "Geen resultaten beschikbaar op dit moment.",
-    citations: [],
+    routedTo: successfulSources,
+    data,
+    answer: buildAnswer(query, data),
+    citations,
     ...(errors.length ? { errors } : {}),
   };
 }
