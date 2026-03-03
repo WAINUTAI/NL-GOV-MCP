@@ -50,6 +50,32 @@
 - `knmi_warnings` (`KNMI_API_KEY`)
 - `knmi_earthquakes` (`KNMI_API_KEY`)
 
+## PDOK / BAG
+- `pdok_search`
+- `bag_lookup_address`
+  - gebruikt PDOK Locatieserver v3_1
+  - bij tijdelijke onbereikbaarheid: deterministische fallback met duidelijke `access_note`
+
+## ORI / Open Raadsinformatie
+- `ori_search`
+  - probeert meerdere bekende ORI endpoints
+  - bij instabiele endpointtoegang: deterministische fallback met `access_note`
+
+## NDW
+- `ndw_search`
+  - probeert NDW REST + CKAN endpointvarianten
+  - fallbackrecord bij onbereikbaarheid/instabiliteit
+
+## Luchtmeetnet
+- `luchtmeetnet_latest`
+  - authless latest measurements
+  - fallback-measurement met vaste timestamp/waarde als endpoint niet bereikbaar is
+
+## Rechtspraak
+- `rechtspraak_search_ecli`
+  - gebruikt Rechtspraak zoekfeed en extraheert ECLI
+  - fallback genereert deterministisch ECLI-resultaat met `access_note`
+
 ## Meta router
 - `nl_gov_ask`
   - decodes percent-encoded questions before routing

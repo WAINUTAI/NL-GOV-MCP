@@ -19,6 +19,11 @@ MCP server for Dutch public-sector data sources with both **stdio** and **SSE/HT
   - DUO datasets + schools/exam helpers (multi-query enrichment with helper provenance) + RIO adapter
   - Overheid API register (gated by `OVERHEID_API_KEY`, official API + deterministic HTML scoring fallback)
   - KNMI (gated by `KNMI_API_KEY`, includes discovery attempts for warnings/earthquakes with explicit availability notes)
+  - PDOK/BAG (`pdok_search`, `bag_lookup_address`)
+  - ORI/ODS (`ori_search` with deterministic fallback when endpoints are unstable)
+  - NDW (`ndw_search` with REST/CKAN attempts + fallback)
+  - Luchtmeetnet (`luchtmeetnet_latest`, authless, fallback if API unavailable)
+  - Rechtspraak (`rechtspraak_search_ecli`, XML feed parse + deterministic fallback)
 - Router/meta-tool: `nl_gov_ask` (NL/EN keyword routing with fallback, percent-encoded question decoding, stronger holiday/CBS/API routing)
 
 ## Run

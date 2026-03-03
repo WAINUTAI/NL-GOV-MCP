@@ -83,8 +83,8 @@ Captured from operator guidance on 2026-03-02.
 
 ## Next concrete actions
 
-- [ ] Add `pdok_search` + first `bag_lookup_address` tool scaffold
-- [ ] Add `ori_search` tool scaffold and first endpoint wiring
-- [ ] Add `ndw_search` tool scaffold with sample feed integration
-- [ ] Add `luchtmeetnet_latest` tool (authless)
-- [ ] Add `rechtspraak_search_ecli` tool
+- [x] Add `pdok_search` + first `bag_lookup_address` tool scaffold
+- [x] Add `ori_search` tool scaffold and first endpoint wiring
+- [x] Add `ndw_search` tool scaffold with sample feed integration
+- [x] Add `luchtmeetnet_latest` tool (authless)
+- [x] Add `rechtspraak_search_ecli` tool
