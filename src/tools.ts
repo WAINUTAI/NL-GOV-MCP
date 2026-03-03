@@ -385,11 +385,23 @@ export function registerTools(server: McpServer): void {
     } catch (e) { return toMcpToolPayload(mapSourceError(e, "CBS")); }
   });
 
-  server.registerTool("tweede_kamer_documents", { inputSchema: { query: z.string(), top: z.number().int().min(1).max(config.limits.maxRows).default(25), type: z.string().optional(), date_from: z.string().optional(), date_to: z.string().optional(), ...paginationInputSchema, outputFormat: outputFormatSchema } }, async ({ query, top, type, date_from, date_to, offset, limit, outputFormat }) => {
+  server.registerTool("tweede_kamer_documents", { inputSchema: { query: z.string(), top: z.number().int().min(1).max(config.limits.maxRows).default(25), type: z.string().optional(), date_from: z.string().optional(), date_to: z.string().optional(), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) } }, async ({ query, top, type, date_from, date_to, offset, limit, outputFormat, verbose, dryRun }) => {
     try {
       const effectiveLimit = limit ?? top;
       const fetchRows = Math.min(config.limits.maxRows, Math.max(top, offset + effectiveLimit));
+
+      if (dryRun) {
+        return dryRunPayload({
+          connector: "tweede_kamer",
+          url: `${config.endpoints.tweedeKamer}/Document`,
+          params: { query, top: fetchRows, type, date_from, date_to },
+        });
+      }
+
+      const started = Date.now();
       const out = await tk.searchDocuments({ query, top: fetchRows, type, date_from, date_to });
+      const responseTimeMs = Date.now() - started;
+
       const records = out.items.map((x)=>record("tweedekamer", String(x.Titel ?? x.Onderwerp ?? x.Id ?? "Document"), String(x.Url ?? x.resource_url ?? "https://www.tweedekamer.nl"), x, String(x.Onderwerp ?? ""), String(x.Datum ?? "")));
       const response = buildFormattedResponse({
         summary: `${records.length} Tweede Kamer documenten`,
@@ -399,16 +411,34 @@ export function registerTools(server: McpServer): void {
         offset,
         limit: effectiveLimit,
         total: records.length,
+        verbose: singleConnectorVerbose({
+          enabled: verbose,
+          connector: "tweede_kamer",
+          endpoint: out.endpoint,
+          responseTimeMs,
+        }),
       });
       return toMcpToolPayload(response);
     } catch(e){ return toMcpToolPayload(mapSourceError(e, "Tweede Kamer", "https://www.tweedekamer.nl")); }
   });
 
-  server.registerTool("tweede_kamer_search", { inputSchema: { query: z.string(), entity: z.string().default("Document"), top: z.number().int().min(1).max(config.limits.maxRows).default(25), filter: z.string().optional(), orderby: z.string().optional(), skip: z.number().int().min(0).optional(), ...paginationInputSchema, outputFormat: outputFormatSchema } }, async ({ query, entity, top, filter, orderby, skip, offset, limit, outputFormat }) => {
+  server.registerTool("tweede_kamer_search", { inputSchema: { query: z.string(), entity: z.string().default("Document"), top: z.number().int().min(1).max(config.limits.maxRows).default(25), filter: z.string().optional(), orderby: z.string().optional(), skip: z.number().int().min(0).optional(), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) } }, async ({ query, entity, top, filter, orderby, skip, offset, limit, outputFormat, verbose, dryRun }) => {
     try {
       const effectiveOffset = skip ?? offset;
       const effectiveLimit = limit ?? top;
+
+      if (dryRun) {
+        return dryRunPayload({
+          connector: "tweede_kamer",
+          url: `${config.endpoints.tweedeKamer}/${entity}`,
+          params: { query, top: effectiveLimit, filter, orderby, skip: effectiveOffset },
+        });
+      }
+
+      const started = Date.now();
       const out = await tk.search({ query, entity, top: effectiveLimit, filter, orderby, skip: effectiveOffset });
+      const responseTimeMs = Date.now() - started;
+
       const records = out.items.map((x)=>record("tweedekamer", String(x.Titel ?? x.Onderwerp ?? x.Id ?? "Result"), String(x.Url ?? "https://www.tweedekamer.nl"), x, String(x.Onderwerp ?? ""), String(x.Datum ?? x.GewijzigdOp ?? "")));
       const formatted = applyOutputFormat({ records, outputFormat });
       return toMcpToolPayload(successResponse({
@@ -427,6 +457,12 @@ export function registerTools(server: McpServer): void {
           total: null,
           has_more: records.length >= effectiveLimit,
         },
+        verbose: singleConnectorVerbose({
+          enabled: verbose,
+          connector: "tweede_kamer",
+          endpoint: out.endpoint,
+          responseTimeMs,
+        }),
       }));
     } catch(e){ return toMcpToolPayload(mapSourceError(e, "Tweede Kamer", "https://www.tweedekamer.nl")); }
   });
@@ -497,11 +533,23 @@ export function registerTools(server: McpServer): void {
     try { const out = await rijksbegroting.getChapter(year, chapter); const records = out.items.map((x)=>{ const rec = x as Record<string, unknown>; return record("rijksbegroting", String(rec.name ?? rec.id ?? "Begrotingshoofdstuk"), String(rec.url ?? "https://opendata.rijksbegroting.nl"), rec); }); return toMcpToolPayload(successResponse({ summary: `${records.length} chapter matches`, records, provenance: prov("rijksbegroting_chapter", out.endpoint, out.params, records.length, records.length) })); } catch(e){ return toMcpToolPayload(mapSourceError(e, "Rijksbegroting", "https://opendata.rijksbegroting.nl")); }
   });
 
-  server.registerTool("duo_datasets_search", { inputSchema: { query: z.string(), rows: z.number().int().min(1).max(config.limits.maxRows).default(20), ...paginationInputSchema, outputFormat: outputFormatSchema } }, async ({ query, rows, offset, limit, outputFormat }) => {
+  server.registerTool("duo_datasets_search", { inputSchema: { query: z.string(), rows: z.number().int().min(1).max(config.limits.maxRows).default(20), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) } }, async ({ query, rows, offset, limit, outputFormat, verbose, dryRun }) => {
     try {
       const effectiveLimit = limit ?? rows;
       const fetchRows = Math.min(config.limits.maxRows, Math.max(rows, offset + effectiveLimit));
+
+      if (dryRun) {
+        return dryRunPayload({
+          connector: "duo",
+          url: `${config.endpoints.duoDatasets}/api/3/action/package_search`,
+          params: { q: query, rows: fetchRows },
+        });
+      }
+
+      const started = Date.now();
       const out = await duo.datasetsCatalog(query, fetchRows);
+      const responseTimeMs = Date.now() - started;
+
       const records = out.items.map((x)=>record("duo", String(x.title ?? x.name ?? x.id ?? "DUO dataset"), String(x.url ?? "https://onderwijsdata.duo.nl"), x));
       const response = buildFormattedResponse({
         summary: `${records.length} DUO datasets`,
@@ -511,6 +559,12 @@ export function registerTools(server: McpServer): void {
         offset,
         limit: effectiveLimit,
         total: out.total,
+        verbose: singleConnectorVerbose({
+          enabled: verbose,
+          connector: "duo",
+          endpoint: out.endpoint,
+          responseTimeMs,
+        }),
       });
       return toMcpToolPayload(response);
     } catch(e){ return toMcpToolPayload(mapSourceError(e, "DUO", "https://onderwijsdata.duo.nl")); }
