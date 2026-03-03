@@ -1,6 +1,18 @@
 import type { AppConfig } from "../types.js";
 import { getJson, getText } from "../utils/http.js";
 
+function uniqBy<T>(items: T[], keyFn: (item: T) => string): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const item of items) {
+    const key = keyFn(item);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
+}
+
 export class DuoSource {
   constructor(private readonly config: AppConfig) {}
 
@@ -14,16 +26,49 @@ export class DuoSource {
     return { items, total, endpoint: meta.url, params };
   }
 
+  private async searchCandidates(candidates: string[], top: number) {
+    const cleaned = uniqBy(
+      candidates.map((x) => x.trim()).filter(Boolean),
+      (x) => x.toLowerCase(),
+    ).slice(0, 5);
+
+    const merged: Array<Record<string, unknown>> = [];
+    let endpoint = `${this.config.endpoints.duoDatasets}/api/3/action/package_search`;
+
+    for (const q of cleaned) {
+      const out = await this.datasetsCatalog(q, top);
+      endpoint = out.endpoint;
+      for (const item of out.items) {
+        merged.push({ ...item, helper_query: q });
+      }
+      if (merged.length >= top * 2) break;
+    }
+
+    const deduped = uniqBy(merged, (x) => String(x.id ?? x.name ?? x.title ?? ""));
+    return {
+      items: deduped.slice(0, top),
+      total: deduped.length,
+      endpoint,
+      params: { attempted_queries: cleaned.join(" | "), rows: String(top) },
+    };
+  }
+
   async getSchools(args: {
     name?: string;
     municipality?: string;
     type?: string;
     top: number;
   }) {
-    const query = [args.name, args.municipality, args.type, "school"]
-      .filter(Boolean)
-      .join(" ");
-    return this.datasetsCatalog(query, args.top);
+    const base = [args.name, args.municipality, args.type].filter(Boolean).join(" ").trim();
+    const candidates = [
+      `${base} schoolvestigingen`,
+      `${base} schoollocaties`,
+      `${base} onderwijsinstellingen`,
+      `${base} brin`,
+      `${base} vo mbo hbo`,
+      `${base} school`,
+    ];
+    return this.searchCandidates(candidates, args.top);
   }
 
   async getExamResults(args: {
@@ -32,17 +77,23 @@ export class DuoSource {
     municipality?: string;
     top: number;
   }) {
-    const query = [
-      "exam",
-      "slagingspercentage",
-      args.year ? String(args.year) : undefined,
-      args.school,
-      args.municipality,
+    const base = [
+      args.year ? String(args.year) : "",
+      args.school ?? "",
+      args.municipality ?? "",
     ]
-      .filter(Boolean)
-      .join(" ");
+      .join(" ")
+      .trim();
 
-    return this.datasetsCatalog(query, args.top);
+    const candidates = [
+      `examens voortgezet onderwijs ${base}`,
+      `slagingspercentages ${base}`,
+      `examenresultaten vo ${base}`,
+      `centrale examens ${base}`,
+      `diplomaresultaten ${base}`,
+    ];
+
+    return this.searchCandidates(candidates, args.top);
   }
 
   async rioSearch(query: string, top: number) {
@@ -51,8 +102,6 @@ export class DuoSource {
 
     const { data, meta } = await getText(endpoint, { query: params });
 
-    // Some environments return an SPA HTML shell instead of direct JSON.
-    // Try JSON first; otherwise return a helpful fallback list.
     const trimmed = data.trim();
     if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
       try {

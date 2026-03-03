@@ -14,12 +14,25 @@ function stripTags(html: string): string {
     .trim();
 }
 
-function hasAllTerms(text: string, query: string): boolean {
-  const q = query.trim().toLowerCase();
-  if (!q) return true;
-  const terms = q.split(/\s+/).filter(Boolean);
+function normalizedTerms(query: string): string[] {
+  const stop = new Set(["de", "het", "een", "en", "of", "voor", "van", "api", "apis", "welke", "is", "er"]);
+  return query
+    .toLowerCase()
+    .split(/\s+/)
+    .map((x) => x.trim())
+    .filter((x) => x.length > 1 && !stop.has(x));
+}
+
+function scoreText(text: string, query: string): number {
   const hay = text.toLowerCase();
-  return terms.every((t) => hay.includes(t));
+  const terms = normalizedTerms(query);
+  if (!terms.length) return 0;
+  let score = 0;
+  for (const t of terms) {
+    if (hay.includes(t)) score += 2;
+  }
+  if (hay.includes(query.toLowerCase().trim())) score += 3;
+  return score;
 }
 
 function parseCards(pageHtml: string): Array<Record<string, unknown>> {
@@ -85,26 +98,33 @@ export class ApiRegisterSource {
     ];
 
     for (const endpoint of endpoints) {
-      try {
-        const params = { q: query, limit: String(top) };
-        const { data, meta } = await getJson<Record<string, unknown>>(endpoint, {
-          query: params,
-          headers: {
-            "X-API-Key": this.apiKey,
-            Authorization: this.apiKey,
-          },
-        });
+      const paramVariants: Array<Record<string, string>> = [
+        { q: query, limit: String(top) },
+        { query, limit: String(top) },
+        { search: query, limit: String(top) },
+      ];
 
-        const items =
-          (data.items as Array<Record<string, unknown>> | undefined) ??
-          (data.apis as Array<Record<string, unknown>> | undefined) ??
-          [];
+      for (const params of paramVariants) {
+        try {
+          const { data, meta } = await getJson<Record<string, unknown>>(endpoint, {
+            query: params,
+            headers: {
+              "X-API-Key": this.apiKey,
+              Authorization: this.apiKey,
+            },
+          });
 
-        if (items.length) {
-          return { items, endpoint: meta.url, params };
+          const items =
+            (data.items as Array<Record<string, unknown>> | undefined) ??
+            (data.apis as Array<Record<string, unknown>> | undefined) ??
+            [];
+
+          if (items.length) {
+            return { items, endpoint: meta.url, params };
+          }
+        } catch {
+          // try next variant
         }
-      } catch {
-        // try next endpoint
       }
     }
 
@@ -114,7 +134,7 @@ export class ApiRegisterSource {
   private async fallbackScrape(query: string, top: number) {
     const base = `${this.config.endpoints.apiRegister}/apis`;
     const seen = new Set<string>();
-    const matches: Array<Record<string, unknown>> = [];
+    const scored: Array<{ item: Record<string, unknown>; score: number }> = [];
 
     for (let page = 1; page <= 5; page += 1) {
       const pageUrl = page === 1 ? base : `${base}/pagina/${page}`;
@@ -134,19 +154,26 @@ export class ApiRegisterSource {
         seen.add(url);
 
         const text = `${String(card.name ?? "")} ${String(card.organization ?? "")} ${String(card.description ?? "")} ${String(card.__raw_text ?? "")}`;
-        if (hasAllTerms(text, query)) {
-          const { __raw_text, ...clean } = card;
-          matches.push(clean);
-        }
+        const score = scoreText(text, query);
+        const { __raw_text, ...clean } = card;
+        scored.push({ item: clean, score });
       }
-
-      if (matches.length >= top) break;
     }
 
+    scored.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return String(a.item.name ?? "").localeCompare(String(b.item.name ?? ""));
+    });
+
+    const items = scored
+      .filter((x) => x.score > 0)
+      .slice(0, top)
+      .map((x) => ({ ...x.item, match_score: x.score } as Record<string, unknown>));
+
     return {
-      items: matches.slice(0, top),
-      endpoint: `${base} (html-fallback)` ,
-      params: { q: query, limit: String(top) },
+      items,
+      endpoint: `${base} (html-fallback)`,
+      params: { q: query, limit: String(top), mode: "scored-fallback" },
     };
   }
 
