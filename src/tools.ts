@@ -10,6 +10,11 @@ import { RijksbegrotingSource } from "./sources/rijksbegroting.js";
 import { DuoSource } from "./sources/duo.js";
 import { ApiRegisterSource } from "./sources/api-register.js";
 import { KnmiSource } from "./sources/knmi.js";
+import { PdokSource } from "./sources/pdok.js";
+import { OriSource } from "./sources/ori.js";
+import { NdwSource } from "./sources/ndw.js";
+import { LuchtmeetnetSource } from "./sources/luchtmeetnet.js";
+import { RechtspraakSource } from "./sources/rechtspraak.js";
 import { mapSourceError, nowIso, successResponse, toMcpToolPayload, errorResponse } from "./utils/response.js";
 import type { MCPRecord } from "./types.js";
 
@@ -21,6 +26,11 @@ const bekend = new BekendmakingenSource(config);
 const rijksoverheid = new RijksoverheidSource(config);
 const rijksbegroting = new RijksbegrotingSource(config);
 const duo = new DuoSource(config);
+const pdok = new PdokSource(config);
+const ori = new OriSource(config);
+const ndw = new NdwSource(config);
+const luchtmeetnet = new LuchtmeetnetSource(config);
+const rechtspraak = new RechtspraakSource(config);
 
 function record(source: string, title: string, canonical_url: string, data: Record<string, unknown>, snippet?: string, date?: string): MCPRecord {
   return { source_name: source, title, canonical_url, data, snippet, date };
@@ -203,6 +213,75 @@ export function registerTools(server: McpServer): void {
     const apiKey = process.env[ENV_KEYS.KNMI_API_KEY];
     if (!apiKey) return toMcpToolPayload(errorResponse({ error: "not_configured", message: "KNMI_API_KEY ontbreekt", suggestion: "Set KNMI_API_KEY to use KNMI tools" }));
     try { const out = await new KnmiSource(config, apiKey).earthquakes(top); const records = out.items.map((x)=>record("knmi", String(x.filename ?? x.name ?? "Earthquake file"), "https://developer.dataplatform.knmi.nl", x)); const accessNote = (out as { access_note?: string }).access_note ?? "Requires KNMI_API_KEY"; return toMcpToolPayload(successResponse({ summary: `${records.length} earthquake files`, records, provenance: prov("knmi_earthquakes", out.endpoint, out.params, records.length, records.length), access_note: accessNote })); } catch(e){ return toMcpToolPayload(mapSourceError(e, "KNMI")); }
+  });
+
+  server.registerTool("pdok_search", { inputSchema: { query: z.string(), rows: z.number().int().min(1).max(config.limits.maxRows).default(20) }, description: "Search PDOK Locatieserver (adres/locatie)" }, async ({ query, rows }) => {
+    try {
+      const out = await pdok.search({ query, rows });
+      const records = out.items.map((x) => record("pdok", String(x.weergavenaam ?? x.id ?? "PDOK locatie"), "https://www.pdok.nl", x, String(x.type ?? "")));
+      return toMcpToolPayload(successResponse({ summary: `${records.length} PDOK resultaten`, records, provenance: prov("pdok_search", out.endpoint, out.params, records.length, out.total) }));
+    } catch (e) {
+      return toMcpToolPayload(mapSourceError(e, "PDOK", "https://www.pdok.nl"));
+    }
+  });
+
+  server.registerTool("bag_lookup_address", { inputSchema: { query: z.string().optional(), postcode: z.string().optional(), huisnummer: z.string().optional(), rows: z.number().int().min(1).max(config.limits.maxRows).default(10) }, description: "Lookup BAG address via PDOK locatieserver" }, async ({ query, postcode, huisnummer, rows }) => {
+    if (!query && !postcode) {
+      return toMcpToolPayload(errorResponse({ error: "unexpected", message: "Geef minimaal query of postcode op", suggestion: "Gebruik query='Damrak 1 Amsterdam' of postcode+huisnummer" }));
+    }
+    try {
+      const out = await pdok.bagLookupAddress({ query, postcode, huisnummer, rows });
+      const records = out.items.map((x) => record("bag", String(x.weergavenaam ?? x.id ?? "BAG adres"), "https://www.pdok.nl", x, String(x.straatnaam ?? "")));
+      return toMcpToolPayload(successResponse({ summary: `${records.length} BAG adressen`, records, provenance: prov("bag_lookup_address", out.endpoint, out.params, records.length, out.total) }));
+    } catch {
+      const out = pdok.fallbackAddress({ query, postcode, huisnummer, rows });
+      const records = out.items.map((x) => record("bag", String(x.weergavenaam ?? x.id ?? "BAG adres"), "https://www.pdok.nl", x));
+      return toMcpToolPayload(successResponse({ summary: `${records.length} BAG fallback resultaten`, records, provenance: prov("bag_lookup_address", out.endpoint, out.params, records.length, out.total), access_note: out.access_note }));
+    }
+  });
+
+  server.registerTool("ori_search", { inputSchema: { query: z.string(), rows: z.number().int().min(1).max(config.limits.maxRows).default(20), bestuurslaag: z.string().optional() }, description: "Search Open Raadsinformatie (ORI/ODS)" }, async ({ query, rows, bestuurslaag }) => {
+    try {
+      const out = await ori.search({ query, rows, bestuurslaag });
+      const records = out.items.map((x) => record("ori", String(x.title ?? x.id ?? "ORI item"), String(x.url ?? "https://www.openraadsinformatie.nl"), x, String(x.type ?? ""), String(x.publishedAt ?? "")));
+      return toMcpToolPayload(successResponse({ summary: `${records.length} ORI resultaten`, records, provenance: prov("ori_search", out.endpoint, out.params, records.length, out.total), access_note: (out as { access_note?: string }).access_note }));
+    } catch (e) {
+      return toMcpToolPayload(mapSourceError(e, "ORI", "https://www.openraadsinformatie.nl"));
+    }
+  });
+
+  server.registerTool("ndw_search", { inputSchema: { query: z.string(), rows: z.number().int().min(1).max(config.limits.maxRows).default(20) }, description: "Search NDW open traffic data" }, async ({ query, rows }) => {
+    try {
+      const out = await ndw.search({ query, rows });
+      const records = out.items.map((x) => record("ndw", String(x.title ?? x.id ?? "NDW item"), String(x.url ?? "https://www.ndw.nu"), x, String(x.description ?? ""), String(x.updated_at ?? "")));
+      return toMcpToolPayload(successResponse({ summary: `${records.length} NDW resultaten`, records, provenance: prov("ndw_search", out.endpoint, out.params, records.length, out.total), access_note: (out as { access_note?: string }).access_note }));
+    } catch (e) {
+      return toMcpToolPayload(mapSourceError(e, "NDW", "https://www.ndw.nu"));
+    }
+  });
+
+  server.registerTool("luchtmeetnet_latest", { inputSchema: { component: z.string().optional(), rows: z.number().int().min(1).max(config.limits.maxRows).default(20) }, description: "Fetch latest Luchtmeetnet measurements" }, async ({ component, rows }) => {
+    try {
+      const out = await luchtmeetnet.latest({ component, rows });
+      const records = out.items.map((x) => record("luchtmeetnet", `${String(x.formula ?? "component")}-${String(x.station_name ?? x.station_number ?? "station")}`, "https://www.luchtmeetnet.nl", x, String(x.formula ?? ""), String(x.timestamp_measured ?? "")));
+      return toMcpToolPayload(successResponse({ summary: `${records.length} luchtmeetnet metingen`, records, provenance: prov("luchtmeetnet_latest", out.endpoint, out.params, records.length, out.total) }));
+    } catch {
+      const out = luchtmeetnet.fallback({ component, rows });
+      const records = out.items.map((x) => record("luchtmeetnet", `${String(x.formula ?? "component")}-${String(x.station_name ?? x.station_number ?? "station")}`, "https://www.luchtmeetnet.nl", x, String(x.formula ?? ""), String(x.timestamp_measured ?? "")));
+      return toMcpToolPayload(successResponse({ summary: `${records.length} luchtmeetnet fallback metingen`, records, provenance: prov("luchtmeetnet_latest", out.endpoint, out.params, records.length, out.total), access_note: out.access_note }));
+    }
+  });
+
+  server.registerTool("rechtspraak_search_ecli", { inputSchema: { query: z.string(), rows: z.number().int().min(1).max(config.limits.maxRows).default(20) }, description: "Search Rechtspraak feed and extract ECLI references" }, async ({ query, rows }) => {
+    try {
+      const out = await rechtspraak.searchEcli({ query, rows });
+      const records = out.items.map((x) => record("rechtspraak", String(x.title ?? x.ecli ?? x.id ?? "Rechtspraak uitspraak"), String(x.link ?? x.id ?? "https://data.rechtspraak.nl"), x, String(x.summary ?? x.ecli ?? ""), String(x.updated ?? "")));
+      return toMcpToolPayload(successResponse({ summary: `${records.length} Rechtspraak resultaten`, records, provenance: prov("rechtspraak_search_ecli", out.endpoint, out.params, records.length, out.total) }));
+    } catch {
+      const out = rechtspraak.fallback({ query, rows });
+      const records = out.items.map((x) => record("rechtspraak", String(x.title ?? x.ecli ?? "Fallback uitspraak"), String(x.link ?? x.id ?? "https://data.rechtspraak.nl"), x, String(x.summary ?? ""), String(x.updated ?? "")));
+      return toMcpToolPayload(successResponse({ summary: `${records.length} Rechtspraak fallback resultaten`, records, provenance: prov("rechtspraak_search_ecli", out.endpoint, out.params, records.length, out.total), access_note: out.access_note }));
+    }
   });
 
   server.registerTool("nl_gov_ask", { inputSchema: { question: z.string(), top: z.number().int().min(1).max(config.limits.maxRows).default(10) }, description: "Meta-router for Dutch govt sources" }, async ({ question, top }) => {

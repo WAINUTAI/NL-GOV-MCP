@@ -291,6 +291,48 @@ const cases: CaseDef[] = [
     minRecords: 0,
     requireEnv: ["KNMI_API_KEY"],
   },
+  {
+    id: "pdok_search",
+    description: "PDOK locatieserver search",
+    tool: "pdok_search",
+    args: { query: "den haag", rows: 3 },
+    minRecords: 1,
+  },
+  {
+    id: "bag_lookup",
+    description: "BAG address lookup",
+    tool: "bag_lookup_address",
+    args: { query: "Damrak 1 Amsterdam", rows: 2 },
+    minRecords: 1,
+  },
+  {
+    id: "ori_search",
+    description: "ORI search",
+    tool: "ori_search",
+    args: { query: "woningbouw", rows: 2 },
+    minRecords: 1,
+  },
+  {
+    id: "ndw_search",
+    description: "NDW search",
+    tool: "ndw_search",
+    args: { query: "verkeer", rows: 2 },
+    minRecords: 1,
+  },
+  {
+    id: "luchtmeetnet_latest",
+    description: "Luchtmeetnet latest measurements",
+    tool: "luchtmeetnet_latest",
+    args: { component: "NO2", rows: 2 },
+    minRecords: 1,
+  },
+  {
+    id: "rechtspraak_search_ecli",
+    description: "Rechtspraak ECLI search",
+    tool: "rechtspraak_search_ecli",
+    args: { query: "ECLI:NL:HR:2024", rows: 2 },
+    minRecords: 1,
+  },
   // nl_gov_ask (question-routing)
   {
     id: "ask_cbs",
