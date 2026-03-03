@@ -58,18 +58,36 @@
 
 ## ORI / Open Raadsinformatie
 - `ori_search`
-  - probeert meerdere bekende ORI endpoints
+  - endpoint discovery via ORI Elastic `_search`
+  - extractie van live hits naar `id/title/type/organization/publishedAt/url`
   - bij instabiele endpointtoegang: deterministische fallback met `access_note`
 
 ## NDW
 - `ndw_search`
-  - probeert NDW REST + CKAN endpointvarianten
+  - live discovery op NDW open pages/docs (opendata/docs/dexter)
+  - output genormaliseerd met `id/title/description/updated_at/source/url`
   - fallbackrecord bij onbereikbaarheid/instabiliteit
 
 ## Luchtmeetnet
 - `luchtmeetnet_latest`
   - authless latest measurements
+  - verrijkte output: `location_name/component/value/unit/timestamp` + coordinaten
   - fallback-measurement met vaste timestamp/waarde als endpoint niet bereikbaar is
+
+## RDW
+- `rdw_open_data_search`
+  - live query op RDW open dataset (voertuigen)
+  - zoek op kenteken/merk/handelsbenaming/voertuigsoort
+
+## Rijkswaterstaat Waterdata
+- `rijkswaterstaat_waterdata_search`
+  - live cataloguszoeking via Waterwebservices metadata
+  - resultaten bevatten parameter + eenheid/categorie/hoedanigheid
+
+## Nationaal GeoRegister (NGR)
+- `ngr_discovery_search`
+  - CSW discovery via GetRecords (CQL AnyText)
+  - retourneert metadatarecords met titel + metadata URL
 
 ## Rechtspraak
 - `rechtspraak_search_ecli`

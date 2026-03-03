@@ -85,6 +85,12 @@ Captured from operator guidance on 2026-03-02.
 
 - [x] Add `pdok_search` + first `bag_lookup_address` tool scaffold
 - [x] Add `ori_search` tool scaffold and first endpoint wiring
+- [x] Strengthen `ori_search` with ORI Elastic live extraction
 - [x] Add `ndw_search` tool scaffold with sample feed integration
+- [x] Strengthen `ndw_search` live retrieval path + normalized output
 - [x] Add `luchtmeetnet_latest` tool (authless)
+- [x] Enrich `luchtmeetnet_latest` output fields (location/component/value/unit/timestamp)
+- [x] Add `rdw_open_data_search`
+- [x] Add `rijkswaterstaat_waterdata_search`
+- [x] Add `ngr_discovery_search`
 - [x] Add `rechtspraak_search_ecli` tool

@@ -333,6 +333,27 @@ const cases: CaseDef[] = [
     args: { query: "ECLI:NL:HR:2024", rows: 2 },
     minRecords: 1,
   },
+  {
+    id: "rdw_search",
+    description: "RDW open data search",
+    tool: "rdw_open_data_search",
+    args: { query: "toyota", rows: 2 },
+    minRecords: 1,
+  },
+  {
+    id: "rws_waterdata",
+    description: "RWS waterdata catalog search",
+    tool: "rijkswaterstaat_waterdata_search",
+    args: { query: "water", rows: 2 },
+    minRecords: 1,
+  },
+  {
+    id: "ngr_discovery",
+    description: "NGR metadata discovery",
+    tool: "ngr_discovery_search",
+    args: { query: "bag", rows: 2 },
+    minRecords: 1,
+  },
   // nl_gov_ask (question-routing)
   {
     id: "ask_cbs",

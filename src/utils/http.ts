@@ -230,3 +230,23 @@ export async function getText(
   const data = await response.text();
   return { data, meta };
 }
+
+export async function postJson<T>(
+  url: string,
+  body: unknown,
+  options: RequestOptions = {},
+): Promise<{ data: T; meta: HttpMeta }> {
+  const { response, meta } = await request("POST", url, options, body);
+  try {
+    const data = (await response.json()) as T;
+    return { data, meta };
+  } catch (error) {
+    throw new SourceRequestError({
+      message:
+        error instanceof Error ? error.message : "Failed to parse JSON response",
+      endpoint: meta.url,
+      code: "malformed_response",
+      status: meta.status,
+    });
+  }
+}

@@ -15,6 +15,9 @@ import { OriSource } from "./sources/ori.js";
 import { NdwSource } from "./sources/ndw.js";
 import { LuchtmeetnetSource } from "./sources/luchtmeetnet.js";
 import { RechtspraakSource } from "./sources/rechtspraak.js";
+import { RdwSource } from "./sources/rdw.js";
+import { RijkswaterstaatWaterdataSource } from "./sources/rijkswaterstaat-waterdata.js";
+import { NgrSource } from "./sources/ngr.js";
 import { mapSourceError, nowIso, successResponse, toMcpToolPayload, errorResponse } from "./utils/response.js";
 import type { MCPRecord } from "./types.js";
 
@@ -31,6 +34,9 @@ const ori = new OriSource(config);
 const ndw = new NdwSource(config);
 const luchtmeetnet = new LuchtmeetnetSource(config);
 const rechtspraak = new RechtspraakSource(config);
+const rdw = new RdwSource(config);
+const rwsWaterdata = new RijkswaterstaatWaterdataSource(config);
+const ngr = new NgrSource(config);
 
 function record(source: string, title: string, canonical_url: string, data: Record<string, unknown>, snippet?: string, date?: string): MCPRecord {
   return { source_name: source, title, canonical_url, data, snippet, date };
@@ -263,12 +269,42 @@ export function registerTools(server: McpServer): void {
   server.registerTool("luchtmeetnet_latest", { inputSchema: { component: z.string().optional(), rows: z.number().int().min(1).max(config.limits.maxRows).default(20) }, description: "Fetch latest Luchtmeetnet measurements" }, async ({ component, rows }) => {
     try {
       const out = await luchtmeetnet.latest({ component, rows });
-      const records = out.items.map((x) => record("luchtmeetnet", `${String(x.formula ?? "component")}-${String(x.station_name ?? x.station_number ?? "station")}`, "https://www.luchtmeetnet.nl", x, String(x.formula ?? ""), String(x.timestamp_measured ?? "")));
+      const records = out.items.map((x) => record("luchtmeetnet", `${String(x.formula ?? "component")}-${String(x.station_name ?? x.station_number ?? "station")}`, "https://www.luchtmeetnet.nl", x, `${String(x.component ?? x.formula ?? "")}: ${String(x.value ?? "")} ${String(x.unit ?? "")}`, String(x.timestamp ?? x.timestamp_measured ?? "")));
       return toMcpToolPayload(successResponse({ summary: `${records.length} luchtmeetnet metingen`, records, provenance: prov("luchtmeetnet_latest", out.endpoint, out.params, records.length, out.total) }));
     } catch {
       const out = luchtmeetnet.fallback({ component, rows });
-      const records = out.items.map((x) => record("luchtmeetnet", `${String(x.formula ?? "component")}-${String(x.station_name ?? x.station_number ?? "station")}`, "https://www.luchtmeetnet.nl", x, String(x.formula ?? ""), String(x.timestamp_measured ?? "")));
+      const records = out.items.map((x) => record("luchtmeetnet", `${String(x.formula ?? "component")}-${String(x.station_name ?? x.station_number ?? "station")}`, "https://www.luchtmeetnet.nl", x, `${String(x.component ?? x.formula ?? "")}: ${String(x.value ?? "")} ${String(x.unit ?? "")}`, String(x.timestamp ?? x.timestamp_measured ?? "")));
       return toMcpToolPayload(successResponse({ summary: `${records.length} luchtmeetnet fallback metingen`, records, provenance: prov("luchtmeetnet_latest", out.endpoint, out.params, records.length, out.total), access_note: out.access_note }));
+    }
+  });
+
+  server.registerTool("rdw_open_data_search", { inputSchema: { query: z.string(), rows: z.number().int().min(1).max(config.limits.maxRows).default(20) }, description: "Search RDW open voertuigdata" }, async ({ query, rows }) => {
+    try {
+      const out = await rdw.search({ query, rows });
+      const records = out.items.map((x) => record("rdw", String(x.title ?? x.kenteken ?? x.id ?? "RDW voertuig"), "https://opendata.rdw.nl", x as Record<string, unknown>, String(x.voertuigsoort ?? ""), String(x.updated_at ?? "")));
+      return toMcpToolPayload(successResponse({ summary: `${records.length} RDW resultaten`, records, provenance: prov("rdw_open_data_search", out.endpoint, out.params, records.length, out.total), access_note: (out as { access_note?: string }).access_note }));
+    } catch (e) {
+      return toMcpToolPayload(mapSourceError(e, "RDW", "https://opendata.rdw.nl"));
+    }
+  });
+
+  server.registerTool("rijkswaterstaat_waterdata_search", { inputSchema: { query: z.string(), rows: z.number().int().min(1).max(config.limits.maxRows).default(20) }, description: "Search Rijkswaterstaat waterdata catalog" }, async ({ query, rows }) => {
+    try {
+      const out = await rwsWaterdata.search({ query, rows });
+      const records = out.items.map((x) => record("rijkswaterstaat-waterdata", String(x.title ?? x.id ?? "RWS waterdata"), "https://waterinfo.rws.nl", x as Record<string, unknown>, String(x.category ?? "")));
+      return toMcpToolPayload(successResponse({ summary: `${records.length} RWS waterdata resultaten`, records, provenance: prov("rijkswaterstaat_waterdata_search", out.endpoint, out.params, records.length, out.total), access_note: (out as { access_note?: string }).access_note }));
+    } catch (e) {
+      return toMcpToolPayload(mapSourceError(e, "Rijkswaterstaat Waterdata", "https://waterinfo.rws.nl"));
+    }
+  });
+
+  server.registerTool("ngr_discovery_search", { inputSchema: { query: z.string(), rows: z.number().int().min(1).max(config.limits.maxRows).default(20) }, description: "Search Nationaal GeoRegister metadata via CSW" }, async ({ query, rows }) => {
+    try {
+      const out = await ngr.search({ query, rows });
+      const records = out.items.map((x) => record("ngr", String(x.title ?? x.id ?? "NGR metadata"), String(x.url ?? "https://www.nationaalgeoregister.nl"), x as Record<string, unknown>));
+      return toMcpToolPayload(successResponse({ summary: `${records.length} NGR metadata records`, records, provenance: prov("ngr_discovery_search", out.endpoint, out.params, records.length, out.total), access_note: (out as { access_note?: string }).access_note }));
+    } catch (e) {
+      return toMcpToolPayload(mapSourceError(e, "Nationaal GeoRegister", "https://www.nationaalgeoregister.nl"));
     }
   });
 
