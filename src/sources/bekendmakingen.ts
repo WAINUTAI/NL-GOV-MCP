@@ -45,6 +45,75 @@ function extractMeta(record: Record<string, unknown>) {
 export class BekendmakingenSource {
   constructor(private readonly config: AppConfig) {}
 
+  fallbackSearch(args: {
+    query: string;
+    maximumRecords: number;
+    startRecord?: number;
+    type?: string;
+    authority?: string;
+    date_from?: string;
+    date_to?: string;
+  }) {
+    const slug = (args.query || "zoekterm").toLowerCase().replace(/[^a-z0-9]+/g, "-") || "zoekterm";
+    const identifier = `ob-fallback-${slug}`;
+    const canonicalUrl = `https://zoek.officielebekendmakingen.nl/resultaten?zoekterm=${encodeURIComponent(args.query || "")}`;
+
+    return {
+      items: [
+        {
+          identifier,
+          title: `Fallback bekendmaking voor '${args.query}'`,
+          date: new Date(0).toISOString(),
+          authority: args.authority ?? "fallback",
+          canonical_url: canonicalUrl,
+          publication_type: args.type ?? "fallback",
+          mode: "deterministic-fallback",
+        } satisfies Record<string, unknown>,
+      ].slice(0, Math.max(1, args.maximumRecords)),
+      total: 1,
+      endpoint: `${this.config.endpoints.bekendmakingenSru} (fallback)`,
+      params: {
+        operation: "searchRetrieve",
+        version: "2.0",
+        query: args.query,
+        maximumRecords: String(args.maximumRecords),
+        startRecord: String(args.startRecord ?? 1),
+        recordSchema: "gzd",
+        mode: "deterministic-fallback",
+      } as Record<string, string>,
+      access_note:
+        "Officiële Bekendmakingen endpoint tijdelijk niet bereikbaar; fallbackrecord gebruikt.",
+    };
+  }
+
+  fallbackGet(identifier: string) {
+    const canonicalUrl = `https://zoek.officielebekendmakingen.nl/${identifier}`;
+    return {
+      item: {
+        identifier,
+        title: `Fallback bekendmaking ${identifier}`,
+        date: new Date(0).toISOString(),
+        authority: "fallback",
+        canonical_url: canonicalUrl,
+        publication_type: "fallback",
+        product_area: "officielepublicaties",
+        mode: "deterministic-fallback",
+      } as Record<string, unknown>,
+      endpoint: `${this.config.endpoints.bekendmakingenSru} (fallback)`,
+      params: {
+        operation: "searchRetrieve",
+        version: "2.0",
+        query: `dt.identifier=\"${identifier}\" AND c.product-area=\"officielepublicaties\"`,
+        maximumRecords: "1",
+        startRecord: "1",
+        recordSchema: "gzd",
+        mode: "deterministic-fallback",
+      } as Record<string, string>,
+      access_note:
+        "Officiële Bekendmakingen endpoint tijdelijk niet bereikbaar; fallbackrecord gebruikt.",
+    };
+  }
+
   async search(args: {
     query: string;
     maximumRecords: number;

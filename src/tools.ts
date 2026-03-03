@@ -207,11 +207,29 @@ export function registerTools(server: McpServer): void {
   });
 
   server.registerTool("officiele_bekendmakingen_search", { inputSchema: { query: z.string(), top: z.number().int().min(1).max(100).default(20), startRecord: z.number().int().min(1).default(1), type: z.string().optional(), authority: z.string().optional(), date_from: z.string().optional(), date_to: z.string().optional() } }, async ({ query, top, startRecord, type, authority, date_from, date_to }) => {
-    try { const out = await bekend.search({ query, maximumRecords: top, startRecord, type, authority, date_from, date_to }); const records = out.items.map((x)=>record("officielebekendmakingen", String(x.title ?? x.titel ?? x.identifier ?? "Bekendmaking"), String(x.canonical_url ?? x.identifier ?? x.url ?? "https://zoek.officielebekendmakingen.nl"), x as Record<string, unknown>, String(x.authority ?? ""), String(x.date ?? ""))); return toMcpToolPayload(successResponse({ summary: `${records.length} bekendmakingen`, records, provenance: prov("officiele_bekendmakingen_search", out.endpoint, out.params, records.length, out.total) })); } catch(e){ return toMcpToolPayload(mapSourceError(e, "Officiële Bekendmakingen")); }
+    try {
+      const out = await bekend.search({ query, maximumRecords: top, startRecord, type, authority, date_from, date_to });
+      const records = out.items.map((x)=>record("officielebekendmakingen", String(x.title ?? x.titel ?? x.identifier ?? "Bekendmaking"), String(x.canonical_url ?? x.identifier ?? x.url ?? "https://zoek.officielebekendmakingen.nl"), x as Record<string, unknown>, String(x.authority ?? ""), String(x.date ?? "")));
+      return toMcpToolPayload(successResponse({ summary: `${records.length} bekendmakingen`, records, provenance: prov("officiele_bekendmakingen_search", out.endpoint, out.params, records.length, out.total) }));
+    } catch (e) {
+      const fallback = bekend.fallbackSearch({ query, maximumRecords: top, startRecord, type, authority, date_from, date_to });
+      const records = fallback.items.map((x)=>record("officielebekendmakingen", String(x.title ?? x.identifier ?? "Bekendmaking fallback"), String(x.canonical_url ?? "https://zoek.officielebekendmakingen.nl"), x as Record<string, unknown>, String(x.authority ?? ""), String(x.date ?? "")));
+      return toMcpToolPayload(successResponse({ summary: `${records.length} bekendmakingen (fallback)`, records, provenance: prov("officiele_bekendmakingen_search", fallback.endpoint, fallback.params, records.length, fallback.total), access_note: fallback.access_note }));
+    }
   });
 
   server.registerTool("officiele_bekendmakingen_record_get", { inputSchema: { identifier: z.string() } }, async ({ identifier }) => {
-    try { const out = await bekend.getRecord(identifier); const r = out.item; const records = [record("officielebekendmakingen", String(r.title ?? r.identifier ?? identifier), String(r.canonical_url ?? `https://zoek.officielebekendmakingen.nl/${identifier}`), r, String(r.authority ?? ""), String(r.date ?? ""))]; return toMcpToolPayload(successResponse({ summary: `Bekendmaking ${identifier}`, records, provenance: prov("officiele_bekendmakingen_record_get", out.endpoint, out.params, 1, 1) })); } catch(e){ return toMcpToolPayload(mapSourceError(e, "Officiële Bekendmakingen")); }
+    try {
+      const out = await bekend.getRecord(identifier);
+      const r = out.item;
+      const records = [record("officielebekendmakingen", String(r.title ?? r.identifier ?? identifier), String(r.canonical_url ?? `https://zoek.officielebekendmakingen.nl/${identifier}`), r, String(r.authority ?? ""), String(r.date ?? ""))];
+      return toMcpToolPayload(successResponse({ summary: `Bekendmaking ${identifier}`, records, provenance: prov("officiele_bekendmakingen_record_get", out.endpoint, out.params, 1, 1) }));
+    } catch (e) {
+      const fallback = bekend.fallbackGet(identifier);
+      const r = fallback.item;
+      const records = [record("officielebekendmakingen", String(r.title ?? r.identifier ?? identifier), String(r.canonical_url ?? `https://zoek.officielebekendmakingen.nl/${identifier}`), r, String(r.authority ?? ""), String(r.date ?? ""))];
+      return toMcpToolPayload(successResponse({ summary: `Bekendmaking ${identifier} (fallback)`, records, provenance: prov("officiele_bekendmakingen_record_get", fallback.endpoint, fallback.params, 1, 1), access_note: fallback.access_note }));
+    }
   });
 
   server.registerTool("rijksoverheid_search", { inputSchema: { query: z.string(), top: z.number().int().min(1).max(config.limits.maxRows).default(20), ministry: z.string().optional(), topic: z.string().optional(), date_from: z.string().optional(), date_to: z.string().optional() } }, async ({ query, top, ministry, topic, date_from, date_to }) => {

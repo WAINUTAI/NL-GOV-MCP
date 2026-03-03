@@ -15,21 +15,42 @@ export async function search(query: string): Promise<{
 }> {
   const cfg = loadConfig();
   const src = new BekendmakingenSource(cfg);
-  const out = await src.search({
-    query,
-    maximumRecords: 5,
-    startRecord: 1,
-  });
+  try {
+    const out = await src.search({
+      query,
+      maximumRecords: 5,
+      startRecord: 1,
+    });
 
-  return {
-    data: out.items,
-    citations: [
-      {
-        source: "officiele_bekendmakingen",
-        title: "Officiële Bekendmakingen",
-        url: out.endpoint || "https://zoek.officielebekendmakingen.nl",
-        retrievedAt: new Date().toISOString(),
-      },
-    ],
-  };
+    return {
+      data: out.items,
+      citations: [
+        {
+          source: "officiele_bekendmakingen",
+          title: "Officiële Bekendmakingen",
+          url: out.endpoint || "https://zoek.officielebekendmakingen.nl",
+          retrievedAt: new Date().toISOString(),
+        },
+      ],
+    };
+  } catch {
+    const out = src.fallbackSearch({
+      query,
+      maximumRecords: 1,
+      startRecord: 1,
+    });
+
+    return {
+      data: out.items,
+      citations: [
+        {
+          source: "officiele_bekendmakingen",
+          title: "Officiële Bekendmakingen (fallback)",
+          url: "https://zoek.officielebekendmakingen.nl",
+          retrievedAt: new Date().toISOString(),
+          excerpt: out.access_note,
+        },
+      ],
+    };
+  }
 }
