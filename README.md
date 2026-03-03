@@ -44,6 +44,7 @@ MCP server for Dutch public-sector data sources with both **stdio** and **SSE/HT
 - Unified temporal parser (NL/EN) for natural date ranges (e.g. `vorige week`, `afgelopen maand`, `dit jaar`, `sinds 2020`, `tussen 2018 en 2022`) and connector-level date-filter mapping.
 - Structured output + pagination (first rollout on high-volume tools): optional `outputFormat` (`json|csv|geojson|markdown_table`) and `offset`/`limit` with `pagination` metadata.
 - `nl_gov_ask` now supports `dryRun` (planned calls only, no outbound requests) and `verbose` (request timings, fallback steps, connector health snapshot).
+- `cbs_tables_search`, `cbs_observations`, and `data_overheid_datasets_search` also support `dryRun` + `verbose` for low-cost debugging and reproducibility.
 
 ### Rechtspraak behavior notes
 - `rechtspraak_search_ecli` now mirrors the official frontend search backend (`/api/zoek`) instead of relying on the legacy open-data feed query behavior.

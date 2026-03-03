@@ -79,6 +79,7 @@ function buildFormattedResponse(args: {
   total?: number | null;
   access_note?: string;
   failures?: NonNullable<ReturnType<typeof successResponse>["failures"]>;
+  verbose?: Record<string, unknown>;
 }) {
   const paged = paginateRecords(args.records, {
     offset: args.offset,
@@ -96,7 +97,64 @@ function buildFormattedResponse(args: {
     formatted_output: formatted.formatted_output,
     access_note: mergeAccessNotes(args.access_note, formatted.access_note),
     failures: args.failures,
+    verbose: args.verbose,
   });
+}
+
+function dryRunPayload(args: {
+  connector: string;
+  url: string;
+  params: Record<string, unknown>;
+}): { content: Array<{ type: "text"; text: string }>; structuredContent: Record<string, unknown> } {
+  const payload = {
+    dry_run: true,
+    planned_requests: [
+      {
+        connector: args.connector,
+        method: "GET",
+        url: args.url,
+        params: args.params,
+      },
+    ],
+    estimated_sources: [args.connector],
+    cache_status: [
+      {
+        connector: args.connector,
+        cache_policy: "hardcoded-ttl",
+      },
+    ],
+  };
+
+  return {
+    content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
+    structuredContent: payload,
+  };
+}
+
+function singleConnectorVerbose(args: {
+  enabled: boolean;
+  connector: string;
+  endpoint: string;
+  responseTimeMs: number;
+}): Record<string, unknown> | undefined {
+  if (!args.enabled) return undefined;
+
+  return {
+    requests: [
+      {
+        connector: args.connector,
+        request_url: args.endpoint,
+        request_method: "GET",
+        response_time_ms: args.responseTimeMs,
+        cache_hit: null,
+        cache_ttl_remaining_s: null,
+      },
+    ],
+    fallbacks_used: [],
+    connector_health: {
+      [args.connector]: getConnectorHealth(args.connector),
+    },
+  };
 }
 
 function getRecordIdentifier(rec: MCPRecord): string | undefined {
@@ -172,17 +230,34 @@ function dedupeMergedRecords(records: MCPRecord[]): MCPRecord[] {
 export function registerTools(server: McpServer): void {
   server.registerTool("data_overheid_datasets_search", {
     description: "Search datasets on data.overheid.nl",
-    inputSchema: { query: z.string(), rows: z.number().int().min(1).max(config.limits.maxRows).default(config.limits.defaultRows), organization: z.string().optional(), theme: z.string().optional(), ...paginationInputSchema, outputFormat: outputFormatSchema },
+    inputSchema: { query: z.string(), rows: z.number().int().min(1).max(config.limits.maxRows).default(config.limits.defaultRows), organization: z.string().optional(), theme: z.string().optional(), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) },
   }, async (args) => {
     try {
       const effectiveLimit = args.limit ?? args.rows;
       const fetchRows = Math.min(config.limits.maxRows, Math.max(args.rows, args.offset + effectiveLimit));
+
+      if (args.dryRun) {
+        return dryRunPayload({
+          connector: "data_overheid",
+          url: `${config.endpoints.dataOverheid}/package_search`,
+          params: {
+            q: args.query,
+            rows: fetchRows,
+            organization: args.organization,
+            theme: args.theme,
+          },
+        });
+      }
+
+      const started = Date.now();
       const out = await dataOverheid.datasetsSearch({
         query: args.query,
         rows: fetchRows,
         organization: args.organization,
         theme: args.theme,
       });
+      const responseTimeMs = Date.now() - started;
+
       const records = out.items.map((d) => record("data.overheid.nl", String(d.title ?? d.id), `https://data.overheid.nl/dataset/${d.id}`, d as unknown as Record<string, unknown>, d.notes, d.metadata_modified));
       const response = buildFormattedResponse({
         summary: `${records.length} datasets gevonden`,
@@ -192,6 +267,12 @@ export function registerTools(server: McpServer): void {
         offset: args.offset,
         limit: effectiveLimit,
         total: out.total,
+        verbose: singleConnectorVerbose({
+          enabled: args.verbose,
+          connector: "data_overheid",
+          endpoint: out.endpoint,
+          responseTimeMs,
+        }),
       });
       return toMcpToolPayload(response);
     } catch (e) { return toMcpToolPayload(mapSourceError(e, "data.overheid.nl", "https://data.overheid.nl")); }
@@ -222,11 +303,23 @@ export function registerTools(server: McpServer): void {
     } catch (e) { return toMcpToolPayload(mapSourceError(e, "data.overheid.nl")); }
   });
 
-  server.registerTool("cbs_tables_search", { inputSchema: { query: z.string(), top: z.number().int().min(1).max(config.limits.maxRows).default(20), ...paginationInputSchema, outputFormat: outputFormatSchema } }, async ({ query, top, offset, limit, outputFormat }) => {
+  server.registerTool("cbs_tables_search", { inputSchema: { query: z.string(), top: z.number().int().min(1).max(config.limits.maxRows).default(20), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) } }, async ({ query, top, offset, limit, outputFormat, verbose, dryRun }) => {
     try {
       const effectiveLimit = limit ?? top;
       const fetchRows = Math.min(config.limits.maxRows, Math.max(top, offset + effectiveLimit));
+
+      if (dryRun) {
+        return dryRunPayload({
+          connector: "cbs",
+          url: `${config.endpoints.cbsV4}/Datasets`,
+          params: { query, top: fetchRows },
+        });
+      }
+
+      const started = Date.now();
       const out = await cbs.searchTables(query, fetchRows);
+      const responseTimeMs = Date.now() - started;
+
       const records = out.items.map((x) => record("cbs", String(x.Title ?? x.title ?? x.Identifier ?? "CBS tabel"), `https://www.cbs.nl`, x));
       const response = buildFormattedResponse({
         summary: `${records.length} CBS tabellen`,
@@ -236,6 +329,12 @@ export function registerTools(server: McpServer): void {
         offset,
         limit: effectiveLimit,
         total: records.length,
+        verbose: singleConnectorVerbose({
+          enabled: verbose,
+          connector: "cbs",
+          endpoint: out.endpoint,
+          responseTimeMs,
+        }),
       });
       return toMcpToolPayload(response);
     } catch (e) { return toMcpToolPayload(mapSourceError(e, "CBS", "https://www.cbs.nl")); }
@@ -249,11 +348,23 @@ export function registerTools(server: McpServer): void {
     } catch (e) { return toMcpToolPayload(mapSourceError(e, "CBS")); }
   });
 
-  server.registerTool("cbs_observations", { inputSchema: { tableId: z.string(), top: z.number().int().min(1).max(config.limits.maxRows).default(50), select: z.array(z.string()).optional(), filters: z.record(z.string(), z.any()).optional(), ...paginationInputSchema, outputFormat: outputFormatSchema } }, async ({ tableId, top, select, filters, offset, limit, outputFormat }) => {
+  server.registerTool("cbs_observations", { inputSchema: { tableId: z.string(), top: z.number().int().min(1).max(config.limits.maxRows).default(50), select: z.array(z.string()).optional(), filters: z.record(z.string(), z.any()).optional(), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) } }, async ({ tableId, top, select, filters, offset, limit, outputFormat, verbose, dryRun }) => {
     try {
       const effectiveLimit = limit ?? top;
       const fetchRows = Math.min(config.limits.maxRows, Math.max(top, offset + effectiveLimit));
+
+      if (dryRun) {
+        return dryRunPayload({
+          connector: "cbs",
+          url: `${config.endpoints.cbsV4}/${tableId}/Observations`,
+          params: { top: fetchRows, select: select ?? [], filters: filters ?? {} },
+        });
+      }
+
+      const started = Date.now();
       const out = await cbs.getObservations({ tableId, top: fetchRows, select, filters: filters as Record<string, string | number | boolean | Array<string | number | boolean>> | undefined });
+      const responseTimeMs = Date.now() - started;
+
       const records = out.items.map((x) => record("cbs", `Observatie ${tableId}`, `https://opendata.cbs.nl/#/CBS/nl/dataset/${tableId}`, x));
       const response = buildFormattedResponse({
         summary: `${records.length} observaties`,
@@ -263,6 +374,12 @@ export function registerTools(server: McpServer): void {
         offset,
         limit: effectiveLimit,
         total: records.length,
+        verbose: singleConnectorVerbose({
+          enabled: verbose,
+          connector: "cbs",
+          endpoint: out.endpoint,
+          responseTimeMs,
+        }),
       });
       return toMcpToolPayload(response);
     } catch (e) { return toMcpToolPayload(mapSourceError(e, "CBS")); }
