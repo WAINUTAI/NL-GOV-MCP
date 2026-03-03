@@ -117,3 +117,9 @@ docker run --rm -p 3333:3333 nl-gov-mcp
 ```
 
 See `docs/SOURCES.md`, `docs/TOOLS.md`, and `docs/BACKLOG-SOURCES.md`.
+
+## License
+This project is licensed under the Apache License 2.0.
+
+- License text: [LICENSE](./LICENSE)
+- Additional notices: [NOTICE](./NOTICE)
