@@ -11,15 +11,15 @@ MCP server for Dutch public-sector data sources with both **stdio** and **SSE/HT
 - Graceful error mapping (`timeout`, `http_error`, `rate_limited`, `malformed_response`, `not_configured`, `unexpected`)
 - Source connectors:
   - data.overheid.nl
-  - CBS (v4 with v3 + catalog fallback)
+  - CBS (v4 with v3 + data.overheid catalog fallback; multi-endpoint observation fallback)
   - Tweede Kamer (documents/search/document/votes/members)
   - Officiële Bekendmakingen (SRU XML search + record lookup)
   - Rijksoverheid (search/document/topics/ministries/schoolholidays)
   - Rijksbegroting (search + chapter helper)
-  - DUO datasets + schools/exam helpers + RIO adapter
-  - Overheid API register (gated by `OVERHEID_API_KEY`)
-  - KNMI (gated by `KNMI_API_KEY`)
-- Router/meta-tool: `nl_gov_ask` (NL/EN keyword routing with fallback)
+  - DUO datasets + schools/exam helpers (multi-query enrichment with helper provenance) + RIO adapter
+  - Overheid API register (gated by `OVERHEID_API_KEY`, official API + deterministic HTML scoring fallback)
+  - KNMI (gated by `KNMI_API_KEY`, includes discovery attempts for warnings/earthquakes with explicit availability notes)
+- Router/meta-tool: `nl_gov_ask` (NL/EN keyword routing with fallback, percent-encoded question decoding, stronger holiday/CBS/API routing)
 
 ## Run
 ```bash
