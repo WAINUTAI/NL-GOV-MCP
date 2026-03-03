@@ -70,6 +70,35 @@ SSE endpoints:
 - `POST /messages?sessionId=...`
 - `GET /health`
 
+## Claude Desktop integration (stdio)
+You can run this MCP directly from Claude Desktop after cloning/building.
+
+1. Build the project:
+```bash
+npm ci
+npm run build
+```
+2. Add an MCP server entry in Claude Desktop config using the built entrypoint:
+   - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+   - Windows: `%APPDATA%\\Claude\\claude_desktop_config.json`
+
+Example:
+```json
+{
+  "mcpServers": {
+    "nl-gov-mcp": {
+      "command": "node",
+      "args": ["/absolute/path/to/NL-GOV-MCP/dist/src/index.js"],
+      "env": {
+        "OVERHEID_API_KEY": "...",
+        "KNMI_API_KEY": "..."
+      }
+    }
+  }
+}
+```
+3. Restart Claude Desktop.
+
 ## Env vars
 - `NL_GOV_HTTP_PORT` (default `3333`)
 - `KNMI_API_KEY` (required for KNMI tools)
