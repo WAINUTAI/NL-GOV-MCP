@@ -18,6 +18,10 @@ import { RechtspraakSource } from "./sources/rechtspraak.js";
 import { RdwSource } from "./sources/rdw.js";
 import { RijkswaterstaatWaterdataSource } from "./sources/rijkswaterstaat-waterdata.js";
 import { NgrSource } from "./sources/ngr.js";
+import { RivmSource } from "./sources/rivm.js";
+import { SparqlLinkedDataSource, SPARQL_LIMIT_CAP } from "./sources/sparql-linked-data.js";
+import { EurostatSource } from "./sources/eurostat.js";
+import { DataEuropaSource } from "./sources/data-europa.js";
 import { mapSourceError, nowIso, successResponse, toMcpToolPayload, errorResponse } from "./utils/response.js";
 import type { MCPRecord } from "./types.js";
 
@@ -37,6 +41,11 @@ const rechtspraak = new RechtspraakSource(config);
 const rdw = new RdwSource(config);
 const rwsWaterdata = new RijkswaterstaatWaterdataSource(config);
 const ngr = new NgrSource(config);
+const rivm = new RivmSource(config);
+const bagLinkedData = new SparqlLinkedDataSource(config, "https://data.labs.kadaster.nl/bag/sparql", "Kadaster BAG Linked Data");
+const rceLinkedData = new SparqlLinkedDataSource(config, "https://linkeddata.cultureelerfgoed.nl/sparql", "RCE Linked Data");
+const eurostat = new EurostatSource(config);
+const dataEuropa = new DataEuropaSource(config);
 
 function record(source: string, title: string, canonical_url: string, data: Record<string, unknown>, snippet?: string, date?: string): MCPRecord {
   return { source_name: source, title, canonical_url, data, snippet, date };
@@ -280,11 +289,19 @@ export function registerTools(server: McpServer): void {
 
   server.registerTool("rdw_open_data_search", { inputSchema: { query: z.string(), rows: z.number().int().min(1).max(config.limits.maxRows).default(20) }, description: "Search RDW open voertuigdata" }, async ({ query, rows }) => {
     try {
-      const out = await rdw.search({ query, rows });
-      const records = out.items.map((x) => record("rdw", String(x.title ?? x.kenteken ?? x.id ?? "RDW voertuig"), "https://opendata.rdw.nl", x as Record<string, unknown>, String(x.voertuigsoort ?? ""), String(x.updated_at ?? "")));
-      return toMcpToolPayload(successResponse({ summary: `${records.length} RDW resultaten`, records, provenance: prov("rdw_open_data_search", out.endpoint, out.params, records.length, out.total), access_note: (out as { access_note?: string }).access_note }));
-    } catch (e) {
-      return toMcpToolPayload(mapSourceError(e, "RDW", "https://opendata.rdw.nl"));
+      const live = await rdw.search({ query, rows });
+      if (live.items.length) {
+        const records = live.items.map((x) => record("rdw", String(x.title ?? x.kenteken ?? x.id ?? "RDW voertuig"), "https://opendata.rdw.nl", x as Record<string, unknown>, String(x.voertuigsoort ?? ""), String(x.updated_at ?? "")));
+        return toMcpToolPayload(successResponse({ summary: `${records.length} RDW resultaten`, records, provenance: prov("rdw_open_data_search", live.endpoint, live.params, records.length, live.total), access_note: (live as { access_note?: string }).access_note }));
+      }
+
+      const out = rdw.fallback({ query, rows });
+      const records = out.items.map((x) => record("rdw", String(x.title ?? x.id ?? "RDW voertuig"), "https://opendata.rdw.nl", x as Record<string, unknown>, String(x.voertuigsoort ?? ""), String(x.updated_at ?? "")));
+      return toMcpToolPayload(successResponse({ summary: `${records.length} RDW fallback resultaten`, records, provenance: prov("rdw_open_data_search", out.endpoint, out.params, records.length, out.total), access_note: out.access_note }));
+    } catch {
+      const out = rdw.fallback({ query, rows });
+      const records = out.items.map((x) => record("rdw", String(x.title ?? x.id ?? "RDW voertuig"), "https://opendata.rdw.nl", x as Record<string, unknown>, String(x.voertuigsoort ?? ""), String(x.updated_at ?? "")));
+      return toMcpToolPayload(successResponse({ summary: `${records.length} RDW fallback resultaten`, records, provenance: prov("rdw_open_data_search", out.endpoint, out.params, records.length, out.total), access_note: out.access_note }));
     }
   });
 
@@ -317,6 +334,76 @@ export function registerTools(server: McpServer): void {
       const out = rechtspraak.fallback({ query, rows });
       const records = out.items.map((x) => record("rechtspraak", String(x.title ?? x.ecli ?? "Fallback uitspraak"), String(x.link ?? x.id ?? "https://data.rechtspraak.nl"), x, String(x.summary ?? ""), String(x.updated ?? "")));
       return toMcpToolPayload(successResponse({ summary: `${records.length} Rechtspraak fallback resultaten`, records, provenance: prov("rechtspraak_search_ecli", out.endpoint, out.params, records.length, out.total), access_note: out.access_note }));
+    }
+  });
+
+  server.registerTool("rivm_discovery_search", { inputSchema: { query: z.string(), rows: z.number().int().min(1).max(config.limits.maxRows).default(20) }, description: "Search/discover RIVM public API/dataset references" }, async ({ query, rows }) => {
+    try {
+      const out = await rivm.search({ query, rows });
+      const records = out.items.map((x) => record("rivm", String(x.title ?? x.id ?? "RIVM item"), String(x.url ?? "https://www.rivm.nl"), x as Record<string, unknown>, String(x.description ?? ""), String(x.updated_at ?? "")));
+      return toMcpToolPayload(successResponse({ summary: `${records.length} RIVM discovery resultaten`, records, provenance: prov("rivm_discovery_search", out.endpoint, out.params, records.length, out.total), access_note: (out as { access_note?: string }).access_note }));
+    } catch {
+      const out = rivm.fallback({ query, rows });
+      const records = out.items.map((x) => record("rivm", String(x.title ?? x.id ?? "RIVM item"), String(x.url ?? "https://www.rivm.nl"), x as Record<string, unknown>, String(x.description ?? ""), String(x.updated_at ?? "")));
+      return toMcpToolPayload(successResponse({ summary: `${records.length} RIVM fallback resultaten`, records, provenance: prov("rivm_discovery_search", out.endpoint, out.params, records.length, out.total), access_note: out.access_note }));
+    }
+  });
+
+  server.registerTool("bag_linked_data_select", { inputSchema: { query: z.string(), limit: z.number().int().min(1).max(SPARQL_LIMIT_CAP).default(25) }, description: "Read-only SELECT query on Kadaster BAG linked data (SPARQL, guarded)" }, async ({ query, limit }) => {
+    try {
+      const out = await bagLinkedData.select({ query, limit });
+      const records = out.items.map((x, i) => record("bag-linked-data", `BAG row ${i + 1}`, "https://data.labs.kadaster.nl/bag/sparql", x, out.safeQuery));
+      return toMcpToolPayload(successResponse({ summary: `${records.length} BAG linked-data rows`, records, provenance: prov("bag_linked_data_select", out.endpoint, out.params, records.length, out.total), access_note: (out as { access_note?: string }).access_note }));
+    } catch (e) {
+      if (e instanceof Error && /SELECT|toegestaan|keyword/i.test(e.message)) {
+        return toMcpToolPayload(errorResponse({ error: "unexpected", message: e.message, suggestion: "Gebruik een read-only SELECT query met een kleine LIMIT" }));
+      }
+      const out = bagLinkedData.fallback({ query, limit });
+      const records = out.items.map((x, i) => record("bag-linked-data", `BAG fallback row ${i + 1}`, "https://data.labs.kadaster.nl/bag/sparql", x, String(x.note ?? "")));
+      return toMcpToolPayload(successResponse({ summary: `${records.length} BAG linked-data fallback rows`, records, provenance: prov("bag_linked_data_select", out.endpoint, out.params, records.length, out.total), access_note: out.access_note }));
+    }
+  });
+
+  server.registerTool("rce_linked_data_select", { inputSchema: { query: z.string(), limit: z.number().int().min(1).max(SPARQL_LIMIT_CAP).default(25) }, description: "Read-only SELECT query on RCE linked data (SPARQL, guarded)" }, async ({ query, limit }) => {
+    try {
+      const out = await rceLinkedData.select({ query, limit });
+      const records = out.items.map((x, i) => record("rce-linked-data", `RCE row ${i + 1}`, "https://linkeddata.cultureelerfgoed.nl/sparql", x, out.safeQuery));
+      return toMcpToolPayload(successResponse({ summary: `${records.length} RCE linked-data rows`, records, provenance: prov("rce_linked_data_select", out.endpoint, out.params, records.length, out.total), access_note: (out as { access_note?: string }).access_note }));
+    } catch (e) {
+      if (e instanceof Error && /SELECT|toegestaan|keyword/i.test(e.message)) {
+        return toMcpToolPayload(errorResponse({ error: "unexpected", message: e.message, suggestion: "Gebruik een read-only SELECT query met een kleine LIMIT" }));
+      }
+      const out = rceLinkedData.fallback({ query, limit });
+      const records = out.items.map((x, i) => record("rce-linked-data", `RCE fallback row ${i + 1}`, "https://linkeddata.cultureelerfgoed.nl/sparql", x, String(x.note ?? "")));
+      return toMcpToolPayload(successResponse({ summary: `${records.length} RCE linked-data fallback rows`, records, provenance: prov("rce_linked_data_select", out.endpoint, out.params, records.length, out.total), access_note: out.access_note }));
+    }
+  });
+
+  server.registerTool("eurostat_datasets_search", { inputSchema: { query: z.string(), rows: z.number().int().min(1).max(config.limits.maxRows).default(10) }, description: "Eurostat dataset finder (deterministic catalog helper)" }, async ({ query, rows }) => {
+    const out = eurostat.searchFallback({ query, rows });
+    const records = out.items.map((x) => record("eurostat", String(x.title ?? x.id ?? "Eurostat dataset"), String(x.url ?? "https://ec.europa.eu/eurostat"), x as Record<string, unknown>));
+    return toMcpToolPayload(successResponse({ summary: `${records.length} Eurostat dataset suggesties`, records, provenance: prov("eurostat_datasets_search", out.endpoint, out.params, records.length, out.total), access_note: out.access_note }));
+  });
+
+  server.registerTool("eurostat_dataset_preview", { inputSchema: { dataset: z.string(), rows: z.number().int().min(1).max(config.limits.maxRows).default(10), filters: z.record(z.string(), z.string()).optional() }, description: "Fetch preview observations from a Eurostat dataset code" }, async ({ dataset, rows, filters }) => {
+    try {
+      const out = await eurostat.previewDataset({ dataset, rows, filters });
+      const records = out.items.map((x) => record("eurostat", `${dataset}:${String(x.observation_key ?? "obs")}`, `https://ec.europa.eu/eurostat/databrowser/view/${encodeURIComponent(dataset)}/default/table?lang=en`, x as Record<string, unknown>, String(x.value ?? ""), String(x.updated ?? "")));
+      return toMcpToolPayload(successResponse({ summary: `${records.length} Eurostat observaties`, records, provenance: prov("eurostat_dataset_preview", out.endpoint, out.params, records.length, out.total), access_note: (out as { access_note?: string }).access_note }));
+    } catch (e) {
+      return toMcpToolPayload(mapSourceError(e, "Eurostat", "https://ec.europa.eu/eurostat"));
+    }
+  });
+
+  server.registerTool("data_europa_datasets_search", { inputSchema: { query: z.string(), rows: z.number().int().min(1).max(config.limits.maxRows).default(10) }, description: "Search datasets on data.europa.eu CKAN API" }, async ({ query, rows }) => {
+    try {
+      const out = await dataEuropa.datasetsSearch({ query, rows });
+      const records = out.items.map((x) => record("data-europa", String(x.title ?? x.id ?? "Dataset"), String(x.url ?? "https://data.europa.eu/data"), x as Record<string, unknown>, String(x.notes ?? ""), String(x.metadata_modified ?? "")));
+      return toMcpToolPayload(successResponse({ summary: `${records.length} data.europa.eu datasets`, records, provenance: prov("data_europa_datasets_search", out.endpoint, out.params, records.length, out.total), access_note: (out as { access_note?: string }).access_note }));
+    } catch {
+      const out = dataEuropa.fallback({ query, rows });
+      const records = out.items.map((x) => record("data-europa", String(x.title ?? x.id ?? "Dataset"), String(x.url ?? "https://data.europa.eu/data"), x as Record<string, unknown>, String(x.notes ?? ""), String(x.metadata_modified ?? "")));
+      return toMcpToolPayload(successResponse({ summary: `${records.length} data.europa.eu fallback datasets`, records, provenance: prov("data_europa_datasets_search", out.endpoint, out.params, records.length, out.total), access_note: out.access_note }));
     }
   });
 

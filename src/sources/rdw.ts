@@ -14,6 +14,26 @@ const RDW_ENDPOINT = "https://opendata.rdw.nl/resource/m9d7-ebf2.json";
 export class RdwSource {
   constructor(private readonly config: AppConfig) {}
 
+  fallback(args: { query: string; rows: number }) {
+    const slug = args.query.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    return {
+      items: [
+        {
+          id: `rdw-fallback-${slug}`,
+          title: `RDW fallback voor '${args.query}'`,
+          url: "https://opendata.rdw.nl/",
+          updated_at: "1970-01-01T00:00:00Z",
+          voertuigsoort: "onbekend",
+          source: "fallback",
+        },
+      ].slice(0, args.rows),
+      total: 1,
+      endpoint: `${RDW_ENDPOINT} (fallback)`,
+      params: { $limit: String(args.rows) },
+      access_note: "Geen live RDW match of endpoint instabiliteit; fallbackrecord gebruikt.",
+    };
+  }
+
   async search(args: { query: string; rows: number }) {
     const params = { $limit: String(Math.min(args.rows * 5, 100)), $order: "datum_tenaamstelling DESC" };
     const { data, meta } = await getJson<RdwRecord[]>(RDW_ENDPOINT, { query: params, timeoutMs: 15_000 });
