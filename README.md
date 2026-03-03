@@ -1,6 +1,55 @@
 # NL-GOV-MCP
 
-MCP server for Dutch public-sector data sources with both **stdio** and **SSE/HTTP** transport.
+Dutch public-sector data is scattered across many sources that do not natively work together. CBS does not know what Tweede Kamer publishes. BAG does not know what DUO knows. Rechtspraak is disconnected from Rijksbegroting.
+
+`NL-GOV-MCP` connects what the Dutch government has not connected itself: **one interface, many sources, one question, one answer — with provenance**.
+
+It is an open-source [Model Context Protocol](https://modelcontextprotocol.io/) server that lets AI assistants search, combine, and return data from Dutch public-sector sources. Built by [WAiNuT](https://wainut.ai), a one-stop AI shop in the Netherlands (AI Recruitment, AI Consulting & Implementation, AI & Data Training).
+
+## What can you do with this?
+
+Ask in plain Dutch or English. The server routes to the right sources, retrieves data, and returns structured results with source traceability.
+
+Examples:
+- *"Hoeveel sociale huurwoningen zijn er gebouwd in Rotterdam sinds 2020?"* → combines relevant housing/statistics sources
+- *"Wat heeft de Tweede Kamer besloten over stikstof afgelopen maand?"* → parliamentary search with temporal parsing
+- *"Welke basisschool in Tilburg scoort het best?"* → DUO-related dataset/search helpers
+- *"Toon alle rechtspraak over huurrecht dit jaar"* → Rechtspraak search with date-aware mapping
+- *"Wat is de luchtkwaliteit in Utrecht?"* → live Luchtmeetnet retrieval
+- *"Geef me de rijksbegroting voor onderwijs"* → Rijksbegroting search + chapter navigation
+
+## How is this different from data.overheid.nl?
+
+`data.overheid.nl` is primarily a catalog that tells you where data lives.
+
+`NL-GOV-MCP` actively retrieves and normalizes data across many sources, can combine cross-source results, and returns a consistent MCP response contract ready for assistants and automations.
+
+## Sources
+
+| Source | What it covers |
+|---|---|
+| CBS | Statistics Netherlands (demographics, economy, housing, labour; v4/v3 + fallback) |
+| Tweede Kamer | Parliamentary documents, search, voting records, member info |
+| Officiële Bekendmakingen | Official publications (SRU/XML search + lookup) |
+| Rijksoverheid | National government search, docs, topics, ministries, school holidays |
+| Rijksbegroting | National budget data + chapter helper |
+| DUO | Education datasets + school/exam helpers + RIO adapter |
+| data.overheid.nl | National open data catalog (CKAN) |
+| Overheid API register | API directory (requires `OVERHEID_API_KEY`) |
+| KNMI | Weather datasets/files, warnings, earthquakes (requires `KNMI_API_KEY`) |
+| PDOK / BAG | Geospatial search and BAG address registry |
+| Rechtspraak | Court rulings via official `uitspraken.rechtspraak.nl` search backend |
+| RDW | Vehicle open data |
+| Luchtmeetnet | Live air quality measurements |
+| Rijkswaterstaat | Water data catalog |
+| NDW | Traffic discovery/metadata |
+| ORI | Open Raadsinformatie discovery |
+| NGR | National Geo Register (CSW metadata) |
+| RIVM | Public-health discovery |
+| Kadaster BAG (Linked Data) | SPARQL access to building/address linked data |
+| RCE (Linked Data) | SPARQL access to cultural heritage linked data |
+| Eurostat | EU statistics search + preview |
+| data.europa.eu | EU open data catalog |
 
 ## Features
 - MCP tools with consistent response contract:
