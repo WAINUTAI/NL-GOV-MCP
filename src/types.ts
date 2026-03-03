@@ -26,6 +26,14 @@ export interface MCPToolResponse {
     error_type: MCPErrorCode;
     message: string;
   }>;
+  pagination?: {
+    offset: number;
+    limit: number;
+    total: number | null;
+    has_more: boolean;
+  };
+  output_format?: "json" | "csv" | "geojson" | "markdown_table";
+  formatted_output?: string | Record<string, unknown>;
 }
 
 export type MCPErrorCode =

@@ -16,6 +16,9 @@ export function successResponse(args: {
   provenance: MCPToolResponse["provenance"];
   access_note?: string;
   failures?: MCPToolResponse["failures"];
+  pagination?: MCPToolResponse["pagination"];
+  output_format?: MCPToolResponse["output_format"];
+  formatted_output?: MCPToolResponse["formatted_output"];
 }): MCPToolResponse {
   return {
     summary: args.summary,
@@ -23,6 +26,9 @@ export function successResponse(args: {
     provenance: args.provenance,
     access_note: args.access_note,
     failures: args.failures,
+    pagination: args.pagination,
+    output_format: args.output_format,
+    formatted_output: args.formatted_output,
   };
 }
 

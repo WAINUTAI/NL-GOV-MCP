@@ -24,6 +24,7 @@ import { EurostatSource } from "./sources/eurostat.js";
 import { DataEuropaSource } from "./sources/data-europa.js";
 import { mapSourceError, nowIso, successResponse, toMcpToolPayload, errorResponse } from "./utils/response.js";
 import { parseTemporalRange } from "./utils/temporal.js";
+import { applyOutputFormat, paginateRecords, type OutputFormat } from "./utils/output-format.js";
 import type { MCPRecord } from "./types.js";
 
 const config = loadConfig();
@@ -54,6 +55,47 @@ function record(source: string, title: string, canonical_url: string, data: Reco
 
 function prov(tool: string, endpoint: string, query_params: Record<string, string>, returned_results: number, total_results?: number) {
   return { tool, endpoint, query_params, timestamp: nowIso(), returned_results, total_results };
+}
+
+const outputFormatSchema = z.enum(["json", "csv", "geojson", "markdown_table"]).default("json");
+const paginationInputSchema = {
+  offset: z.number().int().min(0).default(0),
+  limit: z.number().int().min(1).max(config.limits.maxRows).optional(),
+};
+
+function mergeAccessNotes(...notes: Array<string | undefined>): string | undefined {
+  const clean = notes.map((n) => (n ?? "").trim()).filter(Boolean);
+  return clean.length ? clean.join(" ") : undefined;
+}
+
+function buildFormattedResponse(args: {
+  summary: string;
+  records: MCPRecord[];
+  provenance: ReturnType<typeof prov>;
+  outputFormat: OutputFormat;
+  offset: number;
+  limit: number;
+  total?: number | null;
+  access_note?: string;
+  failures?: NonNullable<ReturnType<typeof successResponse>["failures"]>;
+}) {
+  const paged = paginateRecords(args.records, {
+    offset: args.offset,
+    limit: args.limit,
+    total: args.total === undefined ? args.records.length : args.total,
+  });
+  const formatted = applyOutputFormat({ records: paged.page, outputFormat: args.outputFormat });
+
+  return successResponse({
+    summary: args.summary,
+    records: paged.page,
+    provenance: args.provenance,
+    pagination: paged.pagination,
+    output_format: formatted.output_format,
+    formatted_output: formatted.formatted_output,
+    access_note: mergeAccessNotes(args.access_note, formatted.access_note),
+    failures: args.failures,
+  });
 }
 
 function getRecordIdentifier(rec: MCPRecord): string | undefined {
@@ -129,12 +171,28 @@ function dedupeMergedRecords(records: MCPRecord[]): MCPRecord[] {
 export function registerTools(server: McpServer): void {
   server.registerTool("data_overheid_datasets_search", {
     description: "Search datasets on data.overheid.nl",
-    inputSchema: { query: z.string(), rows: z.number().int().min(1).max(config.limits.maxRows).default(config.limits.defaultRows), organization: z.string().optional(), theme: z.string().optional() },
+    inputSchema: { query: z.string(), rows: z.number().int().min(1).max(config.limits.maxRows).default(config.limits.defaultRows), organization: z.string().optional(), theme: z.string().optional(), ...paginationInputSchema, outputFormat: outputFormatSchema },
   }, async (args) => {
     try {
-      const out = await dataOverheid.datasetsSearch(args);
+      const effectiveLimit = args.limit ?? args.rows;
+      const fetchRows = Math.min(config.limits.maxRows, Math.max(args.rows, args.offset + effectiveLimit));
+      const out = await dataOverheid.datasetsSearch({
+        query: args.query,
+        rows: fetchRows,
+        organization: args.organization,
+        theme: args.theme,
+      });
       const records = out.items.map((d) => record("data.overheid.nl", String(d.title ?? d.id), `https://data.overheid.nl/dataset/${d.id}`, d as unknown as Record<string, unknown>, d.notes, d.metadata_modified));
-      return toMcpToolPayload(successResponse({ summary: `${records.length} datasets gevonden`, records, provenance: prov("data_overheid_datasets_search", out.endpoint, out.query, records.length, out.total) }));
+      const response = buildFormattedResponse({
+        summary: `${records.length} datasets gevonden`,
+        records,
+        provenance: prov("data_overheid_datasets_search", out.endpoint, out.query, Math.min(effectiveLimit, Math.max(0, records.length - args.offset)), out.total),
+        outputFormat: args.outputFormat,
+        offset: args.offset,
+        limit: effectiveLimit,
+        total: out.total,
+      });
+      return toMcpToolPayload(response);
     } catch (e) { return toMcpToolPayload(mapSourceError(e, "data.overheid.nl", "https://data.overheid.nl")); }
   });
 
@@ -163,11 +221,22 @@ export function registerTools(server: McpServer): void {
     } catch (e) { return toMcpToolPayload(mapSourceError(e, "data.overheid.nl")); }
   });
 
-  server.registerTool("cbs_tables_search", { inputSchema: { query: z.string(), top: z.number().int().min(1).max(config.limits.maxRows).default(20) } }, async ({ query, top }) => {
+  server.registerTool("cbs_tables_search", { inputSchema: { query: z.string(), top: z.number().int().min(1).max(config.limits.maxRows).default(20), ...paginationInputSchema, outputFormat: outputFormatSchema } }, async ({ query, top, offset, limit, outputFormat }) => {
     try {
-      const out = await cbs.searchTables(query, top);
+      const effectiveLimit = limit ?? top;
+      const fetchRows = Math.min(config.limits.maxRows, Math.max(top, offset + effectiveLimit));
+      const out = await cbs.searchTables(query, fetchRows);
       const records = out.items.map((x) => record("cbs", String(x.Title ?? x.title ?? x.Identifier ?? "CBS tabel"), `https://www.cbs.nl`, x));
-      return toMcpToolPayload(successResponse({ summary: `${records.length} CBS tabellen`, records, provenance: prov("cbs_tables_search", out.endpoint, out.params, records.length, records.length) }));
+      const response = buildFormattedResponse({
+        summary: `${records.length} CBS tabellen`,
+        records,
+        provenance: prov("cbs_tables_search", out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), records.length),
+        outputFormat,
+        offset,
+        limit: effectiveLimit,
+        total: records.length,
+      });
+      return toMcpToolPayload(response);
     } catch (e) { return toMcpToolPayload(mapSourceError(e, "CBS", "https://www.cbs.nl")); }
   });
 
@@ -179,20 +248,69 @@ export function registerTools(server: McpServer): void {
     } catch (e) { return toMcpToolPayload(mapSourceError(e, "CBS")); }
   });
 
-  server.registerTool("cbs_observations", { inputSchema: { tableId: z.string(), top: z.number().int().min(1).max(config.limits.maxRows).default(50), select: z.array(z.string()).optional(), filters: z.record(z.string(), z.any()).optional() } }, async ({ tableId, top, select, filters }) => {
+  server.registerTool("cbs_observations", { inputSchema: { tableId: z.string(), top: z.number().int().min(1).max(config.limits.maxRows).default(50), select: z.array(z.string()).optional(), filters: z.record(z.string(), z.any()).optional(), ...paginationInputSchema, outputFormat: outputFormatSchema } }, async ({ tableId, top, select, filters, offset, limit, outputFormat }) => {
     try {
-      const out = await cbs.getObservations({ tableId, top, select, filters: filters as Record<string, string | number | boolean | Array<string | number | boolean>> | undefined });
+      const effectiveLimit = limit ?? top;
+      const fetchRows = Math.min(config.limits.maxRows, Math.max(top, offset + effectiveLimit));
+      const out = await cbs.getObservations({ tableId, top: fetchRows, select, filters: filters as Record<string, string | number | boolean | Array<string | number | boolean>> | undefined });
       const records = out.items.map((x) => record("cbs", `Observatie ${tableId}`, `https://opendata.cbs.nl/#/CBS/nl/dataset/${tableId}`, x));
-      return toMcpToolPayload(successResponse({ summary: `${records.length} observaties`, records, provenance: prov("cbs_observations", out.endpoint, out.params, records.length, records.length) }));
+      const response = buildFormattedResponse({
+        summary: `${records.length} observaties`,
+        records,
+        provenance: prov("cbs_observations", out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), records.length),
+        outputFormat,
+        offset,
+        limit: effectiveLimit,
+        total: records.length,
+      });
+      return toMcpToolPayload(response);
     } catch (e) { return toMcpToolPayload(mapSourceError(e, "CBS")); }
   });
 
-  server.registerTool("tweede_kamer_documents", { inputSchema: { query: z.string(), top: z.number().int().min(1).max(config.limits.maxRows).default(25), type: z.string().optional(), date_from: z.string().optional(), date_to: z.string().optional() } }, async ({ query, top, type, date_from, date_to }) => {
-    try { const out = await tk.searchDocuments({ query, top, type, date_from, date_to }); const records = out.items.map((x)=>record("tweedekamer", String(x.Titel ?? x.Onderwerp ?? x.Id ?? "Document"), String(x.Url ?? x.resource_url ?? "https://www.tweedekamer.nl"), x, String(x.Onderwerp ?? ""), String(x.Datum ?? ""))); return toMcpToolPayload(successResponse({ summary: `${records.length} Tweede Kamer documenten`, records, provenance: prov("tweede_kamer_documents", out.endpoint, out.params, records.length, records.length) })); } catch(e){ return toMcpToolPayload(mapSourceError(e, "Tweede Kamer", "https://www.tweedekamer.nl")); }
+  server.registerTool("tweede_kamer_documents", { inputSchema: { query: z.string(), top: z.number().int().min(1).max(config.limits.maxRows).default(25), type: z.string().optional(), date_from: z.string().optional(), date_to: z.string().optional(), ...paginationInputSchema, outputFormat: outputFormatSchema } }, async ({ query, top, type, date_from, date_to, offset, limit, outputFormat }) => {
+    try {
+      const effectiveLimit = limit ?? top;
+      const fetchRows = Math.min(config.limits.maxRows, Math.max(top, offset + effectiveLimit));
+      const out = await tk.searchDocuments({ query, top: fetchRows, type, date_from, date_to });
+      const records = out.items.map((x)=>record("tweedekamer", String(x.Titel ?? x.Onderwerp ?? x.Id ?? "Document"), String(x.Url ?? x.resource_url ?? "https://www.tweedekamer.nl"), x, String(x.Onderwerp ?? ""), String(x.Datum ?? "")));
+      const response = buildFormattedResponse({
+        summary: `${records.length} Tweede Kamer documenten`,
+        records,
+        provenance: prov("tweede_kamer_documents", out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), records.length),
+        outputFormat,
+        offset,
+        limit: effectiveLimit,
+        total: records.length,
+      });
+      return toMcpToolPayload(response);
+    } catch(e){ return toMcpToolPayload(mapSourceError(e, "Tweede Kamer", "https://www.tweedekamer.nl")); }
   });
 
-  server.registerTool("tweede_kamer_search", { inputSchema: { query: z.string(), entity: z.string().default("Document"), top: z.number().int().min(1).max(config.limits.maxRows).default(25), filter: z.string().optional(), orderby: z.string().optional(), skip: z.number().int().min(0).optional() } }, async ({ query, entity, top, filter, orderby, skip }) => {
-    try { const out = await tk.search({ query, entity, top, filter, orderby, skip }); const records = out.items.map((x)=>record("tweedekamer", String(x.Titel ?? x.Onderwerp ?? x.Id ?? "Result"), String(x.Url ?? "https://www.tweedekamer.nl"), x, String(x.Onderwerp ?? ""), String(x.Datum ?? x.GewijzigdOp ?? ""))); return toMcpToolPayload(successResponse({ summary: `${records.length} Tweede Kamer records`, records, provenance: prov("tweede_kamer_search", out.endpoint, out.params, records.length, records.length) })); } catch(e){ return toMcpToolPayload(mapSourceError(e, "Tweede Kamer", "https://www.tweedekamer.nl")); }
+  server.registerTool("tweede_kamer_search", { inputSchema: { query: z.string(), entity: z.string().default("Document"), top: z.number().int().min(1).max(config.limits.maxRows).default(25), filter: z.string().optional(), orderby: z.string().optional(), skip: z.number().int().min(0).optional(), ...paginationInputSchema, outputFormat: outputFormatSchema } }, async ({ query, entity, top, filter, orderby, skip, offset, limit, outputFormat }) => {
+    try {
+      const effectiveOffset = skip ?? offset;
+      const effectiveLimit = limit ?? top;
+      const out = await tk.search({ query, entity, top: effectiveLimit, filter, orderby, skip: effectiveOffset });
+      const records = out.items.map((x)=>record("tweedekamer", String(x.Titel ?? x.Onderwerp ?? x.Id ?? "Result"), String(x.Url ?? "https://www.tweedekamer.nl"), x, String(x.Onderwerp ?? ""), String(x.Datum ?? x.GewijzigdOp ?? "")));
+      const formatted = applyOutputFormat({ records, outputFormat });
+      return toMcpToolPayload(successResponse({
+        summary: `${records.length} Tweede Kamer records`,
+        records,
+        provenance: prov("tweede_kamer_search", out.endpoint, out.params, records.length, records.length),
+        output_format: formatted.output_format,
+        formatted_output: formatted.formatted_output,
+        access_note: mergeAccessNotes(
+          "Upstream paging toegepast via skip/top; pagination.total kan bronafhankelijk ontbreken.",
+          formatted.access_note,
+        ),
+        pagination: {
+          offset: effectiveOffset,
+          limit: effectiveLimit,
+          total: null,
+          has_more: records.length >= effectiveLimit,
+        },
+      }));
+    } catch(e){ return toMcpToolPayload(mapSourceError(e, "Tweede Kamer", "https://www.tweedekamer.nl")); }
   });
 
   server.registerTool("tweede_kamer_document_get", { inputSchema: { id: z.string() } }, async ({ id }) => {
@@ -261,8 +379,23 @@ export function registerTools(server: McpServer): void {
     try { const out = await rijksbegroting.getChapter(year, chapter); const records = out.items.map((x)=>{ const rec = x as Record<string, unknown>; return record("rijksbegroting", String(rec.name ?? rec.id ?? "Begrotingshoofdstuk"), String(rec.url ?? "https://opendata.rijksbegroting.nl"), rec); }); return toMcpToolPayload(successResponse({ summary: `${records.length} chapter matches`, records, provenance: prov("rijksbegroting_chapter", out.endpoint, out.params, records.length, records.length) })); } catch(e){ return toMcpToolPayload(mapSourceError(e, "Rijksbegroting", "https://opendata.rijksbegroting.nl")); }
   });
 
-  server.registerTool("duo_datasets_search", { inputSchema: { query: z.string(), rows: z.number().int().min(1).max(config.limits.maxRows).default(20) } }, async ({ query, rows }) => {
-    try { const out = await duo.datasetsCatalog(query, rows); const records = out.items.map((x)=>record("duo", String(x.title ?? x.name ?? x.id ?? "DUO dataset"), String(x.url ?? "https://onderwijsdata.duo.nl"), x)); return toMcpToolPayload(successResponse({ summary: `${records.length} DUO datasets`, records, provenance: prov("duo_datasets_search", out.endpoint, out.params, records.length, out.total) })); } catch(e){ return toMcpToolPayload(mapSourceError(e, "DUO", "https://onderwijsdata.duo.nl")); }
+  server.registerTool("duo_datasets_search", { inputSchema: { query: z.string(), rows: z.number().int().min(1).max(config.limits.maxRows).default(20), ...paginationInputSchema, outputFormat: outputFormatSchema } }, async ({ query, rows, offset, limit, outputFormat }) => {
+    try {
+      const effectiveLimit = limit ?? rows;
+      const fetchRows = Math.min(config.limits.maxRows, Math.max(rows, offset + effectiveLimit));
+      const out = await duo.datasetsCatalog(query, fetchRows);
+      const records = out.items.map((x)=>record("duo", String(x.title ?? x.name ?? x.id ?? "DUO dataset"), String(x.url ?? "https://onderwijsdata.duo.nl"), x));
+      const response = buildFormattedResponse({
+        summary: `${records.length} DUO datasets`,
+        records,
+        provenance: prov("duo_datasets_search", out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), out.total),
+        outputFormat,
+        offset,
+        limit: effectiveLimit,
+        total: out.total,
+      });
+      return toMcpToolPayload(response);
+    } catch(e){ return toMcpToolPayload(mapSourceError(e, "DUO", "https://onderwijsdata.duo.nl")); }
   });
 
   server.registerTool("duo_schools", { inputSchema: { name: z.string().optional(), municipality: z.string().optional(), type: z.string().optional(), top: z.number().int().min(1).max(config.limits.maxRows).default(20) } }, async ({ name, municipality, type, top }) => {
@@ -496,7 +629,7 @@ export function registerTools(server: McpServer): void {
     }
   });
 
-  server.registerTool("nl_gov_ask", { inputSchema: { question: z.string(), top: z.number().int().min(1).max(config.limits.maxRows).default(10) }, description: "Meta-router for Dutch govt sources" }, async ({ question, top }) => {
+  server.registerTool("nl_gov_ask", { inputSchema: { question: z.string(), top: z.number().int().min(1).max(config.limits.maxRows).default(10), ...paginationInputSchema, outputFormat: outputFormatSchema }, description: "Meta-router for Dutch govt sources" }, async ({ question, top, offset, limit, outputFormat }) => {
     const decodedQuestion = (() => {
       try { return decodeURIComponent(question.replace(/\+/g, " ")); } catch { return question; }
     })();
@@ -519,6 +652,29 @@ export function registerTools(server: McpServer): void {
     };
 
     const makeCbsQuery = (input: string): string => makeKeywordQuery(input, 6);
+    const effectiveLimit = limit ?? top;
+
+    const askSuccess = (args: {
+      summary: string;
+      records: MCPRecord[];
+      provenance: ReturnType<typeof prov>;
+      access_note?: string;
+      failures?: NonNullable<ReturnType<typeof successResponse>["failures"]>;
+      total?: number | null;
+    }) =>
+      toMcpToolPayload(
+        buildFormattedResponse({
+          summary: args.summary,
+          records: args.records,
+          provenance: args.provenance,
+          outputFormat,
+          offset,
+          limit: effectiveLimit,
+          total: args.total,
+          access_note: args.access_note,
+          failures: args.failures,
+        }),
+      );
 
     const cbsTerms = ["cbs", "statistiek", "statistics", "bevolking", "population", "inwoners", "inflatie", "werkloos", "woning", "inkomen", "economie", "bbp", "gdp", "import", "export", "geboorte", "sterfte", "opleidingsniveau", "opleiding", "onderwijsniveau", "emissie", "emissies"];
     const tkTerms = ["tweede kamer", "parlement", "motie", "moties", "amendement", "kamerstuk", "kamervraag", "debat", "stemming", "fractie", "commissie", "wetsvoorstel", "kamerlid", "mp"];
@@ -727,7 +883,7 @@ export function registerTools(server: McpServer): void {
             notes.push(`Deduplicated ${dedupedCount} duplicate records by identifier.`);
           }
 
-          return toMcpToolPayload(successResponse({
+          return askSuccess({
             summary: `Router: multi-source (${mergedRecords.length} resultaten uit ${successfulConnectors.length} bronnen)`,
             records: mergedRecords,
             provenance: prov(
@@ -742,7 +898,8 @@ export function registerTools(server: McpServer): void {
             ),
             access_note: notes.length ? notes.join(" ") : undefined,
             failures: failures.length ? failures : undefined,
-          }));
+            total: mergedRecords.length,
+          });
         }
 
         if (failures.length) {
@@ -773,13 +930,13 @@ export function registerTools(server: McpServer): void {
 
         const records = out.items.map((x)=>record("rijksoverheid", String(x.title ?? x.region ?? "Schoolvakantie"), String(x.canonical ?? "https://www.rijksoverheid.nl"), x, String(x.region ?? ""), String(x.startdate ?? "")));
         if (records.length) {
-          return toMcpToolPayload(successResponse({ summary: `Router: Rijksoverheid schoolvakanties (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, records.length) }));
+          return askSuccess({ summary: `Router: Rijksoverheid schoolvakanties (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, records.length), total: records.length });
         }
 
         const rijkOut = await rijksoverheid.search({ query: "schoolvakantie", top });
         const rijkRecords = rijkOut.items.map((x)=>record("rijksoverheid", String(x.title ?? x.id ?? "Rijksoverheid"), String(x.canonical ?? x.url ?? "https://www.rijksoverheid.nl"), x));
         if (rijkRecords.length) {
-          return toMcpToolPayload(successResponse({ summary: `Router: Rijksoverheid (${rijkRecords.length} resultaten)`, records: rijkRecords, provenance: prov("nl_gov_ask", rijkOut.endpoint, rijkOut.params, rijkRecords.length, rijkOut.total) }));
+          return askSuccess({ summary: `Router: Rijksoverheid (${rijkRecords.length} resultaten)`, records: rijkRecords, provenance: prov("nl_gov_ask", rijkOut.endpoint, rijkOut.params, rijkRecords.length, rijkOut.total), total: rijkOut.total });
         }
       }
 
@@ -813,7 +970,7 @@ export function registerTools(server: McpServer): void {
                 const obsOut = await cbs.getObservations({ tableId: bestTableId, top });
                 const obsRecords = obsOut.items.map((x) => record("cbs", `Observatie ${bestTableId}`, `https://opendata.cbs.nl/#/CBS/nl/dataset/${bestTableId}`, x));
                 if (obsRecords.length) {
-                  return toMcpToolPayload(successResponse({ summary: `Router: CBS observaties (${obsRecords.length} resultaten)`, records: obsRecords, provenance: prov("nl_gov_ask", obsOut.endpoint, obsOut.params, obsRecords.length, obsRecords.length) }));
+                  return askSuccess({ summary: `Router: CBS observaties (${obsRecords.length} resultaten)`, records: obsRecords, provenance: prov("nl_gov_ask", obsOut.endpoint, obsOut.params, obsRecords.length, obsRecords.length), total: obsRecords.length });
                 }
               } catch {
                 // fall through to table-level response
@@ -822,7 +979,7 @@ export function registerTools(server: McpServer): void {
           }
 
           const records = sorted.slice(0, top).map((x) => record("cbs", String(x.Title ?? x.Identifier ?? "CBS"), "https://www.cbs.nl", x));
-          return toMcpToolPayload(successResponse({ summary: `Router: CBS (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, items.length) }));
+          return askSuccess({ summary: `Router: CBS (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, items.length), total: items.length });
         }
       }
 
@@ -844,7 +1001,7 @@ export function registerTools(server: McpServer): void {
         }
 
         if (records.length) {
-          return toMcpToolPayload(successResponse({ summary: `Router: Tweede Kamer (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, records.length) }));
+          return askSuccess({ summary: `Router: Tweede Kamer (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, records.length), total: records.length });
         }
       }
 
@@ -852,7 +1009,7 @@ export function registerTools(server: McpServer): void {
         const out = await bekend.search({ query: questionForSearch, maximumRecords: top, date_from: temporal?.from, date_to: temporal?.to });
         const records = out.items.map((x)=>record("officielebekendmakingen", String(x.title ?? x.identifier ?? "Bekendmaking"), String(x.canonical_url ?? x.identifier ?? "https://zoek.officielebekendmakingen.nl"), x as Record<string, unknown>));
         if (records.length) {
-          return toMcpToolPayload(successResponse({ summary: `Router: Bekendmakingen (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total) }));
+          return askSuccess({ summary: `Router: Bekendmakingen (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), total: out.total });
         }
       }
 
@@ -867,7 +1024,7 @@ export function registerTools(server: McpServer): void {
         }
 
         if (records.length) {
-          return toMcpToolPayload(successResponse({ summary: `Router: Rijksoverheid (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total) }));
+          return askSuccess({ summary: `Router: Rijksoverheid (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), total: out.total });
         }
       }
 
@@ -876,7 +1033,7 @@ export function registerTools(server: McpServer): void {
         const out = await rijksbegroting.search(budgetQuery, top);
         const records = out.items.map((x)=>record("rijksbegroting", String(x.name ?? x.id ?? "Rijksbegroting"), String(x.url ?? "https://opendata.rijksbegroting.nl"), x));
         if (records.length) {
-          return toMcpToolPayload(successResponse({ summary: `Router: Rijksbegroting (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total) }));
+          return askSuccess({ summary: `Router: Rijksbegroting (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), total: out.total });
         }
       }
 
@@ -885,7 +1042,7 @@ export function registerTools(server: McpServer): void {
         const out = await duo.datasetsCatalog(duoQuery, top);
         const records = out.items.map((x)=>record("duo", String(x.title ?? x.name ?? x.id ?? "DUO"), String(x.url ?? "https://onderwijsdata.duo.nl"), x));
         if (records.length) {
-          return toMcpToolPayload(successResponse({ summary: `Router: DUO (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total) }));
+          return askSuccess({ summary: `Router: DUO (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), total: out.total });
         }
       }
 
@@ -902,13 +1059,13 @@ export function registerTools(server: McpServer): void {
         const out = await new ApiRegisterSource(config, apiKey).search(apiQuery, top);
         const records = out.items.map((x)=>record("api-register", String(x.name ?? x.title ?? x.id ?? "API"), String(x.portalUrl ?? x.url ?? "https://apis.developer.overheid.nl"), x));
         if (records.length) {
-          return toMcpToolPayload(successResponse({ summary: `Router: API Register (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, records.length), access_note: "Requires OVERHEID_API_KEY" }));
+          return askSuccess({ summary: `Router: API Register (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, records.length), access_note: "Requires OVERHEID_API_KEY", total: records.length });
         }
       }
 
       const out = await dataOverheid.datasetsSearch({ query: questionForSearch, rows: top });
       const records = out.items.map((d) => record("data.overheid.nl", String(d.title ?? d.id), `https://data.overheid.nl/dataset/${d.id}`, d as unknown as Record<string, unknown>, d.notes, d.metadata_modified));
-      return toMcpToolPayload(successResponse({ summary: `Router fallback: data.overheid (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.query, records.length, out.total) }));
+      return askSuccess({ summary: `Router fallback: data.overheid (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.query, records.length, out.total), total: out.total });
     } catch (e) {
       return toMcpToolPayload(mapSourceError(e, "nl_gov_ask"));
     }
