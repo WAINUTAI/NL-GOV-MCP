@@ -26,7 +26,7 @@ MCP server for Dutch public-sector data sources with both **stdio** and **SSE/HT
   - RDW (`rdw_open_data_search`, live voertuig open data)
   - Rijkswaterstaat Waterdata (`rijkswaterstaat_waterdata_search`, live catalog metadata)
   - NGR (`ngr_discovery_search`, live CSW metadata discovery)
-  - Rechtspraak (`rechtspraak_search_ecli`, XML feed parse + deterministic fallback)
+  - Rechtspraak (`rechtspraak_search_ecli`, official `uitspraken.rechtspraak.nl/api/zoek` integration with normalized records + deterministic no-match fallback)
   - RIVM (`rivm_discovery_search`, discovery-first with deterministic fallback)
   - Linked Data/SPARQL:
     - Kadaster BAG (`bag_linked_data_select`, SELECT-only + LIMIT guardrails + fallback)
@@ -35,6 +35,13 @@ MCP server for Dutch public-sector data sources with both **stdio** and **SSE/HT
     - Eurostat (`eurostat_datasets_search`, `eurostat_dataset_preview`)
     - data.europa.eu CKAN (`data_europa_datasets_search`)
 - Router/meta-tool: `nl_gov_ask` (NL/EN keyword routing with fallback, percent-encoded question decoding, stronger holiday/CBS/API routing)
+
+### Rechtspraak behavior notes
+- `rechtspraak_search_ecli` now mirrors the official frontend search backend (`/api/zoek`) instead of relying on the legacy open-data feed query behavior.
+- Date/publication filters can be inferred from natural-language hints in `query`, e.g.:
+  - `tot 1 maand geleden` → publicatie-range `BinnenEenMaand` (frontend `pd2` equivalent)
+  - `heel 2026` / `dit jaar` → publicatie-range `DitJaar` (frontend `pd3` equivalent)
+- Response includes facet-driven context in `access_note` when filters are applied (e.g. `BinnenEenMaand=7`, `DitJaar=24`) for frontend parity checks.
 
 ## Run
 ```bash
