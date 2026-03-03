@@ -55,6 +55,76 @@ function prov(tool: string, endpoint: string, query_params: Record<string, strin
   return { tool, endpoint, query_params, timestamp: nowIso(), returned_results, total_results };
 }
 
+function getRecordIdentifier(rec: MCPRecord): string | undefined {
+  const data = (rec.data ?? {}) as Record<string, unknown>;
+  const keys = ["ecli", "document_id", "cbs_table_id", "bwb_id", "url", "identifier", "id"];
+  for (const key of keys) {
+    const value = data[key];
+    if (typeof value === "string" && value.trim()) {
+      return `${key}:${value.trim().toLowerCase()}`;
+    }
+  }
+  if (rec.canonical_url) return `canonical:${rec.canonical_url.toLowerCase()}`;
+  return undefined;
+}
+
+function metadataScore(rec: MCPRecord): number {
+  const data = (rec.data ?? {}) as Record<string, unknown>;
+  let score = Object.keys(data).length;
+  if (rec.snippet) score += 2;
+  if (rec.date) score += 1;
+  if (rec.title) score += 1;
+  if (rec.canonical_url) score += 1;
+  return score;
+}
+
+function dedupeMergedRecords(records: MCPRecord[]): MCPRecord[] {
+  const byId = new Map<string, MCPRecord>();
+  const passthrough: MCPRecord[] = [];
+
+  for (const rec of records) {
+    const id = getRecordIdentifier(rec);
+    if (!id) {
+      passthrough.push(rec);
+      continue;
+    }
+
+    const current = byId.get(id);
+    if (!current) {
+      byId.set(id, { ...rec, data: { ...(rec.data ?? {}) } });
+      continue;
+    }
+
+    const currentScore = metadataScore(current);
+    const nextScore = metadataScore(rec);
+    const keep = nextScore > currentScore ? { ...rec, data: { ...(rec.data ?? {}) } } : current;
+    const drop = keep === current ? rec : current;
+
+    const keepData = (keep.data ?? {}) as Record<string, unknown>;
+    const existing = Array.isArray(keepData.also_found_in)
+      ? (keepData.also_found_in as Array<Record<string, unknown>>)
+      : [];
+
+    const relation = {
+      source_name: drop.source_name,
+      canonical_url: drop.canonical_url,
+    };
+
+    const already = existing.some(
+      (x) =>
+        String(x.source_name ?? "") === relation.source_name &&
+        String(x.canonical_url ?? "") === relation.canonical_url,
+    );
+
+    keepData.also_found_in = already ? existing : [...existing, relation];
+    keep.data = keepData;
+
+    byId.set(id, keep);
+  }
+
+  return [...byId.values(), ...passthrough];
+}
+
 export function registerTools(server: McpServer): void {
   server.registerTool("data_overheid_datasets_search", {
     description: "Search datasets on data.overheid.nl",
@@ -429,7 +499,7 @@ export function registerTools(server: McpServer): void {
 
     const makeCbsQuery = (input: string): string => makeKeywordQuery(input, 6);
 
-    const cbsTerms = ["cbs", "statistiek", "statistics", "bevolking", "population", "inwoners", "inflatie", "werkloos", "woning", "inkomen", "economie", "bbp", "gdp", "import", "export", "geboorte", "sterfte", "opleidingsniveau", "opleiding", "onderwijsniveau"];
+    const cbsTerms = ["cbs", "statistiek", "statistics", "bevolking", "population", "inwoners", "inflatie", "werkloos", "woning", "inkomen", "economie", "bbp", "gdp", "import", "export", "geboorte", "sterfte", "opleidingsniveau", "opleiding", "onderwijsniveau", "emissie", "emissies"];
     const tkTerms = ["tweede kamer", "parlement", "motie", "moties", "amendement", "kamerstuk", "kamervraag", "debat", "stemming", "fractie", "commissie", "wetsvoorstel", "kamerlid", "mp"];
     const obTerms = ["staatsblad", "staatscourant", "tractatenblad", "gemeenteblad", "bekendmaking", "verordening", "regeling", "officieel besluit", "stcrt", "gmb"];
     const rijkTerms = ["rijksoverheid", "kabinet", "minister", "ministerie", "beleid", "toespraak", "schoolvakantie", "schoolvakanties", "school holiday", "school holidays", "vakantie regio"];
@@ -454,6 +524,197 @@ export function registerTools(server: McpServer): void {
     };
 
     try {
+      const likelyBudget = has(budgetTerms) || ((q.includes("hoeveel geeft") || q.includes("how much does")) && q.includes("uit"));
+      const multiIntentSignal = /(combineer|gecombineerd|vergel(?:ijk|ijken)|verhoud|versus|\bvs\b|zowel|naast|cross\s*source|multi\s*source)/i.test(decodedQuestion);
+
+      const plannerCandidates: Array<"cbs" | "tk" | "ob" | "rijk" | "budget" | "duo" | "api"> = [];
+      if (has(cbsTerms)) plannerCandidates.push("cbs");
+      if (has(tkTerms)) plannerCandidates.push("tk");
+      if (has(obTerms)) plannerCandidates.push("ob");
+      if (has(rijkTerms)) plannerCandidates.push("rijk");
+      if (likelyBudget) plannerCandidates.push("budget");
+      if (has(duoTerms)) plannerCandidates.push("duo");
+      if (has(apiTerms)) plannerCandidates.push("api");
+
+      const uniquePlannerCandidates = Array.from(new Set(plannerCandidates));
+
+      if (multiIntentSignal && uniquePlannerCandidates.length >= 2) {
+        const failures: NonNullable<ReturnType<typeof successResponse>["failures"]> = [];
+
+        const runnableCandidates = uniquePlannerCandidates.filter((candidate) => {
+          if (candidate === "api" && !process.env[ENV_KEYS.OVERHEID_API_KEY]) {
+            failures.push({
+              connector: "api_register",
+              error_type: "not_configured",
+              message: "OVERHEID_API_KEY ontbreekt voor API-register queries",
+            });
+            return false;
+          }
+          return true;
+        });
+
+        const runCandidate = async (candidate: typeof runnableCandidates[number]) => {
+          switch (candidate) {
+            case "cbs": {
+              const candidates = [makeCbsQuery(decodedQuestion), decodedQuestion];
+              if (q.includes("inwoner") || q.includes("population")) candidates.push("bevolking");
+              if (q.includes("opleidingsniveau") || q.includes("opleiding")) candidates.push("opleidingsniveau gemeenten");
+              if (q.includes("werkloos")) candidates.push("werkloosheid");
+              if (q.includes("emissie")) candidates.push("emissie");
+
+              let out = await cbs.searchTables(candidates[0] || decodedQuestion, Math.max(top, 8));
+              let items = out.items;
+
+              if (!items.length) {
+                for (const candidate of candidates.slice(1)) {
+                  if (!candidate || !candidate.trim()) continue;
+                  out = await cbs.searchTables(candidate, Math.max(top, 8));
+                  items = out.items;
+                  if (items.length) break;
+                }
+              }
+
+              const sorted = [...items].sort((a, b) => scoreCbsTable(b) - scoreCbsTable(a));
+              const records = sorted.slice(0, top).map((x) =>
+                record("cbs", String(x.Title ?? x.Identifier ?? "CBS"), "https://www.cbs.nl", x),
+              );
+              return { connector: "cbs", records, endpoint: out.endpoint, params: out.params, total: items.length };
+            }
+            case "tk": {
+              const out = await tk.searchDocuments({ query: makeKeywordQuery(decodedQuestion, 5) || decodedQuestion, top });
+              const records = out.items.map((x) =>
+                record("tweedekamer", String(x.Titel ?? x.Id ?? "Document"), String(x.Url ?? x.resource_url ?? "https://www.tweedekamer.nl"), x),
+              );
+              return { connector: "tweede_kamer", records, endpoint: out.endpoint, params: out.params, total: out.items.length };
+            }
+            case "ob": {
+              const out = await bekend.search({ query: decodedQuestion, maximumRecords: top });
+              const records = out.items.map((x) =>
+                record(
+                  "officielebekendmakingen",
+                  String(x.title ?? x.identifier ?? "Bekendmaking"),
+                  String(x.canonical_url ?? x.identifier ?? "https://zoek.officielebekendmakingen.nl"),
+                  x as Record<string, unknown>,
+                ),
+              );
+              return { connector: "officiele_bekendmakingen", records, endpoint: out.endpoint, params: out.params, total: out.total };
+            }
+            case "rijk": {
+              const out = await rijksoverheid.search({ query: makeKeywordQuery(decodedQuestion, 5) || decodedQuestion, top });
+              const records = out.items.map((x) =>
+                record("rijksoverheid", String(x.title ?? x.id ?? "Rijksoverheid"), String(x.canonical ?? x.url ?? "https://www.rijksoverheid.nl"), x),
+              );
+              return { connector: "rijksoverheid", records, endpoint: out.endpoint, params: out.params, total: out.total };
+            }
+            case "budget": {
+              const out = await rijksbegroting.search(makeKeywordQuery(decodedQuestion, 5) || decodedQuestion, top);
+              const records = out.items.map((x) =>
+                record("rijksbegroting", String(x.name ?? x.id ?? "Rijksbegroting"), String(x.url ?? "https://opendata.rijksbegroting.nl"), x),
+              );
+              return { connector: "rijksbegroting", records, endpoint: out.endpoint, params: out.params, total: out.total };
+            }
+            case "duo": {
+              const out = await duo.datasetsCatalog(makeKeywordQuery(decodedQuestion, 5) || decodedQuestion, top);
+              const records = out.items.map((x) =>
+                record("duo", String(x.title ?? x.name ?? x.id ?? "DUO"), String(x.url ?? "https://onderwijsdata.duo.nl"), x),
+              );
+              return { connector: "duo", records, endpoint: out.endpoint, params: out.params, total: out.total };
+            }
+            case "api": {
+              const out = await new ApiRegisterSource(config, String(process.env[ENV_KEYS.OVERHEID_API_KEY])).search(makeKeywordQuery(decodedQuestion, 4) || decodedQuestion, top);
+              const records = out.items.map((x) =>
+                record("api-register", String(x.name ?? x.title ?? x.id ?? "API"), String(x.portalUrl ?? x.url ?? "https://apis.developer.overheid.nl"), x),
+              );
+              return { connector: "api_register", records, endpoint: out.endpoint, params: out.params, total: out.items.length };
+            }
+          }
+        };
+
+        const settled = await Promise.allSettled(runnableCandidates.map((c) => runCandidate(c)));
+
+        const mergedRecordsRaw: MCPRecord[] = [];
+        const successfulConnectors: string[] = [];
+
+        settled.forEach((result, idx) => {
+          const candidate = runnableCandidates[idx];
+
+          if (result.status === "fulfilled") {
+            const out = result.value;
+            successfulConnectors.push(out.connector);
+
+            const annotated = out.records.map((rec) => {
+              const data = { ...(rec.data ?? {}) };
+              data._provenance = {
+                connector: out.connector,
+                endpoint: out.endpoint,
+                query_params: out.params,
+                returned_results: out.records.length,
+                total_results: out.total,
+              };
+              return { ...rec, data };
+            });
+
+            mergedRecordsRaw.push(...annotated);
+            return;
+          }
+
+          const connectorLabelMap: Record<string, string> = {
+            cbs: "CBS",
+            tk: "Tweede Kamer",
+            ob: "Officiële Bekendmakingen",
+            rijk: "Rijksoverheid",
+            budget: "Rijksbegroting",
+            duo: "DUO",
+            api: "API Register",
+          };
+
+          const mapped = mapSourceError(result.reason, connectorLabelMap[candidate] ?? candidate);
+          failures.push({
+            connector: candidate === "api" ? "api_register" : candidate,
+            error_type: mapped.error,
+            message: mapped.message,
+          });
+        });
+
+        const mergedRecords = dedupeMergedRecords(mergedRecordsRaw);
+        const dedupedCount = mergedRecordsRaw.length - mergedRecords.length;
+
+        if (mergedRecords.length) {
+          const notes: string[] = [];
+          if (failures.length) {
+            notes.push(`Partial failures: ${failures.map((f) => `${f.connector}(${f.error_type})`).join(", ")}`);
+          }
+          if (dedupedCount > 0) {
+            notes.push(`Deduplicated ${dedupedCount} duplicate records by identifier.`);
+          }
+
+          return toMcpToolPayload(successResponse({
+            summary: `Router: multi-source (${mergedRecords.length} resultaten uit ${successfulConnectors.length} bronnen)`,
+            records: mergedRecords,
+            provenance: prov(
+              "nl_gov_ask",
+              "multi-source-planner",
+              {
+                question: decodedQuestion,
+                sources: successfulConnectors.join(","),
+              },
+              mergedRecords.length,
+              mergedRecords.length,
+            ),
+            access_note: notes.length ? notes.join(" ") : undefined,
+            failures: failures.length ? failures : undefined,
+          }));
+        }
+
+        if (failures.length) {
+          return toMcpToolPayload(errorResponse({
+            error: failures[0]?.error_type ?? "unexpected",
+            message: `Alle geselecteerde bronnen faalden: ${failures.map((f) => `${f.connector} (${f.error_type})`).join(", ")}`,
+            details: { failures },
+          }));
+        }
+      }
+
       const isSchoolHolidayQuery = q.includes("schoolvakantie") || q.includes("schoolvakanties") || q.includes("school holiday") || q.includes("school holidays");
       if (isSchoolHolidayQuery) {
         const yearMatch = decodedQuestion.match(/\b(20\d{2})\b/);
@@ -571,7 +832,6 @@ export function registerTools(server: McpServer): void {
         }
       }
 
-      const likelyBudget = has(budgetTerms) || ((q.includes("hoeveel geeft") || q.includes("how much does")) && q.includes("uit"));
       if (likelyBudget) {
         const budgetQuery = makeKeywordQuery(decodedQuestion, 5) || decodedQuestion;
         const out = await rijksbegroting.search(budgetQuery, top);

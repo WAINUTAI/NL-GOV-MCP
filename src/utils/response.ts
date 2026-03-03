@@ -15,12 +15,14 @@ export function successResponse(args: {
   records: MCPRecord[];
   provenance: MCPToolResponse["provenance"];
   access_note?: string;
+  failures?: MCPToolResponse["failures"];
 }): MCPToolResponse {
   return {
     summary: args.summary,
     records: args.records,
     provenance: args.provenance,
     access_note: args.access_note,
+    failures: args.failures,
   };
 }
 

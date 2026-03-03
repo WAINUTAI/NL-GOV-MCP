@@ -8,6 +8,7 @@ MCP server for Dutch public-sector data sources with both **stdio** and **SSE/HT
   - `records[]`
   - `provenance`
   - optional `access_note`
+  - optional `failures[]` (for partial multi-source failures)
 - Graceful error mapping (`timeout`, `http_error`, `rate_limited`, `malformed_response`, `not_configured`, `circuit_open`, `unexpected`)
 - Built-in runtime resilience (zero-config):
   - per-connector concurrency limiter (default 3 in-flight, queued with timeout)
@@ -39,7 +40,7 @@ MCP server for Dutch public-sector data sources with both **stdio** and **SSE/HT
   - EU bonus:
     - Eurostat (`eurostat_datasets_search`, `eurostat_dataset_preview`)
     - data.europa.eu CKAN (`data_europa_datasets_search`)
-- Router/meta-tool: `nl_gov_ask` (NL/EN keyword routing with fallback, percent-encoded question decoding, stronger holiday/CBS/API routing)
+- Router/meta-tool: `nl_gov_ask` (NL/EN keyword routing with fallback, percent-encoded question decoding, stronger holiday/CBS/API routing, and multi-source parallel planning when explicit cross-source intent is detected)
 
 ### Rechtspraak behavior notes
 - `rechtspraak_search_ecli` now mirrors the official frontend search backend (`/api/zoek`) instead of relying on the legacy open-data feed query behavior.

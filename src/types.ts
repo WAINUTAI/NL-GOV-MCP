@@ -21,6 +21,11 @@ export interface MCPToolResponse {
   records: MCPRecord[];
   provenance: Provenance;
   access_note?: string;
+  failures?: Array<{
+    connector: string;
+    error_type: MCPErrorCode;
+    message: string;
+  }>;
 }
 
 export type MCPErrorCode =
