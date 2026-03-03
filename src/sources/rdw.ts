@@ -12,6 +12,35 @@ interface RdwRecord {
 
 const RDW_ENDPOINT = "https://opendata.rdw.nl/resource/m9d7-ebf2.json";
 
+function normalizeKenteken(input: string): string | undefined {
+  const compact = input.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (!/^[A-Z0-9]{6}$/.test(compact)) return undefined;
+  const letters = (compact.match(/[A-Z]/g) ?? []).length;
+  const digits = (compact.match(/[0-9]/g) ?? []).length;
+  return letters >= 2 && digits >= 2 ? compact : undefined;
+}
+
+function toRdwItem(x: RdwRecord, fallbackId: string) {
+  return {
+    id: `${x.kenteken ?? fallbackId}`,
+    title: `${x.merk ?? "Onbekend merk"} ${x.handelsbenaming ?? ""}`.trim(),
+    url: "https://opendata.rdw.nl/",
+    updated_at: String(
+      (x as { datum_tenaamstelling?: unknown }).datum_tenaamstelling ?? "",
+    ),
+    ...x,
+  };
+}
+
+function containsQuery(x: RdwRecord, query: string): boolean {
+  if (!query.trim()) return true;
+  const q = query.toLowerCase();
+  const text = `${x.kenteken ?? ""} ${x.merk ?? ""} ${
+    x.handelsbenaming ?? ""
+  } ${x.voertuigsoort ?? ""}`.toLowerCase();
+  return text.includes(q);
+}
+
 export class RdwSource {
   constructor(private readonly config: AppConfig) {}
 
@@ -31,43 +60,90 @@ export class RdwSource {
       total: 1,
       endpoint: `${RDW_ENDPOINT} (fallback)`,
       params: { $limit: String(args.rows) },
-      access_note: "Geen live RDW match of endpoint instabiliteit; fallbackrecord gebruikt.",
+      access_note:
+        "Geen live RDW match of endpoint instabiliteit; fallbackrecord gebruikt.",
     };
   }
 
   async search(args: { query: string; rows: number }) {
-    const params = {
+    const q = args.query.trim();
+    const normalizedKenteken = normalizeKenteken(q);
+    const escapedLike = q.toUpperCase().replace(/'/g, "''");
+
+    const attemptParams: Array<Record<string, string>> = [];
+
+    if (normalizedKenteken) {
+      attemptParams.push({
+        $limit: String(Math.min(args.rows, 25)),
+        $where: `kenteken='${normalizedKenteken}'`,
+      });
+    }
+
+    attemptParams.push({
       $limit: String(Math.min(args.rows * 5, 100)),
+      $q: q,
       $order: "datum_tenaamstelling DESC",
-    };
-    const { data, meta } = await getJson<RdwRecord[]>(RDW_ENDPOINT, {
-      query: params,
-      timeoutMs: 15_000,
     });
 
-    const q = args.query.toLowerCase();
-    const items = (Array.isArray(data) ? data : [])
-      .filter((x) => {
-        const text = `${x.kenteken ?? ""} ${x.merk ?? ""} ${x.handelsbenaming ?? ""} ${x.voertuigsoort ?? ""}`.toLowerCase();
-        return !q || text.includes(q);
-      })
-      .slice(0, args.rows)
-      .map((x, i) => ({
-        id: `${x.kenteken ?? `rdw-${i}`}`,
-        title: `${x.merk ?? "Onbekend merk"} ${x.handelsbenaming ?? ""}`.trim(),
-        url: "https://opendata.rdw.nl/",
-        updated_at: String((x as { datum_tenaamstelling?: unknown }).datum_tenaamstelling ?? ""),
-        ...x,
-      }));
+    if (q) {
+      attemptParams.push({
+        $limit: String(Math.min(args.rows * 5, 100)),
+        $where: `upper(merk) like '%${escapedLike}%' or upper(handelsbenaming) like '%${escapedLike}%' or upper(voertuigsoort) like '%${escapedLike}%'`,
+        $order: "datum_tenaamstelling DESC",
+      });
+    }
+
+    // Last-resort broad fetch + local filter.
+    attemptParams.push({
+      $limit: String(Math.min(args.rows * 20, 200)),
+      $order: "datum_tenaamstelling DESC",
+    });
+
+    for (const params of attemptParams) {
+      try {
+        const { data, meta } = await getJson<RdwRecord[]>(RDW_ENDPOINT, {
+          query: params,
+          timeoutMs: 15_000,
+        });
+
+        const raw = Array.isArray(data) ? data : [];
+        const filtered =
+          params.$q || params.$where
+            ? raw
+            : raw.filter((x) => containsQuery(x, q));
+
+        if (!filtered.length) continue;
+
+        const seen = new Set<string>();
+        const items = filtered
+          .map((x, i) => toRdwItem(x, `rdw-${i}`))
+          .filter((item) => {
+            const key = String(item.id ?? "");
+            if (!key || seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          })
+          .slice(0, args.rows);
+
+        if (!items.length) continue;
+
+        return {
+          items,
+          total: items.length,
+          endpoint: meta.url,
+          params,
+        };
+      } catch {
+        // try next strategy
+      }
+    }
 
     return {
-      items,
-      total: items.length,
-      endpoint: meta.url,
-      params,
-      ...(items.length
-        ? {}
-        : { access_note: "Geen live match in RDW dataset voor deze zoekterm." }),
+      items: [],
+      total: 0,
+      endpoint: RDW_ENDPOINT,
+      params: { $limit: String(args.rows) },
+      access_note: "Geen live match in RDW dataset voor deze zoekterm.",
     };
   }
 }
@@ -87,14 +163,31 @@ export async function search(query: string): Promise<{
 
   try {
     const out = await src.search({ query, rows: 5 });
+    if (Array.isArray(out.items) && out.items.length > 0) {
+      return {
+        data: out.items,
+        citations: [
+          {
+            source: "rdw",
+            title: "RDW Open Data",
+            url: out.endpoint || "https://opendata.rdw.nl",
+            retrievedAt: new Date().toISOString(),
+            ...(out.access_note ? { excerpt: out.access_note } : {}),
+          },
+        ],
+      };
+    }
+
+    const fb = src.fallback({ query, rows: 5 });
     return {
-      data: out.items,
+      data: fb.items,
       citations: [
         {
           source: "rdw",
-          title: "RDW Open Data",
-          url: out.endpoint || "https://opendata.rdw.nl",
+          title: "RDW Open Data (fallback)",
+          url: "https://opendata.rdw.nl",
           retrievedAt: new Date().toISOString(),
+          excerpt: fb.access_note,
         },
       ],
     };
