@@ -29,6 +29,7 @@ export type MCPErrorCode =
   | "rate_limited"
   | "malformed_response"
   | "not_configured"
+  | "circuit_open"
   | "unexpected";
 
 export interface MCPErrorResponse {

@@ -78,6 +78,16 @@ export function mapSourceError(
       });
     }
 
+    if (error.code === "circuit_open") {
+      return errorResponse({
+        error: "circuit_open",
+        message: `${sourceLabel} is temporarily unavailable (circuit open)`,
+        retry_after: error.retryAfter,
+        suggestion: "Try again after cooldown or narrow the query",
+        details: { endpoint: error.endpoint, status: error.status },
+      });
+    }
+
     return errorResponse({
       error: "http_error",
       message: `${sourceLabel} request failed${

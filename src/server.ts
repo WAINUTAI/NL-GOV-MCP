@@ -4,6 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { loadConfig } from "./config.js";
 import { registerTools } from "./tools.js";
+import { getAllConnectorHealth } from "./utils/connector-runtime.js";
 import { logger } from "./utils/logger.js";
 
 export function createServer(): McpServer {
@@ -57,6 +58,15 @@ export async function startSseServer(): Promise<void> {
 
   app.get("/health", (_req, res) => {
     res.json({ ok: true, name: config.server.name, version: config.server.version });
+  });
+
+  app.get("/health/sources", (_req, res) => {
+    res.json({
+      ok: true,
+      name: config.server.name,
+      version: config.server.version,
+      connectors: getAllConnectorHealth(),
+    });
   });
 
   app.listen(config.server.httpPort, () => {
