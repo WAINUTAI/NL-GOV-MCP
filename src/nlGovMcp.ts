@@ -38,35 +38,67 @@ export type MCPResult = {
   answer: string;
   citations: Citation[];
   errors?: { source: NLSource; message: string }[];
+  meta?: {
+    routeDecision: {
+      explicit: boolean;
+      matchedRules: string[];
+      initialSources: NLSource[];
+      finalSources: NLSource[];
+      fallbackUsed: boolean;
+    };
+  };
 };
 
 function hasAny(haystack: string, terms: string[]): boolean {
   return terms.some((t) => haystack.includes(t));
 }
 
-function buildAnswer(query: string, data: unknown): string {
+function buildSuccessAnswer(query: string, data: unknown): string {
   const raw = JSON.stringify(data);
   const short = raw.length > 260 ? `${raw.slice(0, 260)}…` : raw;
   return `Resultaten voor: ${query}. ${short}`;
 }
 
-function detectSources(query: string): { sources: NLSource[]; explicit: boolean } {
+function dedupeCitations(citations: Citation[]): Citation[] {
+  const seen = new Set<string>();
+  const out: Citation[] = [];
+
+  for (const c of citations) {
+    const key = `${c.source}|${c.url}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(c);
+  }
+
+  return out;
+}
+
+function detectSources(query: string): {
+  sources: NLSource[];
+  explicit: boolean;
+  matchedRules: string[];
+} {
   const q = query.toLowerCase();
 
-  const explicitMap: Array<[RegExp, NLSource]> = [
-    [/^\s*cbs\s*:/i, "cbs_statline"],
-    [/^\s*rdw\s*:/i, "rdw"],
-    [/^\s*(bag|pdok)\s*:/i, "pdok_bag"],
-    [/^\s*(ob|offici[eë]le\s+bekendmakingen)\s*:/i, "officiele_bekendmakingen"],
+  const explicitMap: Array<[RegExp, NLSource, string]> = [
+    [/^\s*cbs\s*:/i, "cbs_statline", "explicit:cbs"],
+    [/^\s*rdw\s*:/i, "rdw", "explicit:rdw"],
+    [/^\s*(bag|pdok)\s*:/i, "pdok_bag", "explicit:pdok_bag"],
+    [
+      /^\s*(ob|offici[eë]le\s+bekendmakingen)\s*:/i,
+      "officiele_bekendmakingen",
+      "explicit:officiele_bekendmakingen",
+    ],
   ];
 
-  for (const [rx, source] of explicitMap) {
+  for (const [rx, source, rule] of explicitMap) {
     if (rx.test(query)) {
-      return { sources: [source], explicit: true };
+      return { sources: [source], explicit: true, matchedRules: [rule] };
     }
   }
 
   const sources: NLSource[] = [];
+  const matchedRules: string[] = [];
 
   const isCbs = hasAny(q, [
     "cbs",
@@ -87,8 +119,17 @@ function detectSources(query: string): { sources: NLSource[]; explicit: boolean 
   );
 
   const isRdw =
-    hasAny(q, ["rdw", "kenteken", "voertuig", "apk", "bouwjaar", "merk", "typegoedkeuring", "nummerplaat", "license plate"]) ||
-    plateLike;
+    hasAny(q, [
+      "rdw",
+      "kenteken",
+      "voertuig",
+      "apk",
+      "bouwjaar",
+      "merk",
+      "typegoedkeuring",
+      "nummerplaat",
+      "license plate",
+    ]) || plateLike;
 
   const isBag = hasAny(q, [
     "bag",
@@ -115,19 +156,35 @@ function detectSources(query: string): { sources: NLSource[]; explicit: boolean 
     "verordening",
   ]);
 
-  if (isCbs) sources.push("cbs_statline");
-  if (isRdw) sources.push("rdw");
-  if (isBag) sources.push("pdok_bag");
-  if (isOb) sources.push("officiele_bekendmakingen");
+  if (isCbs) {
+    sources.push("cbs_statline");
+    matchedRules.push("heuristic:cbs_keywords");
+  }
+  if (isRdw) {
+    sources.push("rdw");
+    matchedRules.push(plateLike ? "heuristic:rdw_plate_pattern" : "heuristic:rdw_keywords");
+  }
+  if (isBag) {
+    sources.push("pdok_bag");
+    matchedRules.push("heuristic:bag_keywords");
+  }
+  if (isOb) {
+    sources.push("officiele_bekendmakingen");
+    matchedRules.push("heuristic:ob_keywords");
+  }
 
   if (!sources.length) {
     sources.push("data.overheid.nl");
+    matchedRules.push("fallback:data.overheid.nl");
   }
 
-  return { sources, explicit: false };
+  return { sources, explicit: false, matchedRules };
 }
 
-async function callSource(source: NLSource, query: string): Promise<{ data: unknown; citations: Citation[] }> {
+async function callSource(
+  source: NLSource,
+  query: string,
+): Promise<{ data: unknown; citations: Citation[] }> {
   switch (source) {
     case "cbs_statline":
       return cbs.search(query);
@@ -146,13 +203,14 @@ async function callSource(source: NLSource, query: string): Promise<{ data: unkn
 
 export async function nlGovMcpQuery(query: string): Promise<MCPResult> {
   const errors: Array<{ source: NLSource; message: string }> = [];
-  const { sources, explicit } = detectSources(query);
+  const route = detectSources(query);
 
   const successfulSources: NLSource[] = [];
   const citations: Citation[] = [];
   const payloadBySource: Record<string, unknown> = {};
+  let fallbackUsed = false;
 
-  for (const source of sources) {
+  for (const source of route.sources) {
     try {
       const out = await callSource(source, query);
       successfulSources.push(source);
@@ -166,13 +224,18 @@ export async function nlGovMcpQuery(query: string): Promise<MCPResult> {
     }
   }
 
-  // Fallback only when non-explicit route had source failures and no successes
-  if (!explicit && !successfulSources.length && !sources.includes("data.overheid.nl")) {
+  // Fallback only when non-explicit route had source failures and no successes.
+  if (
+    !route.explicit &&
+    !successfulSources.length &&
+    !route.sources.includes("data.overheid.nl")
+  ) {
     try {
       const fallback = await callSource("data.overheid.nl", query);
       successfulSources.push("data.overheid.nl");
       payloadBySource["data.overheid.nl"] = fallback.data;
       citations.push(...fallback.citations);
+      fallbackUsed = true;
     } catch (error) {
       errors.push({
         source: "data.overheid.nl",
@@ -182,13 +245,26 @@ export async function nlGovMcpQuery(query: string): Promise<MCPResult> {
   }
 
   if (!successfulSources.length) {
+    const errorAnswer = errors.length
+      ? `Er trad een fout op bij: ${errors.map((e) => e.source).join(", ")}`
+      : "Geen resultaten gevonden.";
+
     return {
       query,
       routedTo: [],
       data: null,
-      answer: "Geen resultaten beschikbaar op dit moment.",
+      answer: errorAnswer,
       citations: [],
       ...(errors.length ? { errors } : {}),
+      meta: {
+        routeDecision: {
+          explicit: route.explicit,
+          matchedRules: route.matchedRules,
+          initialSources: route.sources,
+          finalSources: [],
+          fallbackUsed,
+        },
+      },
     };
   }
 
@@ -201,8 +277,17 @@ export async function nlGovMcpQuery(query: string): Promise<MCPResult> {
     query,
     routedTo: successfulSources,
     data,
-    answer: buildAnswer(query, data),
-    citations,
+    answer: buildSuccessAnswer(query, data),
+    citations: dedupeCitations(citations),
     ...(errors.length ? { errors } : {}),
+    meta: {
+      routeDecision: {
+        explicit: route.explicit,
+        matchedRules: route.matchedRules,
+        initialSources: route.sources,
+        finalSources: successfulSources,
+        fallbackUsed,
+      },
+    },
   };
 }
