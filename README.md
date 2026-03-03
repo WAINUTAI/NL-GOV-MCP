@@ -8,7 +8,12 @@ MCP server for Dutch public-sector data sources with both **stdio** and **SSE/HT
   - `records[]`
   - `provenance`
   - optional `access_note`
-- Graceful error mapping (`timeout`, `http_error`, `rate_limited`, `malformed_response`, `not_configured`, `unexpected`)
+- Graceful error mapping (`timeout`, `http_error`, `rate_limited`, `malformed_response`, `not_configured`, `circuit_open`, `unexpected`)
+- Built-in runtime resilience (zero-config):
+  - per-connector concurrency limiter (default 3 in-flight, queued with timeout)
+  - per-connector circuit breaker (threshold/cooldown/probe)
+  - in-process HTTP response cache with hardcoded TTL by connector category
+  - per-connector health counters/state (exposed on SSE via `/health/sources`)
 - Source connectors:
   - data.overheid.nl
   - CBS (v4 with v3 + data.overheid catalog fallback; multi-endpoint observation fallback)
@@ -69,6 +74,7 @@ SSE endpoints:
 - `GET /mcp` (SSE stream)
 - `POST /messages?sessionId=...`
 - `GET /health`
+- `GET /health/sources` (per-connector runtime health snapshot)
 
 ## Claude Desktop integration (stdio)
 You can run this MCP directly from Claude Desktop after cloning/building.
