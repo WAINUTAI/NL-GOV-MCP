@@ -19,6 +19,19 @@ interface LuchtMeetnetResponse {
 
 const LUCHTMEETNET_ENDPOINT = "https://api.luchtmeetnet.nl/open_api/measurements";
 
+function enrich(m: LuchtMeetnetMeasurement): LuchtMeetnetMeasurement {
+  return {
+    ...m,
+    component: String(m.formula ?? "").toLowerCase(),
+    timestamp: m.timestamp_measured,
+    location_name: m.station_name,
+    location: {
+      latitude: Number(m.location?.latitude ?? 0),
+      longitude: Number(m.location?.longitude ?? 0),
+    },
+  };
+}
+
 export class LuchtmeetnetSource {
   constructor(private readonly config: AppConfig) {}
 
@@ -30,7 +43,7 @@ export class LuchtmeetnetSource {
     if (args.component) params.formula = args.component;
 
     const { data, meta } = await getJson<LuchtMeetnetResponse>(LUCHTMEETNET_ENDPOINT, { query: params });
-    const items = Array.isArray(data.data) ? data.data : [];
+    const items = (Array.isArray(data.data) ? data.data : []).map(enrich);
 
     return {
       items,
@@ -42,7 +55,7 @@ export class LuchtmeetnetSource {
 
   fallback(args: { component?: string; rows: number }) {
     const component = (args.component ?? "pm25").toLowerCase();
-    const item: LuchtMeetnetMeasurement = {
+    const item: LuchtMeetnetMeasurement = enrich({
       station_number: 0,
       station_name: "fallback-station",
       formula: component,
@@ -51,7 +64,7 @@ export class LuchtmeetnetSource {
       timestamp_measured: "1970-01-01T00:00:00Z",
       location: { latitude: 52.0, longitude: 5.0 },
       mode: "deterministic-fallback",
-    };
+    });
 
     return {
       items: [item].slice(0, args.rows),

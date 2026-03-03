@@ -22,6 +22,8 @@ describe("new source fallbacks", () => {
     const out = src.fallback({ component: "NO2", rows: 1 });
     expect(out.items[0].formula).toBe("no2");
     expect(out.items[0].timestamp_measured).toBe("1970-01-01T00:00:00Z");
+    expect(out.items[0].component).toBe("no2");
+    expect(out.items[0].timestamp).toBe("1970-01-01T00:00:00Z");
   });
 
   it("rechtspraak fallback emits ecli", () => {

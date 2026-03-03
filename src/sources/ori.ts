@@ -11,39 +11,71 @@ interface OriItem {
   [key: string]: unknown;
 }
 
-interface OriSearchResponse {
-  results?: OriItem[];
-  total?: number;
+interface ElasticHit {
+  _id?: string;
+  _source?: Record<string, unknown>;
 }
 
-const ORI_ENDPOINTS = [
-  "https://zoek.openraadsinformatie.nl/api/v1/search",
-  "https://api.openraadsinformatie.nl/v1/search",
+interface ElasticResponse {
+  hits?: {
+    total?: { value?: number } | number;
+    hits?: ElasticHit[];
+  };
+}
+
+const ORI_DISCOVERY_ENDPOINTS = [
+  "https://api.openraadsinformatie.nl/v1/elastic/_search",
+  "https://api.openraadsinformatie.nl/v1/elastic",
 ];
+
+function toOriItem(hit: ElasticHit): OriItem {
+  const source = (hit._source ?? {}) as Record<string, unknown>;
+  const id = String(source["@id"] ?? source.id ?? hit._id ?? "");
+  const title = String(source.name ?? source.title ?? source.onderwerp ?? "ORI item");
+  const type = String(source["@type"] ?? source.type ?? "record");
+  const organization = String(source.publisher ?? source.organisation ?? source.organization ?? "");
+  const publishedAt = String(source.datePublished ?? source.last_discussed_at ?? source.modified ?? "");
+
+  const url = String(
+    source.url ??
+      source.same_as ??
+      source.generated ??
+      (id && id.startsWith("http") ? id : "https://www.openraadsinformatie.nl"),
+  );
+
+  return {
+    id,
+    title,
+    type,
+    organization,
+    publishedAt,
+    url,
+    raw: source,
+  };
+}
 
 export class OriSource {
   constructor(private readonly config: AppConfig) {}
 
   async search(args: { query: string; rows: number; bestuurslaag?: string }) {
     const query = {
-      q: args.query,
-      limit: String(args.rows),
-      ...(args.bestuurslaag ? { bestuurslaag: args.bestuurslaag } : {}),
+      q: args.bestuurslaag ? `${args.query} ${args.bestuurslaag}` : args.query,
+      size: String(args.rows),
+      sort: "_score:desc",
     };
 
-    for (const endpoint of ORI_ENDPOINTS) {
+    for (const endpoint of ORI_DISCOVERY_ENDPOINTS) {
       try {
-        const { data, meta } = await getJson<OriSearchResponse | Record<string, unknown>>(endpoint, { query });
-        const obj = data as Record<string, unknown>;
-        const items = (Array.isArray((data as OriSearchResponse).results)
-          ? (data as OriSearchResponse).results
-          : (obj.items as OriItem[] | undefined) ??
-            (obj.results as OriItem[] | undefined) ??
-            []) as OriItem[];
+        const { data, meta } = await getJson<ElasticResponse>(endpoint, { query, timeoutMs: 20_000, retries: 1 });
+        const hits = Array.isArray(data.hits?.hits) ? data.hits?.hits : [];
+        const items = hits.map(toOriItem).filter((x) => x.id || x.title);
+        const totalRaw = data.hits?.total;
+        const total = typeof totalRaw === "number" ? totalRaw : Number(totalRaw?.value ?? items.length);
+
         if (items.length) {
           return {
             items,
-            total: Number((data as OriSearchResponse).total ?? items.length),
+            total,
             endpoint: meta.url,
             params: query,
           };
@@ -69,9 +101,9 @@ export class OriSource {
     return {
       items: fallbackItems.slice(0, args.rows),
       total: fallbackItems.length,
-      endpoint: `${ORI_ENDPOINTS[0]} (fallback)`,
+      endpoint: `${ORI_DISCOVERY_ENDPOINTS[0]} (fallback)`,
       params: { q: args.query, limit: String(args.rows), ...(args.bestuurslaag ? { bestuurslaag: args.bestuurslaag } : {}) },
-      access_note: "ORI endpoint niet stabiel bereikbaar vanuit huidige runtime; deterministische fallback gebruikt.",
+      access_note: "ORI endpoint discovery leverde geen bruikbare live resultaten; deterministische fallback gebruikt.",
     };
   }
 }
