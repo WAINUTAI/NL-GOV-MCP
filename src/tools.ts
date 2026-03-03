@@ -25,6 +25,7 @@ import { DataEuropaSource } from "./sources/data-europa.js";
 import { mapSourceError, nowIso, successResponse, toMcpToolPayload, errorResponse } from "./utils/response.js";
 import { parseTemporalRange } from "./utils/temporal.js";
 import { applyOutputFormat, paginateRecords, type OutputFormat } from "./utils/output-format.js";
+import { getConnectorHealth } from "./utils/connector-runtime.js";
 import type { MCPRecord } from "./types.js";
 
 const config = loadConfig();
@@ -629,7 +630,7 @@ export function registerTools(server: McpServer): void {
     }
   });
 
-  server.registerTool("nl_gov_ask", { inputSchema: { question: z.string(), top: z.number().int().min(1).max(config.limits.maxRows).default(10), ...paginationInputSchema, outputFormat: outputFormatSchema }, description: "Meta-router for Dutch govt sources" }, async ({ question, top, offset, limit, outputFormat }) => {
+  server.registerTool("nl_gov_ask", { inputSchema: { question: z.string(), top: z.number().int().min(1).max(config.limits.maxRows).default(10), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) }, description: "Meta-router for Dutch govt sources" }, async ({ question, top, offset, limit, outputFormat, verbose, dryRun }) => {
     const decodedQuestion = (() => {
       try { return decodeURIComponent(question.replace(/\+/g, " ")); } catch { return question; }
     })();
@@ -654,6 +655,53 @@ export function registerTools(server: McpServer): void {
     const makeCbsQuery = (input: string): string => makeKeywordQuery(input, 6);
     const effectiveLimit = limit ?? top;
 
+    const requestDebug: Array<{
+      connector: string;
+      request_url: string;
+      request_method: string;
+      response_time_ms: number;
+      cache_hit: boolean | null;
+      cache_ttl_remaining_s: number | null;
+    }> = [];
+    const fallbackSteps: string[] = [];
+
+    const timed = async <T>(connector: string, fn: () => Promise<T>): Promise<T> => {
+      const started = Date.now();
+      const out = await fn();
+      const elapsed = Date.now() - started;
+
+      const endpoint =
+        out && typeof out === "object" && "endpoint" in (out as Record<string, unknown>)
+          ? String((out as Record<string, unknown>).endpoint ?? "")
+          : "";
+
+      requestDebug.push({
+        connector,
+        request_url: endpoint,
+        request_method: "GET",
+        response_time_ms: elapsed,
+        cache_hit: null,
+        cache_ttl_remaining_s: null,
+      });
+
+      return out;
+    };
+
+    const buildVerbose = () => {
+      if (!verbose) return undefined;
+      const health: Record<string, unknown> = {};
+      for (const req of requestDebug) {
+        if (!health[req.connector]) {
+          health[req.connector] = getConnectorHealth(req.connector);
+        }
+      }
+      return {
+        requests: requestDebug,
+        fallbacks_used: fallbackSteps,
+        connector_health: health,
+      } as Record<string, unknown>;
+    };
+
     const askSuccess = (args: {
       summary: string;
       records: MCPRecord[];
@@ -663,17 +711,20 @@ export function registerTools(server: McpServer): void {
       total?: number | null;
     }) =>
       toMcpToolPayload(
-        buildFormattedResponse({
-          summary: args.summary,
-          records: args.records,
-          provenance: args.provenance,
-          outputFormat,
-          offset,
-          limit: effectiveLimit,
-          total: args.total,
-          access_note: args.access_note,
-          failures: args.failures,
-        }),
+        {
+          ...buildFormattedResponse({
+            summary: args.summary,
+            records: args.records,
+            provenance: args.provenance,
+            outputFormat,
+            offset,
+            limit: effectiveLimit,
+            total: args.total,
+            access_note: args.access_note,
+            failures: args.failures,
+          }),
+          verbose: buildVerbose(),
+        },
       );
 
     const cbsTerms = ["cbs", "statistiek", "statistics", "bevolking", "population", "inwoners", "inflatie", "werkloos", "woning", "inkomen", "economie", "bbp", "gdp", "import", "export", "geboorte", "sterfte", "opleidingsniveau", "opleiding", "onderwijsniveau", "emissie", "emissies"];
@@ -715,6 +766,59 @@ export function registerTools(server: McpServer): void {
 
       const uniquePlannerCandidates = Array.from(new Set(plannerCandidates));
 
+      if (dryRun) {
+        const endpointByCandidate: Record<string, string> = {
+          cbs: config.endpoints.cbsV4,
+          tk: config.endpoints.tweedeKamer,
+          ob: config.endpoints.bekendmakingenSru,
+          rijk: config.endpoints.rijksoverheid,
+          budget: config.endpoints.rijksbegroting,
+          duo: config.endpoints.duoDatasets,
+          api: config.endpoints.apiRegister,
+        };
+
+        const estimatedSources = uniquePlannerCandidates.length
+          ? uniquePlannerCandidates
+          : ["data_overheid"];
+
+        const plannedRequests = estimatedSources.map((candidate) => ({
+          connector: candidate,
+          method: "GET",
+          url: endpointByCandidate[candidate] ?? config.endpoints.dataOverheid,
+          params: {
+            query: questionForSearch,
+            top,
+            ...(temporal ? { date_from: temporal.from, date_to: temporal.to } : {}),
+          },
+        }));
+
+        const cacheStatus = estimatedSources.map((candidate) => ({
+          connector: candidate,
+          cache_policy: "hardcoded-ttl",
+        }));
+
+        const dryRunPayload = {
+          dry_run: true,
+          planned_requests: plannedRequests,
+          estimated_sources: estimatedSources,
+          cache_status: cacheStatus,
+          ...(temporal
+            ? {
+                temporal: {
+                  from: temporal.from,
+                  to: temporal.to,
+                  matched_pattern: temporal.matchedPattern,
+                },
+              }
+            : {}),
+        };
+
+        return {
+          content: [{ type: "text", text: JSON.stringify(dryRunPayload, null, 2) }],
+          structuredContent: dryRunPayload,
+        };
+      }
+
       if (multiIntentSignal && uniquePlannerCandidates.length >= 2) {
         const failures: NonNullable<ReturnType<typeof successResponse>["failures"]> = [];
 
@@ -739,13 +843,14 @@ export function registerTools(server: McpServer): void {
               if (q.includes("werkloos")) candidates.push("werkloosheid");
               if (q.includes("emissie")) candidates.push("emissie");
 
-              let out = await cbs.searchTables(candidates[0] || questionForSearch, Math.max(top, 8));
+              let out = await timed("cbs", () => cbs.searchTables(candidates[0] || questionForSearch, Math.max(top, 8)));
               let items = out.items;
 
               if (!items.length) {
                 for (const candidate of candidates.slice(1)) {
                   if (!candidate || !candidate.trim()) continue;
-                  out = await cbs.searchTables(candidate, Math.max(top, 8));
+                  fallbackSteps.push(`cbs:fallback_candidate:${candidate}`);
+                  out = await timed("cbs", () => cbs.searchTables(candidate, Math.max(top, 8)));
                   items = out.items;
                   if (items.length) break;
                 }
@@ -758,24 +863,24 @@ export function registerTools(server: McpServer): void {
               return { connector: "cbs", records, endpoint: out.endpoint, params: out.params, total: items.length };
             }
             case "tk": {
-              const out = await tk.searchDocuments({
+              const out = await timed("tweede_kamer", () => tk.searchDocuments({
                 query: makeKeywordQuery(questionForSearch, 5) || questionForSearch,
                 top,
                 date_from: temporal?.from,
                 date_to: temporal?.to,
-              });
+              }));
               const records = out.items.map((x) =>
                 record("tweedekamer", String(x.Titel ?? x.Id ?? "Document"), String(x.Url ?? x.resource_url ?? "https://www.tweedekamer.nl"), x),
               );
               return { connector: "tweede_kamer", records, endpoint: out.endpoint, params: out.params, total: out.items.length };
             }
             case "ob": {
-              const out = await bekend.search({
+              const out = await timed("officiele_bekendmakingen", () => bekend.search({
                 query: questionForSearch,
                 maximumRecords: top,
                 date_from: temporal?.from,
                 date_to: temporal?.to,
-              });
+              }));
               const records = out.items.map((x) =>
                 record(
                   "officielebekendmakingen",
@@ -787,33 +892,33 @@ export function registerTools(server: McpServer): void {
               return { connector: "officiele_bekendmakingen", records, endpoint: out.endpoint, params: out.params, total: out.total };
             }
             case "rijk": {
-              const out = await rijksoverheid.search({
+              const out = await timed("rijksoverheid", () => rijksoverheid.search({
                 query: makeKeywordQuery(questionForSearch, 5) || questionForSearch,
                 top,
                 date_from: temporal?.from,
                 date_to: temporal?.to,
-              });
+              }));
               const records = out.items.map((x) =>
                 record("rijksoverheid", String(x.title ?? x.id ?? "Rijksoverheid"), String(x.canonical ?? x.url ?? "https://www.rijksoverheid.nl"), x),
               );
               return { connector: "rijksoverheid", records, endpoint: out.endpoint, params: out.params, total: out.total };
             }
             case "budget": {
-              const out = await rijksbegroting.search(makeKeywordQuery(questionForSearch, 5) || questionForSearch, top);
+              const out = await timed("rijksbegroting", () => rijksbegroting.search(makeKeywordQuery(questionForSearch, 5) || questionForSearch, top));
               const records = out.items.map((x) =>
                 record("rijksbegroting", String(x.name ?? x.id ?? "Rijksbegroting"), String(x.url ?? "https://opendata.rijksbegroting.nl"), x),
               );
               return { connector: "rijksbegroting", records, endpoint: out.endpoint, params: out.params, total: out.total };
             }
             case "duo": {
-              const out = await duo.datasetsCatalog(makeKeywordQuery(questionForSearch, 5) || questionForSearch, top);
+              const out = await timed("duo", () => duo.datasetsCatalog(makeKeywordQuery(questionForSearch, 5) || questionForSearch, top));
               const records = out.items.map((x) =>
                 record("duo", String(x.title ?? x.name ?? x.id ?? "DUO"), String(x.url ?? "https://onderwijsdata.duo.nl"), x),
               );
               return { connector: "duo", records, endpoint: out.endpoint, params: out.params, total: out.total };
             }
             case "api": {
-              const out = await new ApiRegisterSource(config, String(process.env[ENV_KEYS.OVERHEID_API_KEY])).search(makeKeywordQuery(questionForSearch, 4) || questionForSearch, top);
+              const out = await timed("api_register", () => new ApiRegisterSource(config, String(process.env[ENV_KEYS.OVERHEID_API_KEY])).search(makeKeywordQuery(questionForSearch, 4) || questionForSearch, top));
               const records = out.items.map((x) =>
                 record("api-register", String(x.name ?? x.title ?? x.id ?? "API"), String(x.portalUrl ?? x.url ?? "https://apis.developer.overheid.nl"), x),
               );
@@ -916,16 +1021,18 @@ export function registerTools(server: McpServer): void {
         const yearMatch = decodedQuestion.match(/\b(20\d{2})\b/);
         const regionMatch = q.match(/\b(noord|midden|zuid)\b/);
 
-        let out = await rijksoverheid.schoolholidays({
+        let out = await timed("rijksoverheid", () => rijksoverheid.schoolholidays({
           year: yearMatch ? Number(yearMatch[1]) : undefined,
           region: regionMatch ? regionMatch[1] : undefined,
-        });
+        }));
 
         if (!out.items.length && regionMatch) {
-          out = await rijksoverheid.schoolholidays({ year: yearMatch ? Number(yearMatch[1]) : undefined });
+          fallbackSteps.push("rijksoverheid:schoolholidays:no_region_match");
+          out = await timed("rijksoverheid", () => rijksoverheid.schoolholidays({ year: yearMatch ? Number(yearMatch[1]) : undefined }));
         }
         if (!out.items.length && yearMatch) {
-          out = await rijksoverheid.schoolholidays({ region: regionMatch ? regionMatch[1] : undefined });
+          fallbackSteps.push("rijksoverheid:schoolholidays:no_year_match");
+          out = await timed("rijksoverheid", () => rijksoverheid.schoolholidays({ region: regionMatch ? regionMatch[1] : undefined }));
         }
 
         const records = out.items.map((x)=>record("rijksoverheid", String(x.title ?? x.region ?? "Schoolvakantie"), String(x.canonical ?? "https://www.rijksoverheid.nl"), x, String(x.region ?? ""), String(x.startdate ?? "")));
@@ -933,7 +1040,8 @@ export function registerTools(server: McpServer): void {
           return askSuccess({ summary: `Router: Rijksoverheid schoolvakanties (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, records.length), total: records.length });
         }
 
-        const rijkOut = await rijksoverheid.search({ query: "schoolvakantie", top });
+        fallbackSteps.push("rijksoverheid:schoolholidays:fallback_search");
+        const rijkOut = await timed("rijksoverheid", () => rijksoverheid.search({ query: "schoolvakantie", top }));
         const rijkRecords = rijkOut.items.map((x)=>record("rijksoverheid", String(x.title ?? x.id ?? "Rijksoverheid"), String(x.canonical ?? x.url ?? "https://www.rijksoverheid.nl"), x));
         if (rijkRecords.length) {
           return askSuccess({ summary: `Router: Rijksoverheid (${rijkRecords.length} resultaten)`, records: rijkRecords, provenance: prov("nl_gov_ask", rijkOut.endpoint, rijkOut.params, rijkRecords.length, rijkOut.total), total: rijkOut.total });
@@ -946,13 +1054,14 @@ export function registerTools(server: McpServer): void {
         if (q.includes("opleidingsniveau") || q.includes("opleiding")) candidates.push("opleidingsniveau gemeenten");
         if (q.includes("werkloos")) candidates.push("werkloosheid");
 
-        let out = await cbs.searchTables(candidates[0] || questionForSearch, Math.max(top, 8));
+        let out = await timed("cbs", () => cbs.searchTables(candidates[0] || questionForSearch, Math.max(top, 8)));
         let items = out.items;
 
         if (!items.length) {
           for (const candidate of candidates.slice(1)) {
             if (!candidate || !candidate.trim()) continue;
-            out = await cbs.searchTables(candidate, Math.max(top, 8));
+            fallbackSteps.push(`cbs:fallback_candidate:${candidate}`);
+            out = await timed("cbs", () => cbs.searchTables(candidate, Math.max(top, 8)));
             items = out.items;
             if (items.length) break;
           }
@@ -967,7 +1076,7 @@ export function registerTools(server: McpServer): void {
             const bestTableId = String(best.Identifier ?? best.id ?? "");
             if (bestTableId) {
               try {
-                const obsOut = await cbs.getObservations({ tableId: bestTableId, top });
+                const obsOut = await timed("cbs", () => cbs.getObservations({ tableId: bestTableId, top }));
                 const obsRecords = obsOut.items.map((x) => record("cbs", `Observatie ${bestTableId}`, `https://opendata.cbs.nl/#/CBS/nl/dataset/${bestTableId}`, x));
                 if (obsRecords.length) {
                   return askSuccess({ summary: `Router: CBS observaties (${obsRecords.length} resultaten)`, records: obsRecords, provenance: prov("nl_gov_ask", obsOut.endpoint, obsOut.params, obsRecords.length, obsRecords.length), total: obsRecords.length });
@@ -988,13 +1097,14 @@ export function registerTools(server: McpServer): void {
         if (q.includes("motie") || q.includes("moties")) tkCandidates.push("motie");
         if (q.includes("stikstof")) tkCandidates.push("motie stikstof");
 
-        let out = await tk.searchDocuments({ query: tkCandidates[0] || questionForSearch, top, date_from: temporal?.from, date_to: temporal?.to });
+        let out = await timed("tweede_kamer", () => tk.searchDocuments({ query: tkCandidates[0] || questionForSearch, top, date_from: temporal?.from, date_to: temporal?.to }));
         let records = out.items.map((x)=>record("tweedekamer", String(x.Titel ?? x.Id ?? "Document"), String(x.Url ?? x.resource_url ?? "https://www.tweedekamer.nl"), x));
 
         if (!records.length) {
           for (const candidate of tkCandidates.slice(1)) {
             if (!candidate || !candidate.trim()) continue;
-            out = await tk.searchDocuments({ query: candidate, top, date_from: temporal?.from, date_to: temporal?.to });
+            fallbackSteps.push(`tweede_kamer:fallback_candidate:${candidate}`);
+            out = await timed("tweede_kamer", () => tk.searchDocuments({ query: candidate, top, date_from: temporal?.from, date_to: temporal?.to }));
             records = out.items.map((x)=>record("tweedekamer", String(x.Titel ?? x.Id ?? "Document"), String(x.Url ?? x.resource_url ?? "https://www.tweedekamer.nl"), x));
             if (records.length) break;
           }
@@ -1006,7 +1116,7 @@ export function registerTools(server: McpServer): void {
       }
 
       if (has(obTerms)) {
-        const out = await bekend.search({ query: questionForSearch, maximumRecords: top, date_from: temporal?.from, date_to: temporal?.to });
+        const out = await timed("officiele_bekendmakingen", () => bekend.search({ query: questionForSearch, maximumRecords: top, date_from: temporal?.from, date_to: temporal?.to }));
         const records = out.items.map((x)=>record("officielebekendmakingen", String(x.title ?? x.identifier ?? "Bekendmaking"), String(x.canonical_url ?? x.identifier ?? "https://zoek.officielebekendmakingen.nl"), x as Record<string, unknown>));
         if (records.length) {
           return askSuccess({ summary: `Router: Bekendmakingen (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), total: out.total });
@@ -1015,11 +1125,12 @@ export function registerTools(server: McpServer): void {
 
       if (has(rijkTerms)) {
         const rijkQuery = makeKeywordQuery(questionForSearch, 5) || questionForSearch;
-        let out = await rijksoverheid.search({ query: rijkQuery, top, date_from: temporal?.from, date_to: temporal?.to });
+        let out = await timed("rijksoverheid", () => rijksoverheid.search({ query: rijkQuery, top, date_from: temporal?.from, date_to: temporal?.to }));
         let records = out.items.map((x)=>record("rijksoverheid", String(x.title ?? x.id ?? "Rijksoverheid"), String(x.canonical ?? x.url ?? "https://www.rijksoverheid.nl"), x));
 
         if (!records.length && (q.includes("schoolvakantie") || q.includes("schoolvakanties"))) {
-          out = await rijksoverheid.search({ query: "schoolvakantie", top });
+          fallbackSteps.push("rijksoverheid:search:fallback_schoolvakantie");
+          out = await timed("rijksoverheid", () => rijksoverheid.search({ query: "schoolvakantie", top }));
           records = out.items.map((x)=>record("rijksoverheid", String(x.title ?? x.id ?? "Rijksoverheid"), String(x.canonical ?? x.url ?? "https://www.rijksoverheid.nl"), x));
         }
 
@@ -1030,7 +1141,7 @@ export function registerTools(server: McpServer): void {
 
       if (likelyBudget) {
         const budgetQuery = makeKeywordQuery(questionForSearch, 5) || questionForSearch;
-        const out = await rijksbegroting.search(budgetQuery, top);
+        const out = await timed("rijksbegroting", () => rijksbegroting.search(budgetQuery, top));
         const records = out.items.map((x)=>record("rijksbegroting", String(x.name ?? x.id ?? "Rijksbegroting"), String(x.url ?? "https://opendata.rijksbegroting.nl"), x));
         if (records.length) {
           return askSuccess({ summary: `Router: Rijksbegroting (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), total: out.total });
@@ -1039,7 +1150,7 @@ export function registerTools(server: McpServer): void {
 
       if (has(duoTerms)) {
         const duoQuery = makeKeywordQuery(questionForSearch, 5) || questionForSearch;
-        const out = await duo.datasetsCatalog(duoQuery, top);
+        const out = await timed("duo", () => duo.datasetsCatalog(duoQuery, top));
         const records = out.items.map((x)=>record("duo", String(x.title ?? x.name ?? x.id ?? "DUO"), String(x.url ?? "https://onderwijsdata.duo.nl"), x));
         if (records.length) {
           return askSuccess({ summary: `Router: DUO (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), total: out.total });
@@ -1056,14 +1167,14 @@ export function registerTools(server: McpServer): void {
           return toMcpToolPayload(errorResponse({ error: "not_configured", message: "OVERHEID_API_KEY ontbreekt voor API-register queries", suggestion: "Set OVERHEID_API_KEY" }));
         }
         const apiQuery = makeKeywordQuery(questionForSearch, 4) || questionForSearch;
-        const out = await new ApiRegisterSource(config, apiKey).search(apiQuery, top);
+        const out = await timed("api_register", () => new ApiRegisterSource(config, apiKey).search(apiQuery, top));
         const records = out.items.map((x)=>record("api-register", String(x.name ?? x.title ?? x.id ?? "API"), String(x.portalUrl ?? x.url ?? "https://apis.developer.overheid.nl"), x));
         if (records.length) {
           return askSuccess({ summary: `Router: API Register (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, records.length), access_note: "Requires OVERHEID_API_KEY", total: records.length });
         }
       }
 
-      const out = await dataOverheid.datasetsSearch({ query: questionForSearch, rows: top });
+      const out = await timed("data_overheid", () => dataOverheid.datasetsSearch({ query: questionForSearch, rows: top }));
       const records = out.items.map((d) => record("data.overheid.nl", String(d.title ?? d.id), `https://data.overheid.nl/dataset/${d.id}`, d as unknown as Record<string, unknown>, d.notes, d.metadata_modified));
       return askSuccess({ summary: `Router fallback: data.overheid (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.query, records.length, out.total), total: out.total });
     } catch (e) {

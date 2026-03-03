@@ -34,6 +34,7 @@ export interface MCPToolResponse {
   };
   output_format?: "json" | "csv" | "geojson" | "markdown_table";
   formatted_output?: string | Record<string, unknown>;
+  verbose?: Record<string, unknown>;
 }
 
 export type MCPErrorCode =

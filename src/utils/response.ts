@@ -19,6 +19,7 @@ export function successResponse(args: {
   pagination?: MCPToolResponse["pagination"];
   output_format?: MCPToolResponse["output_format"];
   formatted_output?: MCPToolResponse["formatted_output"];
+  verbose?: MCPToolResponse["verbose"];
 }): MCPToolResponse {
   return {
     summary: args.summary,
@@ -29,6 +30,7 @@ export function successResponse(args: {
     pagination: args.pagination,
     output_format: args.output_format,
     formatted_output: args.formatted_output,
+    verbose: args.verbose,
   };
 }
 
