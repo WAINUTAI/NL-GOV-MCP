@@ -41,6 +41,7 @@ MCP server for Dutch public-sector data sources with both **stdio** and **SSE/HT
     - Eurostat (`eurostat_datasets_search`, `eurostat_dataset_preview`)
     - data.europa.eu CKAN (`data_europa_datasets_search`)
 - Router/meta-tool: `nl_gov_ask` (NL/EN keyword routing with fallback, percent-encoded question decoding, stronger holiday/CBS/API routing, and multi-source parallel planning when explicit cross-source intent is detected)
+- Unified temporal parser (NL/EN) for natural date ranges (e.g. `vorige week`, `afgelopen maand`, `dit jaar`, `sinds 2020`, `tussen 2018 en 2022`) and connector-level date-filter mapping.
 
 ### Rechtspraak behavior notes
 - `rechtspraak_search_ecli` now mirrors the official frontend search backend (`/api/zoek`) instead of relying on the legacy open-data feed query behavior.
