@@ -98,7 +98,6 @@ export class CbsSource {
         continue;
       }
 
-      // Prefer obvious CBS matches when broad search is used.
       const preferred = candidateRows.filter((row) => {
         const text = `${String(row.title ?? "")} ${String(row.organization ? (row.organization as Record<string, unknown>).title ?? "" : "")}`.toLowerCase();
         return text.includes("cbs") || text.includes("centraal bureau voor de statistiek");
@@ -213,7 +212,6 @@ export class CbsSource {
     }
 
     if (!raw) {
-      // final fallback: return basic object
       const result = {
         tableId,
         info: { tableId },
@@ -227,7 +225,6 @@ export class CbsSource {
 
     const info = asItems(raw)[0] ?? raw;
 
-    // Try enrich with measures + dimensions (best effort)
     const enrichTargets = ["MeasureCodes", "Dimensions", "Perioden", "RegioS"];
     for (const target of enrichTargets) {
       try {
@@ -297,28 +294,37 @@ export class CbsSource {
     }>(cacheKey);
     if (cached) return cached;
 
-    let endpoint = `${this.config.endpoints.cbsV4}/${tableId}/Observations`;
-    let base = this.config.endpoints.cbsV4;
-    let data: Record<string, unknown>;
-    let metaUrl: string;
+    const probes: Array<{ endpoint: string; base: string }> = [
+      { endpoint: `${this.config.endpoints.cbsV4}/${tableId}/Observations`, base: this.config.endpoints.cbsV4 },
+      { endpoint: `${this.config.endpoints.cbsV4}/${tableId}/TypedDataSet`, base: this.config.endpoints.cbsV4 },
+      { endpoint: `${this.config.endpoints.cbsV3}/${tableId}/TypedDataSet`, base: this.config.endpoints.cbsV3 },
+      { endpoint: `${this.config.endpoints.cbsV3}/${tableId}/UntypedDataSet`, base: this.config.endpoints.cbsV3 },
+    ];
 
-    try {
-      const out = await getJson<Record<string, unknown>>(endpoint, { query: params });
-      data = out.data;
-      metaUrl = out.meta.url;
-    } catch {
-      endpoint = `${this.config.endpoints.cbsV3}/${tableId}/TypedDataSet`;
-      base = this.config.endpoints.cbsV3;
-      const out = await getJson<Record<string, unknown>>(endpoint, { query: params });
-      data = out.data;
-      metaUrl = out.meta.url;
+    let items: Array<Record<string, unknown>> = [];
+    let chosenEndpoint = probes[0].endpoint;
+    let chosenBase = probes[0].base;
+
+    for (const probe of probes) {
+      try {
+        const out = await getJson<Record<string, unknown>>(probe.endpoint, { query: params });
+        const parsed = asItems(out.data);
+        if (parsed.length || probe === probes[probes.length - 1]) {
+          items = parsed;
+          chosenEndpoint = out.meta.url;
+          chosenBase = probe.base;
+          break;
+        }
+      } catch {
+        // try next
+      }
     }
 
     const result = {
-      items: asItems(data),
-      endpoint: metaUrl,
+      items,
+      endpoint: chosenEndpoint,
       params,
-      base,
+      base: chosenBase,
     };
 
     appCache.set(cacheKey, result, this.config.cacheTtlMs.default);

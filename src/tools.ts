@@ -196,17 +196,20 @@ export function registerTools(server: McpServer): void {
   server.registerTool("knmi_warnings", { inputSchema: { top: z.number().int().min(1).max(200).default(20) } }, async ({ top }) => {
     const apiKey = process.env[ENV_KEYS.KNMI_API_KEY];
     if (!apiKey) return toMcpToolPayload(errorResponse({ error: "not_configured", message: "KNMI_API_KEY ontbreekt", suggestion: "Set KNMI_API_KEY to use KNMI tools" }));
-    try { const out = await new KnmiSource(config, apiKey).warnings(top); const records = out.items.map((x)=>record("knmi", String(x.filename ?? x.name ?? "Warning file"), "https://developer.dataplatform.knmi.nl", x)); return toMcpToolPayload(successResponse({ summary: `${records.length} warning files`, records, provenance: prov("knmi_warnings", out.endpoint, out.params, records.length, records.length), access_note: "Requires KNMI_API_KEY" })); } catch(e){ return toMcpToolPayload(mapSourceError(e, "KNMI")); }
+    try { const out = await new KnmiSource(config, apiKey).warnings(top); const records = out.items.map((x)=>record("knmi", String(x.filename ?? x.name ?? "Warning file"), "https://developer.dataplatform.knmi.nl", x)); const accessNote = (out as { access_note?: string }).access_note ?? "Requires KNMI_API_KEY"; return toMcpToolPayload(successResponse({ summary: `${records.length} warning files`, records, provenance: prov("knmi_warnings", out.endpoint, out.params, records.length, records.length), access_note: accessNote })); } catch(e){ return toMcpToolPayload(mapSourceError(e, "KNMI")); }
   });
 
   server.registerTool("knmi_earthquakes", { inputSchema: { top: z.number().int().min(1).max(200).default(20) } }, async ({ top }) => {
     const apiKey = process.env[ENV_KEYS.KNMI_API_KEY];
     if (!apiKey) return toMcpToolPayload(errorResponse({ error: "not_configured", message: "KNMI_API_KEY ontbreekt", suggestion: "Set KNMI_API_KEY to use KNMI tools" }));
-    try { const out = await new KnmiSource(config, apiKey).earthquakes(top); const records = out.items.map((x)=>record("knmi", String(x.filename ?? x.name ?? "Earthquake file"), "https://developer.dataplatform.knmi.nl", x)); return toMcpToolPayload(successResponse({ summary: `${records.length} earthquake files`, records, provenance: prov("knmi_earthquakes", out.endpoint, out.params, records.length, records.length), access_note: "Requires KNMI_API_KEY" })); } catch(e){ return toMcpToolPayload(mapSourceError(e, "KNMI")); }
+    try { const out = await new KnmiSource(config, apiKey).earthquakes(top); const records = out.items.map((x)=>record("knmi", String(x.filename ?? x.name ?? "Earthquake file"), "https://developer.dataplatform.knmi.nl", x)); const accessNote = (out as { access_note?: string }).access_note ?? "Requires KNMI_API_KEY"; return toMcpToolPayload(successResponse({ summary: `${records.length} earthquake files`, records, provenance: prov("knmi_earthquakes", out.endpoint, out.params, records.length, records.length), access_note: accessNote })); } catch(e){ return toMcpToolPayload(mapSourceError(e, "KNMI")); }
   });
 
   server.registerTool("nl_gov_ask", { inputSchema: { question: z.string(), top: z.number().int().min(1).max(config.limits.maxRows).default(10) }, description: "Meta-router for Dutch govt sources" }, async ({ question, top }) => {
-    const q = question.toLowerCase();
+    const decodedQuestion = (() => {
+      try { return decodeURIComponent(question.replace(/\+/g, " ")); } catch { return question; }
+    })();
+    const q = decodedQuestion.toLowerCase();
     const has = (terms: string[]) => terms.some((t) => q.includes(t));
 
     const stopwords = new Set([
@@ -227,54 +230,106 @@ export function registerTools(server: McpServer): void {
     const cbsTerms = ["cbs", "statistiek", "statistics", "bevolking", "population", "inwoners", "inflatie", "werkloos", "woning", "inkomen", "economie", "bbp", "gdp", "import", "export", "geboorte", "sterfte", "opleidingsniveau", "opleiding", "onderwijsniveau"];
     const tkTerms = ["tweede kamer", "parlement", "motie", "moties", "amendement", "kamerstuk", "kamervraag", "debat", "stemming", "fractie", "commissie", "wetsvoorstel", "kamerlid", "mp"];
     const obTerms = ["staatsblad", "staatscourant", "tractatenblad", "gemeenteblad", "bekendmaking", "verordening", "regeling", "officieel besluit", "stcrt", "gmb"];
-    const rijkTerms = ["rijksoverheid", "kabinet", "minister", "ministerie", "beleid", "toespraak", "schoolvakantie", "schoolvakanties", "school holiday", "school holidays"];
+    const rijkTerms = ["rijksoverheid", "kabinet", "minister", "ministerie", "beleid", "toespraak", "schoolvakantie", "schoolvakanties", "school holiday", "school holidays", "vakantie regio"];
     const budgetTerms = ["begroting", "budget", "uitgaven", "spending", "rijksfinanci", "begrotingsartikel", "defensie-uitgaven"];
     const duoTerms = ["school", "leerling", "student", "leraar", "teacher", "onderwijs", "education", "slagingspercentage", "examen", "diploma", "duo", "basisschool", "middelbare", "mbo", "hbo", "universiteit"];
     const weatherTerms = ["weer", "weather", "temperatuur", "rain", "regen", "wind", "storm", "klimaat", "earthquake", "aardbeving", "seismologie"];
     const apiTerms = ["welke api", "which api", "is er een api", "data over", "api heeft"];
 
+    const scoreCbsTable = (item: Record<string, unknown>): number => {
+      const title = String(item.Title ?? item.title ?? "").toLowerCase();
+      const summary = String(item.Summary ?? item.summary ?? "").toLowerCase();
+      const text = `${title} ${summary}`;
+      let score = 0;
+      if (q.includes("gemeente") && text.includes("gemeente")) score += 4;
+      if ((q.includes("opleidingsniveau") || q.includes("onderwijsniveau")) && (text.includes("opleiding") || text.includes("onderwijs"))) score += 5;
+      if ((q.includes("inwoner") || q.includes("bevolking")) && (text.includes("bevolking") || text.includes("inwoner"))) score += 4;
+      if (text.includes("regio")) score += 2;
+      if (text.includes("period")) score += 2;
+      const terms = makeCbsQuery(decodedQuestion).split(/\s+/).filter(Boolean);
+      for (const t of terms) if (text.includes(t)) score += 1;
+      return score;
+    };
+
     try {
-      const isSchoolHolidayQuery = q.includes("schoolvakantie") || q.includes("school holiday");
+      const isSchoolHolidayQuery = q.includes("schoolvakantie") || q.includes("schoolvakanties") || q.includes("school holiday") || q.includes("school holidays");
       if (isSchoolHolidayQuery) {
-        const yearMatch = question.match(/\b(20\d{2})\b/);
+        const yearMatch = decodedQuestion.match(/\b(20\d{2})\b/);
         const regionMatch = q.match(/\b(noord|midden|zuid)\b/);
-        const out = await rijksoverheid.schoolholidays({
+
+        let out = await rijksoverheid.schoolholidays({
           year: yearMatch ? Number(yearMatch[1]) : undefined,
           region: regionMatch ? regionMatch[1] : undefined,
         });
+
+        if (!out.items.length && regionMatch) {
+          out = await rijksoverheid.schoolholidays({ year: yearMatch ? Number(yearMatch[1]) : undefined });
+        }
+        if (!out.items.length && yearMatch) {
+          out = await rijksoverheid.schoolholidays({ region: regionMatch ? regionMatch[1] : undefined });
+        }
+
         const records = out.items.map((x)=>record("rijksoverheid", String(x.title ?? x.region ?? "Schoolvakantie"), String(x.canonical ?? "https://www.rijksoverheid.nl"), x, String(x.region ?? ""), String(x.startdate ?? "")));
-        return toMcpToolPayload(successResponse({ summary: `Router: Rijksoverheid schoolvakanties (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, records.length) }));
+        if (records.length) {
+          return toMcpToolPayload(successResponse({ summary: `Router: Rijksoverheid schoolvakanties (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, records.length) }));
+        }
+
+        const rijkOut = await rijksoverheid.search({ query: "schoolvakantie", top });
+        const rijkRecords = rijkOut.items.map((x)=>record("rijksoverheid", String(x.title ?? x.id ?? "Rijksoverheid"), String(x.canonical ?? x.url ?? "https://www.rijksoverheid.nl"), x));
+        if (rijkRecords.length) {
+          return toMcpToolPayload(successResponse({ summary: `Router: Rijksoverheid (${rijkRecords.length} resultaten)`, records: rijkRecords, provenance: prov("nl_gov_ask", rijkOut.endpoint, rijkOut.params, rijkRecords.length, rijkOut.total) }));
+        }
       }
 
       if (has(cbsTerms)) {
-        const candidates = [makeCbsQuery(question), question];
+        const candidates = [makeCbsQuery(decodedQuestion), decodedQuestion];
         if (q.includes("inwoner") || q.includes("population")) candidates.push("bevolking");
         if (q.includes("opleidingsniveau") || q.includes("opleiding")) candidates.push("opleidingsniveau gemeenten");
         if (q.includes("werkloos")) candidates.push("werkloosheid");
 
-        let out = await cbs.searchTables(candidates[0] || question, top);
-        let records = out.items.map((x) => record("cbs", String(x.Title ?? x.Identifier ?? "CBS"), "https://www.cbs.nl", x));
+        let out = await cbs.searchTables(candidates[0] || decodedQuestion, Math.max(top, 8));
+        let items = out.items;
 
-        if (!records.length) {
+        if (!items.length) {
           for (const candidate of candidates.slice(1)) {
             if (!candidate || !candidate.trim()) continue;
-            out = await cbs.searchTables(candidate, top);
-            records = out.items.map((x) => record("cbs", String(x.Title ?? x.Identifier ?? "CBS"), "https://www.cbs.nl", x));
-            if (records.length) break;
+            out = await cbs.searchTables(candidate, Math.max(top, 8));
+            items = out.items;
+            if (items.length) break;
           }
         }
 
-        if (records.length) {
-          return toMcpToolPayload(successResponse({ summary: `Router: CBS (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, records.length) }));
+        if (items.length) {
+          const sorted = [...items].sort((a, b) => scoreCbsTable(b) - scoreCbsTable(a));
+          const municipalityEducation = (q.includes("gemeente") || q.includes("municipality")) && (q.includes("opleidingsniveau") || q.includes("opleiding") || q.includes("education"));
+
+          if (municipalityEducation) {
+            const best = sorted[0];
+            const bestTableId = String(best.Identifier ?? best.id ?? "");
+            if (bestTableId) {
+              try {
+                const obsOut = await cbs.getObservations({ tableId: bestTableId, top });
+                const obsRecords = obsOut.items.map((x) => record("cbs", `Observatie ${bestTableId}`, `https://opendata.cbs.nl/#/CBS/nl/dataset/${bestTableId}`, x));
+                if (obsRecords.length) {
+                  return toMcpToolPayload(successResponse({ summary: `Router: CBS observaties (${obsRecords.length} resultaten)`, records: obsRecords, provenance: prov("nl_gov_ask", obsOut.endpoint, obsOut.params, obsRecords.length, obsRecords.length) }));
+                }
+              } catch {
+                // fall through to table-level response
+              }
+            }
+          }
+
+          const records = sorted.slice(0, top).map((x) => record("cbs", String(x.Title ?? x.Identifier ?? "CBS"), "https://www.cbs.nl", x));
+          return toMcpToolPayload(successResponse({ summary: `Router: CBS (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, items.length) }));
         }
       }
 
       if (has(tkTerms)) {
-        const tkCandidates = [makeKeywordQuery(question, 5), question];
+        const tkCandidates = [makeKeywordQuery(decodedQuestion, 5), decodedQuestion];
         if (q.includes("motie") || q.includes("moties")) tkCandidates.push("motie");
         if (q.includes("stikstof")) tkCandidates.push("motie stikstof");
 
-        let out = await tk.searchDocuments({ query: tkCandidates[0] || question, top });
+        let out = await tk.searchDocuments({ query: tkCandidates[0] || decodedQuestion, top });
         let records = out.items.map((x)=>record("tweedekamer", String(x.Titel ?? x.Id ?? "Document"), String(x.Url ?? x.resource_url ?? "https://www.tweedekamer.nl"), x));
 
         if (!records.length) {
@@ -292,7 +347,7 @@ export function registerTools(server: McpServer): void {
       }
 
       if (has(obTerms)) {
-        const out = await bekend.search({ query: question, maximumRecords: top });
+        const out = await bekend.search({ query: decodedQuestion, maximumRecords: top });
         const records = out.items.map((x)=>record("officielebekendmakingen", String(x.title ?? x.identifier ?? "Bekendmaking"), String(x.canonical_url ?? x.identifier ?? "https://zoek.officielebekendmakingen.nl"), x as Record<string, unknown>));
         if (records.length) {
           return toMcpToolPayload(successResponse({ summary: `Router: Bekendmakingen (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total) }));
@@ -300,9 +355,15 @@ export function registerTools(server: McpServer): void {
       }
 
       if (has(rijkTerms)) {
-        const rijkQuery = makeKeywordQuery(question, 5) || question;
-        const out = await rijksoverheid.search({ query: rijkQuery, top });
-        const records = out.items.map((x)=>record("rijksoverheid", String(x.title ?? x.id ?? "Rijksoverheid"), String(x.canonical ?? x.url ?? "https://www.rijksoverheid.nl"), x));
+        const rijkQuery = makeKeywordQuery(decodedQuestion, 5) || decodedQuestion;
+        let out = await rijksoverheid.search({ query: rijkQuery, top });
+        let records = out.items.map((x)=>record("rijksoverheid", String(x.title ?? x.id ?? "Rijksoverheid"), String(x.canonical ?? x.url ?? "https://www.rijksoverheid.nl"), x));
+
+        if (!records.length && (q.includes("schoolvakantie") || q.includes("schoolvakanties"))) {
+          out = await rijksoverheid.search({ query: "schoolvakantie", top });
+          records = out.items.map((x)=>record("rijksoverheid", String(x.title ?? x.id ?? "Rijksoverheid"), String(x.canonical ?? x.url ?? "https://www.rijksoverheid.nl"), x));
+        }
+
         if (records.length) {
           return toMcpToolPayload(successResponse({ summary: `Router: Rijksoverheid (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total) }));
         }
@@ -310,7 +371,7 @@ export function registerTools(server: McpServer): void {
 
       const likelyBudget = has(budgetTerms) || ((q.includes("hoeveel geeft") || q.includes("how much does")) && q.includes("uit"));
       if (likelyBudget) {
-        const budgetQuery = makeKeywordQuery(question, 5) || question;
+        const budgetQuery = makeKeywordQuery(decodedQuestion, 5) || decodedQuestion;
         const out = await rijksbegroting.search(budgetQuery, top);
         const records = out.items.map((x)=>record("rijksbegroting", String(x.name ?? x.id ?? "Rijksbegroting"), String(x.url ?? "https://opendata.rijksbegroting.nl"), x));
         if (records.length) {
@@ -319,7 +380,7 @@ export function registerTools(server: McpServer): void {
       }
 
       if (has(duoTerms)) {
-        const duoQuery = makeKeywordQuery(question, 5) || question;
+        const duoQuery = makeKeywordQuery(decodedQuestion, 5) || decodedQuestion;
         const out = await duo.datasetsCatalog(duoQuery, top);
         const records = out.items.map((x)=>record("duo", String(x.title ?? x.name ?? x.id ?? "DUO"), String(x.url ?? "https://onderwijsdata.duo.nl"), x));
         if (records.length) {
@@ -336,7 +397,7 @@ export function registerTools(server: McpServer): void {
         if (!apiKey) {
           return toMcpToolPayload(errorResponse({ error: "not_configured", message: "OVERHEID_API_KEY ontbreekt voor API-register queries", suggestion: "Set OVERHEID_API_KEY" }));
         }
-        const apiQuery = makeKeywordQuery(question, 4) || question;
+        const apiQuery = makeKeywordQuery(decodedQuestion, 4) || decodedQuestion;
         const out = await new ApiRegisterSource(config, apiKey).search(apiQuery, top);
         const records = out.items.map((x)=>record("api-register", String(x.name ?? x.title ?? x.id ?? "API"), String(x.portalUrl ?? x.url ?? "https://apis.developer.overheid.nl"), x));
         if (records.length) {
@@ -344,7 +405,7 @@ export function registerTools(server: McpServer): void {
         }
       }
 
-      const out = await dataOverheid.datasetsSearch({ query: question, rows: top });
+      const out = await dataOverheid.datasetsSearch({ query: decodedQuestion, rows: top });
       const records = out.items.map((d) => record("data.overheid.nl", String(d.title ?? d.id), `https://data.overheid.nl/dataset/${d.id}`, d as unknown as Record<string, unknown>, d.notes, d.metadata_modified));
       return toMcpToolPayload(successResponse({ summary: `Router fallback: data.overheid (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.query, records.length, out.total) }));
     } catch (e) {
