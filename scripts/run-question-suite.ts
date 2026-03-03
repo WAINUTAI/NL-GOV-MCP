@@ -354,6 +354,48 @@ const cases: CaseDef[] = [
     args: { query: "bag", rows: 2 },
     minRecords: 1,
   },
+  {
+    id: "rivm_discovery",
+    description: "RIVM discovery search",
+    tool: "rivm_discovery_search",
+    args: { query: "lucht", rows: 2 },
+    minRecords: 1,
+  },
+  {
+    id: "bag_linked_data_select",
+    description: "Kadaster BAG linked-data SELECT",
+    tool: "bag_linked_data_select",
+    args: { query: "SELECT * WHERE { ?s ?p ?o } LIMIT 1", limit: 1 },
+    minRecords: 1,
+  },
+  {
+    id: "rce_linked_data_select",
+    description: "RCE linked-data SELECT",
+    tool: "rce_linked_data_select",
+    args: { query: "SELECT * WHERE { ?s ?p ?o } LIMIT 1", limit: 1 },
+    minRecords: 1,
+  },
+  {
+    id: "eurostat_search",
+    description: "Eurostat dataset helper",
+    tool: "eurostat_datasets_search",
+    args: { query: "population", rows: 2 },
+    minRecords: 1,
+  },
+  {
+    id: "eurostat_preview",
+    description: "Eurostat dataset preview",
+    tool: "eurostat_dataset_preview",
+    args: { dataset: "tps00001", rows: 2 },
+    minRecords: 1,
+  },
+  {
+    id: "data_europa_search",
+    description: "data.europa.eu CKAN search",
+    tool: "data_europa_datasets_search",
+    args: { query: "climate", rows: 2 },
+    minRecords: 1,
+  },
   // nl_gov_ask (question-routing)
   {
     id: "ask_cbs",

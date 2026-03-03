@@ -94,6 +94,31 @@
   - gebruikt Rechtspraak zoekfeed en extraheert ECLI
   - fallback genereert deterministisch ECLI-resultaat met `access_note`
 
+## RIVM
+- `rivm_discovery_search`
+  - discovery/search helper for RIVM public API/dataset references
+  - tries structured CKAN-like endpoint first, then web-link discovery
+  - deterministic fallback record when live discovery is unstable
+
+## Linked Data / SPARQL (guarded)
+- `bag_linked_data_select`
+  - Kadaster BAG SPARQL endpoint (`SELECT` only)
+  - keyword guardrails block update/construct/service-style operations
+  - LIMIT is capped (max 100)
+  - deterministic fallback on endpoint instability
+- `rce_linked_data_select`
+  - RCE SPARQL endpoint (`SELECT` only)
+  - same read-only guardrails and LIMIT cap
+  - deterministic fallback on instability
+
+## EU bonus
+- `eurostat_datasets_search`
+  - deterministic Eurostat dataset catalog helper (search suggestions)
+- `eurostat_dataset_preview`
+  - fetches preview observations from Eurostat dataset code
+- `data_europa_datasets_search`
+  - data.europa.eu CKAN package_search helper (+ fallback)
+
 ## Meta router
 - `nl_gov_ask`
   - decodes percent-encoded questions before routing

@@ -49,15 +49,15 @@ Captured from operator guidance on 2026-03-02.
    - Why: legal and policy intelligence
    - Adapter needed: REST adapter
 
-10. **RIVM public APIs + Atlas API**
+10. **RIVM public APIs + Atlas API** ✅
     - Scope: health/environment APIs and map services
     - Why: policy + monitoring scenarios
-    - Adapter needed: REST + map adapter
+    - Adapter delivered: `rivm_discovery_search` (discovery + deterministic fallback)
 
-11. **Linked Data/SPARQL endpoints**
+11. **Linked Data/SPARQL endpoints** ✅
     - Scope: Kadaster BAG linked data, RCE linked data
     - Why: semantic cross-source querying
-    - Adapter needed: SPARQL adapter
+    - Adapter delivered: `bag_linked_data_select`, `rce_linked_data_select` (SELECT-only, LIMIT cap)
 
 ## Priority B (open but mixed/conditional)
 
@@ -67,8 +67,8 @@ Captured from operator guidance on 2026-03-02.
 
 ## Optional EU bonus
 
-- **Eurostat Statistics API**
-- **data.europa.eu CKAN API**
+- **Eurostat Statistics API** ✅ (`eurostat_datasets_search`, `eurostat_dataset_preview`)
+- **data.europa.eu CKAN API** ✅ (`data_europa_datasets_search`)
 
 ## Explicit exclusion (for now)
 
@@ -94,3 +94,6 @@ Captured from operator guidance on 2026-03-02.
 - [x] Add `rijkswaterstaat_waterdata_search`
 - [x] Add `ngr_discovery_search`
 - [x] Add `rechtspraak_search_ecli` tool
+- [x] Add `rivm_discovery_search` tool
+- [x] Add guarded SPARQL tools for BAG + RCE linked data
+- [x] Add EU bonus helpers (`eurostat_*`, `data_europa_datasets_search`)

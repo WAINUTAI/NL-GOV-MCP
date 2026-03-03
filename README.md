@@ -27,6 +27,13 @@ MCP server for Dutch public-sector data sources with both **stdio** and **SSE/HT
   - Rijkswaterstaat Waterdata (`rijkswaterstaat_waterdata_search`, live catalog metadata)
   - NGR (`ngr_discovery_search`, live CSW metadata discovery)
   - Rechtspraak (`rechtspraak_search_ecli`, XML feed parse + deterministic fallback)
+  - RIVM (`rivm_discovery_search`, discovery-first with deterministic fallback)
+  - Linked Data/SPARQL:
+    - Kadaster BAG (`bag_linked_data_select`, SELECT-only + LIMIT guardrails + fallback)
+    - RCE (`rce_linked_data_select`, SELECT-only + LIMIT guardrails + fallback)
+  - EU bonus:
+    - Eurostat (`eurostat_datasets_search`, `eurostat_dataset_preview`)
+    - data.europa.eu CKAN (`data_europa_datasets_search`)
 - Router/meta-tool: `nl_gov_ask` (NL/EN keyword routing with fallback, percent-encoded question decoding, stronger holiday/CBS/API routing)
 
 ## Run
