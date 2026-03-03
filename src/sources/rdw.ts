@@ -1,4 +1,5 @@
 import type { AppConfig } from "../types.js";
+import { loadConfig } from "../config.js";
 import { getJson } from "../utils/http.js";
 
 interface RdwRecord {
@@ -35,8 +36,14 @@ export class RdwSource {
   }
 
   async search(args: { query: string; rows: number }) {
-    const params = { $limit: String(Math.min(args.rows * 5, 100)), $order: "datum_tenaamstelling DESC" };
-    const { data, meta } = await getJson<RdwRecord[]>(RDW_ENDPOINT, { query: params, timeoutMs: 15_000 });
+    const params = {
+      $limit: String(Math.min(args.rows * 5, 100)),
+      $order: "datum_tenaamstelling DESC",
+    };
+    const { data, meta } = await getJson<RdwRecord[]>(RDW_ENDPOINT, {
+      query: params,
+      timeoutMs: 15_000,
+    });
 
     const q = args.query.toLowerCase();
     const items = (Array.isArray(data) ? data : [])
@@ -49,7 +56,7 @@ export class RdwSource {
         id: `${x.kenteken ?? `rdw-${i}`}`,
         title: `${x.merk ?? "Onbekend merk"} ${x.handelsbenaming ?? ""}`.trim(),
         url: "https://opendata.rdw.nl/",
-        updated_at: String(x.datum_tenaamstelling ?? ""),
+        updated_at: String((x as { datum_tenaamstelling?: unknown }).datum_tenaamstelling ?? ""),
         ...x,
       }));
 
@@ -58,7 +65,52 @@ export class RdwSource {
       total: items.length,
       endpoint: meta.url,
       params,
-      ...(items.length ? {} : { access_note: "Geen live match in RDW dataset voor deze zoekterm." }),
+      ...(items.length
+        ? {}
+        : { access_note: "Geen live match in RDW dataset voor deze zoekterm." }),
+    };
+  }
+}
+
+export async function search(query: string): Promise<{
+  data: unknown;
+  citations: Array<{
+    source: "rdw";
+    title: string;
+    url: string;
+    retrievedAt: string;
+    excerpt?: string;
+  }>;
+}> {
+  const cfg = loadConfig();
+  const src = new RdwSource(cfg);
+
+  try {
+    const out = await src.search({ query, rows: 5 });
+    return {
+      data: out.items,
+      citations: [
+        {
+          source: "rdw",
+          title: "RDW Open Data",
+          url: out.endpoint || "https://opendata.rdw.nl",
+          retrievedAt: new Date().toISOString(),
+        },
+      ],
+    };
+  } catch {
+    const out = src.fallback({ query, rows: 5 });
+    return {
+      data: out.items,
+      citations: [
+        {
+          source: "rdw",
+          title: "RDW Open Data (fallback)",
+          url: "https://opendata.rdw.nl",
+          retrievedAt: new Date().toISOString(),
+          excerpt: out.access_note,
+        },
+      ],
     };
   }
 }

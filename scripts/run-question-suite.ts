@@ -273,6 +273,7 @@ const cases: CaseDef[] = [
     tool: "knmi_latest_observations",
     args: { top: 2 },
     minRecords: 1,
+    allowErrors: ["rate_limited"],
     requireEnv: ["KNMI_API_KEY"],
   },
   {
