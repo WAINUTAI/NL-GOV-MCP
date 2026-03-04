@@ -100,6 +100,9 @@ Available on `nl_gov_ask` and major individual tools (`cbs_tables_search`, `cbs_
 - `nl_gov_ask` routes by intent, and can run multi-source queries in parallel.
 - Natural date expressions in NL/EN are parsed and mapped to source filters (`vorige week`, `sinds 2020`, `between 2018 and 2022`, etc.).
 
+### Cross-reference linking
+Post-processing adds `related_links[]` when records share key identifiers (e.g. `ECLI`, `BWBR`, municipality codes), and can enrich legal references with direct links to `wetten.overheid.nl`.
+
 ## Quick start
 
 ```bash

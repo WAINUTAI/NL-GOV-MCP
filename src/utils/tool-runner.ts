@@ -2,6 +2,7 @@ import type { MCPRecord, MCPToolResponse } from "../types.js";
 import { getConnectorHealth } from "./connector-runtime.js";
 import { applyOutputFormat, paginateRecords, type OutputFormat } from "./output-format.js";
 import { successResponse } from "./response.js";
+import { enrichRelatedLinks } from "./cross-reference.js";
 
 export function mergeAccessNotes(...notes: Array<string | undefined>): string | undefined {
   const clean = notes.map((n) => (n ?? "").trim()).filter(Boolean);
@@ -20,7 +21,9 @@ export function buildFormattedResponse(args: {
   failures?: NonNullable<MCPToolResponse["failures"]>;
   verbose?: Record<string, unknown>;
 }): MCPToolResponse {
-  const paged = paginateRecords(args.records, {
+  const linkedRecords = enrichRelatedLinks(args.records);
+
+  const paged = paginateRecords(linkedRecords, {
     offset: args.offset,
     limit: args.limit,
     total: args.total === undefined ? args.records.length : args.total,
