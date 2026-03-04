@@ -93,7 +93,7 @@ Pagination via `offset` / `limit` with metadata (`pagination`).
 - `dryRun`: shows planned API calls without executing them
 - `verbose`: adds request timings, fallback steps, and connector health snapshots
 
-Available on `nl_gov_ask` and major individual tools.
+Available on `nl_gov_ask` and major individual tools (`cbs_tables_search`, `cbs_observations`, `data_overheid_datasets_search`, `duo_datasets_search`, `tweede_kamer_documents`, `tweede_kamer_search`, `officiele_bekendmakingen_search`, `rijksoverheid_search`, `rijksbegroting_search`, `overheid_api_register_search`).
 
 ### Smart routing + temporal parsing
 - `nl_gov_ask` routes by intent, and can run multi-source queries in parallel.
