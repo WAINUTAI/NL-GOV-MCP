@@ -67,6 +67,7 @@ No setup required — the following run automatically in-process:
 - Per-connector concurrency limiter (default 3 in-flight, overflow queued with timeout)
 - In-process HTTP response cache with hardcoded TTL per source category
 - Per-connector health counters (exposed via `/health/sources` on SSE transport)
+- Shared composable tool runner for search-style tools (single implementation for pagination, formatting, dry-run and verbose diagnostics rollout)
 
 ### Graceful error handling
 Typed errors:
