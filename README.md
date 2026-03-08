@@ -29,7 +29,7 @@ Examples:
 | Source | What it covers |
 |---|---|
 | CBS | Statistics Netherlands (demographics, economy, housing, labour; v4/v3 + fallback) |
-| Tweede Kamer | Parliamentary documents, search, voting records, member info; single-document retrieval can optionally resolve resource URLs and include capped text previews for text-like formats |
+| Tweede Kamer | Parliamentary documents, search, voting records, member info |
 | Officiële Bekendmakingen | Official publications (SRU/XML search + lookup) |
 | Rijksoverheid | National government search, docs, topics, ministries, school holidays |
 | Rijksbegroting | National budget data + chapter helper |
@@ -50,15 +50,6 @@ Examples:
 | RCE (Linked Data) | SPARQL access to cultural heritage linked data |
 | Eurostat | EU statistics search + preview |
 | data.europa.eu | EU open data catalog |
-
-### Tweede Kamer document retrieval
-
-- `tweede_kamer_documents` stays lean and returns search/discovery metadata.
-- `tweede_kamer_document_get` can optionally:
-  - resolve the underlying resource URL / file metadata
-  - include a capped text preview for text-like resources
-- PDFs remain resource-only in lean mode (no built-in PDF text extraction).
-- `nl_gov_ask` may automatically deepen the top Tweede Kamer match when the user explicitly asks for content/summary rather than only discovery.
 
 ## Key features
 
@@ -138,14 +129,27 @@ npm run test:questions
 npm run test:live
 ```
 
-### stdio transport (Claude Desktop, Claude Code)
+## Configuration
+
+### Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NL_GOV_HTTP_PORT` | `3333` | HTTP port for SSE transport |
+| `NL_GOV_TIMEZONE` | `Europe/Amsterdam` | Default timezone used by `nl_gov_ask` for natural date parsing |
+| `KNMI_API_KEY` | — | Required for KNMI weather tools |
+| `OVERHEID_API_KEY` | — | Required for API register tool |
+
+### Transport modes
+
+#### stdio transport (Claude Desktop, Claude Code)
 
 ```bash
 npm run dev     # development
 npm run start   # production
 ```
 
-### SSE/HTTP transport
+#### SSE/HTTP transport
 
 ```bash
 npm run dev:sse    # development
@@ -161,14 +165,7 @@ SSE endpoints:
 | `GET /health` | Server health check |
 | `GET /health/sources` | Per-connector runtime health snapshot |
 
-### Docker
-
-```bash
-docker build -f docker/Dockerfile -t nl-gov-mcp .
-docker run --rm -p 3333:3333 nl-gov-mcp
-```
-
-## Claude Desktop integration
+### Claude Desktop integration
 
 Build the project, then add an entry to your Claude Desktop config.
 
@@ -181,6 +178,7 @@ Build the project, then add an entry to your Claude Desktop config.
     "nl-gov-mcp": {
       "command": "node",
       "args": ["/absolute/path/to/NL-GOV-MCP/dist/src/index.js"],
+}
       "env": {
         "OVERHEID_API_KEY": "...",
         "KNMI_API_KEY": "...",
@@ -191,43 +189,66 @@ Build the project, then add an entry to your Claude Desktop config.
 }
 ```
 
-Restart Claude Desktop after saving.
+### Docker
 
-## Environment variables
+```bash
+docker build -f docker/Dockerfile -t nl-gov-mcp .
+docker run --rm -p 3333:3333 nl-gov-mcp
+```
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `NL_GOV_HTTP_PORT` | `3333` | HTTP port for SSE transport |
-| `NL_GOV_TIMEZONE` | `Europe/Amsterdam` | Default timezone used by `nl_gov_ask` for natural date parsing |
-| `KNMI_API_KEY` | — | Required for KNMI weather tools |
-| `OVERHEID_API_KEY` | — | Required for API register tool |
+## Source-specific details
 
-## Rechtspraak details
+### Tweede Kamer document retrieval
 
-`rechtspraak_search_ecli` mirrors the official frontend search backend (`/api/zoek`) instead of the legacy open-data feed.
+You can use the generic `nl_gov_ask` tool (which routes to the right source automatically), or target specific sources with dedicated tools like `tweede_kamer_documents`.
 
-Date/publication filters are inferred from natural language:
-- *"tot 1 maand geleden"* → `BinnenEenMaand`
-- *"heel 2026"* / *"dit jaar"* → `DitJaar`
+All Tweede Kamer tools support:
+- Natural date parsing (`vorige maand`, `sinds 2023`, etc.)
+- Pagination via `offset` and `limit`
+- Output format selection (`json`, `csv`, `markdown_table`)
+- Dry run mode for debugging
 
-Responses include facet-driven context in `access_note` when filters are applied.
+### Rechtspraak details
+
+The Rechtspraak tool (`rechtspraak_search`, used by `nl_gov_ask` and standalone) maps ECLI to full document URL and publication date. You can filter by:
+- Date range
+- Court type
+- Legal domain
+
+Results include direct links to the full rulings on uitspraken.rechtspraak.nl.
+
+### CBS observations
+
+When querying CBS observations:
+- Trend enrichment is automatic when the result has a single period dimension and one numeric measure
+- Use `outputFormat: "json"` for machine-readable output
+- Use `verbose: true` to see fallback steps and timing
+
+### DUO and education data
+
+DUO datasets include school performance data, exam results, and RIO (school registry) information. Use the `duo_datasets_search` tool to discover available datasets, then use specific tools for retrieval.
 
 ## Documentation
 
-See:
-- `docs/SOURCES.md`
-- `docs/TOOLS.md`
-- `docs/BACKLOG-SOURCES.md`
+Full documentation is available in the `/docs` folder:
+
+- [Architecture overview](./docs/ARCHITECTURE.md)
+- [Tool reference](./docs/TOOLS.md)
+- [Source connectors](./docs/CONNECTORS.md)
+- [Troubleshooting](./docs/TROUBLESHOOTING.md)
 
 ## Contributing
 
-NL-GOV-MCP is open source. If you find a bug, want to add a source connector, or improve existing ones — PRs are welcome.
+Contributions are welcome! Please read the [contributing guide](./CONTRIBUTING.md) before submitting PRs.
+
+### Adding new sources
+
+1. Create a new connector in `src/connectors/`
+2. Implement the `SourceConnector` interface
+3. Add the source to the registry in `src/registry.ts`
+4. Add tests in `tests/connectors/`
+5. Update this README with the new source
 
 ## License
 
-This project is licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for additional details.
-
----
-
-Built and maintained by [WAiNuT](https://wainut.ai) — AI Recruitment, AI Consulting & Implementation, AI & Data Training.
-For custom implementations, government integrations, or AI training: [get in touch](https://wainut.ai).
+MIT License - see [LICENSE](./LICENSE) for details.
