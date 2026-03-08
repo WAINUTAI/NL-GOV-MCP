@@ -1,4 +1,4 @@
-import { getJson } from "../utils/http.js";
+import { getJson, getText } from "../utils/http.js";
 import type { AppConfig } from "../types.js";
 
 function toItems(data: unknown): Array<Record<string, unknown>> {
@@ -11,6 +11,31 @@ function toItems(data: unknown): Array<Record<string, unknown>> {
 
 function escapeODataString(value: string): string {
   return value.replace(/'/g, "''");
+}
+
+function normalizeContentType(value: unknown): string {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+function isTextLikeContentType(contentType: string): boolean {
+  return (
+    contentType.startsWith("text/") ||
+    contentType.includes("json") ||
+    contentType.includes("xml") ||
+    contentType.includes("html") ||
+    contentType.includes("xhtml")
+  );
+}
+
+function normalizeTextPreview(input: string, maxChars: number): { text: string; truncated: boolean } {
+  const compact = input.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  if (compact.length <= maxChars) {
+    return { text: compact, truncated: false };
+  }
+  return {
+    text: `${compact.slice(0, Math.max(0, maxChars)).trimEnd()}…`,
+    truncated: true,
+  };
 }
 
 export class TweedeKamerSource {
@@ -125,21 +150,63 @@ export class TweedeKamerSource {
     return this.fetchEntity("Document", params);
   }
 
-  async getDocument(id: string) {
-    const docEndpoint = `${this.config.endpoints.tweedeKamer}/Document(${id})`;
+  async getDocument(args: {
+    id: string;
+    resolve_resource?: boolean;
+    include_text?: boolean;
+    max_chars?: number;
+  }) {
+    const docEndpoint = `${this.config.endpoints.tweedeKamer}/Document(${args.id})`;
     const { data, meta } = await getJson<Record<string, unknown>>(docEndpoint);
 
-    const resourceUrl = `${this.config.endpoints.tweedeKamer}/Document(${id})/Resource`;
-    const typedResourceUrl = `${this.config.endpoints.tweedeKamer}/Document(${id})/TK.DA.GGM.OData.Resource`;
+    const resourceUrl = `${this.config.endpoints.tweedeKamer}/Document(${args.id})/Resource`;
+    const typedResourceUrl = `${this.config.endpoints.tweedeKamer}/Document(${args.id})/TK.DA.GGM.OData.Resource`;
+    const maxChars = Math.max(1, Math.min(50_000, args.max_chars ?? 12_000));
+    const contentType = normalizeContentType(data.ContentType);
+
+    const item: Record<string, unknown> = {
+      ...data,
+      resource_url: resourceUrl,
+      typed_resource_url: typedResourceUrl,
+    };
+
+    if (args.resolve_resource || args.include_text) {
+      item.resource_resolved = true;
+      item.resolved_resource_url = resourceUrl;
+      item.resource_content_type = contentType || String(data.ContentType ?? "");
+      item.resource_content_length = data.ContentLength ?? null;
+    }
+
+    if (args.include_text) {
+      if (!contentType) {
+        item.text_preview_unavailable_reason = "missing_content_type";
+      } else if (contentType.includes("pdf")) {
+        item.text_preview_unavailable_reason = "pdf_not_extracted_in_lean_mode";
+      } else if (!isTextLikeContentType(contentType)) {
+        item.text_preview_unavailable_reason = "content_type_not_text_like";
+      } else {
+        const resource = await getText(resourceUrl, {
+          headers: {
+            accept: "text/plain, text/html, application/json, application/xml;q=0.9, */*;q=0.1",
+          },
+        });
+        const preview = normalizeTextPreview(resource.data, maxChars);
+        item.resolved_resource_url = resource.meta.url;
+        item.text_preview = preview.text;
+        item.text_preview_chars = preview.text.length;
+        item.text_preview_truncated = preview.truncated;
+      }
+    }
 
     return {
-      item: {
-        ...data,
-        resource_url: resourceUrl,
-        typed_resource_url: typedResourceUrl,
-      },
+      item,
       endpoint: meta.url,
-      params: { id },
+      params: {
+        id: args.id,
+        resolve_resource: String(Boolean(args.resolve_resource)),
+        include_text: String(Boolean(args.include_text)),
+        max_chars: String(maxChars),
+      },
     };
   }
 

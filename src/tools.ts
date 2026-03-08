@@ -88,6 +88,29 @@ function metadataScore(rec: MCPRecord): number {
   return score;
 }
 
+export function shouldDeepenTweedeKamerQuery(question: string): boolean {
+  const q = question.trim().toLowerCase();
+  if (!q) return false;
+
+  const explicitContentIntent = [
+    /\bvat(?:\s+\w+){0,4}\s+samen\b/i,
+    /\bsamenvatting\b/i,
+    /\bsummary\b/i,
+    /\bsummar(?:ise|ize)\b/i,
+    /\bwat\s+staat\s+er(?:in|\s+in)\b/i,
+    /\binhoud\b/i,
+    /\bleg\s+uit\b/i,
+    /\banalyse(?:er)?\b/i,
+    /\bwat\s+is\s+besloten\b/i,
+    /\bwat\s+heeft\s+de\s+tweede\s+kamer\s+besloten\b/i,
+    /\bwat\s+besluiten\s+deze\s+stukken\b/i,
+    /\bwhat\s+does\s+(?:this|the)\s+(?:document|motion|letter|brief|stuk)\s+say\b/i,
+    /\bwhat\s+is\s+in\s+(?:this|the)\s+(?:document|motion|letter|brief|stuk)\b/i,
+  ];
+
+  return explicitContentIntent.some((pattern) => pattern.test(q));
+}
+
 function dedupeMergedRecords(records: MCPRecord[]): MCPRecord[] {
   const byId = new Map<string, MCPRecord>();
   const passthrough: MCPRecord[] = [];
@@ -375,8 +398,43 @@ export function registerTools(server: McpServer): void {
     } catch(e){ return toMcpToolPayload(mapSourceError(e, "Tweede Kamer", "https://www.tweedekamer.nl")); }
   });
 
-  server.registerTool("tweede_kamer_document_get", { inputSchema: { id: z.string() } }, async ({ id }) => {
-    try { const out = await tk.getDocument(id); const r = out.item as Record<string, unknown>; const records = [record("tweedekamer", String(r.Titel ?? r.Onderwerp ?? r.Id ?? id), String(r.resource_url ?? `https://www.tweedekamer.nl`), r, String(r.Onderwerp ?? ""), String(r.Datum ?? ""))]; return toMcpToolPayload(successResponse({ summary: `Tweede Kamer document ${id}`, records, provenance: prov("tweede_kamer_document_get", out.endpoint, out.params, 1, 1) })); } catch(e){ return toMcpToolPayload(mapSourceError(e, "Tweede Kamer", "https://www.tweedekamer.nl")); }
+  server.registerTool("tweede_kamer_document_get", { inputSchema: { id: z.string(), resolve_resource: z.boolean().default(false), include_text: z.boolean().default(false), max_chars: z.number().int().min(1).max(50000).optional() } }, async ({ id, resolve_resource, include_text, max_chars }) => {
+    try {
+      const out = await tk.getDocument({ id, resolve_resource, include_text, max_chars });
+      const r = out.item as Record<string, unknown>;
+      const textPreview = typeof r.text_preview === "string" ? r.text_preview : undefined;
+      const contentType = String(r.resource_content_type ?? r.ContentType ?? "");
+      const notes: string[] = [];
+
+      if (resolve_resource || include_text) {
+        notes.push(`Resource resolved as ${contentType || "unknown content type"}.`);
+      }
+      if (include_text && textPreview) {
+        notes.push(`Included text preview (${textPreview.length} chars${r.text_preview_truncated ? ", truncated" : ""}).`);
+      } else if (include_text && r.text_preview_unavailable_reason === "pdf_not_extracted_in_lean_mode") {
+        notes.push("PDF text extraction is intentionally skipped in lean mode; use the resolved resource URL for downstream PDF handling.");
+      } else if (include_text && typeof r.text_preview_unavailable_reason === "string") {
+        notes.push(`Text preview unavailable: ${r.text_preview_unavailable_reason}.`);
+      }
+
+      const records = [
+        record(
+          "tweedekamer",
+          String(r.Titel ?? r.Onderwerp ?? r.Id ?? id),
+          String(r.resolved_resource_url ?? r.resource_url ?? `https://www.tweedekamer.nl`),
+          r,
+          textPreview ?? String(r.Onderwerp ?? ""),
+          String(r.Datum ?? ""),
+        ),
+      ];
+
+      return toMcpToolPayload(successResponse({
+        summary: `Tweede Kamer document ${id}`,
+        records,
+        provenance: prov("tweede_kamer_document_get", out.endpoint, out.params, 1, 1),
+        access_note: notes.length ? notes.join(" ") : undefined,
+      }));
+    } catch(e){ return toMcpToolPayload(mapSourceError(e, "Tweede Kamer", "https://www.tweedekamer.nl")); }
   });
 
   server.registerTool("tweede_kamer_votes", { inputSchema: { zaak_id: z.string().optional(), date: z.string().optional(), top: z.number().int().min(1).max(config.limits.maxRows).default(100) } }, async ({ zaak_id, date, top }) => {
@@ -1358,6 +1416,60 @@ export function registerTools(server: McpServer): void {
         }
 
         if (records.length) {
+          const shouldDeepen = shouldDeepenTweedeKamerQuery(decodedQuestion);
+          if (shouldDeepen) {
+            const topMatch = out.items.find((item) => typeof item.Id === "string" && item.Id.trim()) as Record<string, unknown> | undefined;
+            const topMatchId = typeof topMatch?.Id === "string" ? topMatch.Id.trim() : "";
+
+            if (topMatchId) {
+              try {
+                const deepOut = await timed("tweede_kamer", () => tk.getDocument({
+                  id: topMatchId,
+                  resolve_resource: true,
+                  include_text: true,
+                  max_chars: 4000,
+                }));
+                const deepRecordData = deepOut.item as Record<string, unknown>;
+                const deepSnippet = typeof deepRecordData.text_preview === "string"
+                  ? deepRecordData.text_preview
+                  : String(deepRecordData.Onderwerp ?? "");
+                const deepRecord = record(
+                  "tweedekamer",
+                  String(deepRecordData.Titel ?? deepRecordData.Onderwerp ?? deepRecordData.Id ?? topMatchId),
+                  String(deepRecordData.resolved_resource_url ?? deepRecordData.resource_url ?? "https://www.tweedekamer.nl"),
+                  deepRecordData,
+                  deepSnippet,
+                  String(deepRecordData.Datum ?? ""),
+                );
+
+                const remainingRecords = records.filter((candidate) => {
+                  const id = (candidate.data ?? {}) as Record<string, unknown>;
+                  return String(id.Id ?? id.id ?? "") !== topMatchId;
+                });
+
+                const deepAccessNotes: string[] = [
+                  "Top Tweede Kamer match was verdiept because the question asked for content/summary rather than only discovery.",
+                ];
+
+                if (typeof deepRecordData.text_preview === "string") {
+                  deepAccessNotes.push(`Included capped text preview for top match (${deepRecordData.text_preview.length} chars${deepRecordData.text_preview_truncated ? ", truncated" : ""}).`);
+                } else if (deepRecordData.text_preview_unavailable_reason === "pdf_not_extracted_in_lean_mode") {
+                  deepAccessNotes.push("Top match is a PDF; lean mode resolves the resource URL but skips built-in PDF text extraction.");
+                }
+
+                return askSuccess({
+                  summary: `Router: Tweede Kamer (${records.length} resultaten, top match verdiept)`,
+                  records: [deepRecord, ...remainingRecords],
+                  provenance: prov("nl_gov_ask", deepOut.endpoint, { ...out.params, deep_document_id: topMatchId }, records.length, records.length),
+                  total: records.length,
+                  access_note: deepAccessNotes.join(" "),
+                });
+              } catch {
+                fallbackSteps.push(`tweede_kamer:deep_fetch_failed:${topMatchId}`);
+              }
+            }
+          }
+
           return askSuccess({ summary: `Router: Tweede Kamer (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, records.length), total: records.length });
         }
       }

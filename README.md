@@ -29,7 +29,7 @@ Examples:
 | Source | What it covers |
 |---|---|
 | CBS | Statistics Netherlands (demographics, economy, housing, labour; v4/v3 + fallback) |
-| Tweede Kamer | Parliamentary documents, search, voting records, member info |
+| Tweede Kamer | Parliamentary documents, search, voting records, member info; single-document retrieval can optionally resolve resource URLs and include capped text previews for text-like formats |
 | Officiële Bekendmakingen | Official publications (SRU/XML search + lookup) |
 | Rijksoverheid | National government search, docs, topics, ministries, school holidays |
 | Rijksbegroting | National budget data + chapter helper |
@@ -50,6 +50,15 @@ Examples:
 | RCE (Linked Data) | SPARQL access to cultural heritage linked data |
 | Eurostat | EU statistics search + preview |
 | data.europa.eu | EU open data catalog |
+
+### Tweede Kamer document retrieval
+
+- `tweede_kamer_documents` stays lean and returns search/discovery metadata.
+- `tweede_kamer_document_get` can optionally:
+  - resolve the underlying resource URL / file metadata
+  - include a capped text preview for text-like resources
+- PDFs remain resource-only in lean mode (no built-in PDF text extraction).
+- `nl_gov_ask` may automatically deepen the top Tweede Kamer match when the user explicitly asks for content/summary rather than only discovery.
 
 ## Key features
 

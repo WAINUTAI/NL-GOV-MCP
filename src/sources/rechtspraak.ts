@@ -44,6 +44,12 @@ interface RechtspraakApiResponse {
   };
 }
 
+type RechtspraakSortOrder =
+  | "Relevance"
+  | "PublicatieDatumDesc"
+  | "UitspraakDatumDesc"
+  | "UitspraakDatumAsc";
+
 const RECHTSPRAAK_SEARCH_PAGE = "https://uitspraken.rechtspraak.nl/resultaat";
 const RECHTSPRAAK_SEARCH_API = "https://uitspraken.rechtspraak.nl/api/zoek";
 const RECHTSPRAAK_CONTENT = "https://data.rechtspraak.nl/uitspraken/content";
@@ -76,6 +82,79 @@ function correlationId32(): string {
 
 function resolveSearchTerm(query: string): string {
   return query.trim().replace(/\s+/g, " ");
+}
+
+function cleanupRecencyQuery(input: string): string {
+  const stopwords = new Set([
+    "wat",
+    "is",
+    "de",
+    "het",
+    "een",
+    "van",
+    "voor",
+    "met",
+    "in",
+    "over",
+    "rondom",
+    "omtrent",
+    "betreffende",
+    "about",
+    "around",
+    "regarding",
+    "latest",
+    "newest",
+    "most",
+    "recent",
+    "laatste",
+    "nieuwste",
+    "recentste",
+    "meest",
+    "recente",
+    "ecli",
+    "nummer",
+    "number",
+    "uitspraak",
+    "uitspraken",
+    "waterschades",
+    "geef",
+    "toon",
+    "zoek",
+    "vind",
+  ]);
+
+  const tokens = input
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .split(/\s+/)
+    .filter((token) => token.length > 1 && !stopwords.has(token));
+
+  return tokens.join(" ").trim();
+}
+
+function resolveRecencyIntent(query: string):
+  | { sortOrder: RechtspraakSortOrder; cleanedQuery: string; reason: string }
+  | undefined {
+  const raw = query.trim();
+  if (!raw) return undefined;
+
+  const recencyPattern = /\b(?:laatste|nieuwste|recentste|meest\s+recent(?:e)?|latest|newest|most\s+recent)\b/i;
+  if (!recencyPattern.test(raw)) return undefined;
+
+  const sortOrder: RechtspraakSortOrder = /\buitspraakdatum\b/i.test(raw)
+    ? "UitspraakDatumDesc"
+    : "PublicatieDatumDesc";
+
+  const cleanedQuery = cleanupRecencyQuery(raw) || raw;
+
+  return {
+    sortOrder,
+    cleanedQuery,
+    reason:
+      sortOrder === "UitspraakDatumDesc"
+        ? "gesorteerd op uitspraakdatum aflopend"
+        : "gesorteerd op publicatiedatum aflopend",
+  };
 }
 
 function cleanupQueryAfterFilter(input: string): string {
@@ -190,14 +269,21 @@ export class RechtspraakSource {
 
   async searchEcli(args: { query: string; rows: number }) {
     const filter = resolvePublicatieFilter(args.query);
-    const searchTerm = resolveSearchTerm(filter?.cleanedQuery ?? args.query);
+    const recency = resolveRecencyIntent(args.query);
+
+    let searchTermCandidate = recency?.cleanedQuery ?? filter?.cleanedQuery ?? args.query;
+    if (filter) {
+      searchTermCandidate = cleanupQueryAfterFilter(searchTermCandidate) || searchTermCandidate;
+    }
+    const searchTerm = resolveSearchTerm(searchTermCandidate);
+    const sortOrder: RechtspraakSortOrder = recency?.sortOrder ?? "Relevance";
 
     const payload = {
       StartRow: 0,
       PageSize: Math.min(Math.max(args.rows, 1), 50),
       ShouldReturnHighlights: true,
       ShouldCountFacets: true,
-      SortOrder: "Relevance",
+      SortOrder: sortOrder,
       SearchTerms: [{ Term: searchTerm, Field: "AlleVelden" }],
       Contentsoorten: [] as Array<Record<string, unknown>>,
       Rechtsgebieden: [] as Array<Record<string, unknown>>,
@@ -219,7 +305,7 @@ export class RechtspraakSource {
       Proceduresoorten: [] as Array<Record<string, unknown>>,
     };
 
-    const referer = `${RECHTSPRAAK_SEARCH_PAGE}?zoekterm=${encodeURIComponent(searchTerm)}&inhoudsindicatie=zt0&sort=Relevance&publicatiestatus=ps1`;
+    const referer = `${RECHTSPRAAK_SEARCH_PAGE}?zoekterm=${encodeURIComponent(searchTerm)}&inhoudsindicatie=zt0&sort=${encodeURIComponent(sortOrder)}&publicatiestatus=ps1`;
 
     const { data, meta } = await postJson<RechtspraakApiResponse>(
       RECHTSPRAAK_SEARCH_API,
@@ -259,6 +345,9 @@ export class RechtspraakSource {
           : `Filter actief: ${filter.reason} (facetcount=${publicatieCount}).`,
       );
     }
+    if (recency) {
+      accessNotes.push(`Recency-intent gedetecteerd: ${recency.reason}.`);
+    }
 
     const monthCount = facetCount(data.FacetCounts, "DatumPublicatie", "BinnenEenMaand");
     const yearCount = facetCount(data.FacetCounts, "DatumPublicatie", "DitJaar");
@@ -276,6 +365,7 @@ export class RechtspraakSource {
         params: {
           term: searchTerm,
           rows: String(args.rows),
+          sortOrder,
           ...(filter ? { publicatieFilter: filter.identifier } : {}),
         },
         access_note:
@@ -291,6 +381,7 @@ export class RechtspraakSource {
       params: {
         term: searchTerm,
         rows: String(args.rows),
+        sortOrder,
         ...(filter ? { publicatieFilter: filter.identifier } : {}),
       },
       ...(accessNotes.length ? { access_note: accessNotes.join(" ") } : {}),

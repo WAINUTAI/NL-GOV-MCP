@@ -15,6 +15,11 @@
 - `tweede_kamer_documents`
 - `tweede_kamer_search`
 - `tweede_kamer_document_get`
+  - default: lean metadata + resource endpoints
+  - optional: `resolve_resource` to expose resolved file metadata/URL
+  - optional: `include_text` to fetch a capped preview for text-like resources
+  - PDFs stay resource-only in lean mode (no built-in PDF text extraction)
+  - `nl_gov_ask` can auto-deepen the top match on explicit content/summary questions
 - `tweede_kamer_votes`
 - `tweede_kamer_members`
 
