@@ -1,5 +1,6 @@
 import { appCache, makeCacheKey } from "../cache.js";
 import type { AppConfig } from "../types.js";
+import { injectCbsTrends } from "../utils/cbs-trends.js";
 import { and, buildODataQuery, contains, equals } from "../utils/odata.js";
 import { getJson } from "../utils/http.js";
 
@@ -321,7 +322,7 @@ export class CbsSource {
     }
 
     const result = {
-      items,
+      items: injectCbsTrends(items),
       endpoint: chosenEndpoint,
       params,
       base: chosenBase,

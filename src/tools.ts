@@ -297,9 +297,11 @@ export function registerTools(server: McpServer): void {
       const responseTimeMs = Date.now() - started;
 
       const records = out.items.map((x) => record("cbs", `Observatie ${tableId}`, `https://opendata.cbs.nl/#/CBS/nl/dataset/${tableId}`, x));
+      const trendMeasure = out.items.find((x) => typeof x.trend_measure === "string")?.trend_measure as string | undefined;
       const response = buildFormattedResponse({
         summary: `${records.length} observaties`,
         records,
+        access_note: trendMeasure ? `CBS trend enrichment applied for measure ${trendMeasure} (previous_period, previous_value, delta, delta_pct).` : undefined,
         provenance: prov("cbs_observations", out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), records.length),
         outputFormat,
         offset,
@@ -1384,7 +1386,14 @@ export function registerTools(server: McpServer): void {
                 const obsOut = await timed("cbs", () => cbs.getObservations({ tableId: bestTableId, top }));
                 const obsRecords = obsOut.items.map((x) => record("cbs", `Observatie ${bestTableId}`, `https://opendata.cbs.nl/#/CBS/nl/dataset/${bestTableId}`, x));
                 if (obsRecords.length) {
-                  return askSuccess({ summary: `Router: CBS observaties (${obsRecords.length} resultaten)`, records: obsRecords, provenance: prov("nl_gov_ask", obsOut.endpoint, obsOut.params, obsRecords.length, obsRecords.length), total: obsRecords.length });
+                  const trendMeasure = obsOut.items.find((x) => typeof x.trend_measure === "string")?.trend_measure as string | undefined;
+                  return askSuccess({
+                    summary: `Router: CBS observaties (${obsRecords.length} resultaten)`,
+                    records: obsRecords,
+                    provenance: prov("nl_gov_ask", obsOut.endpoint, obsOut.params, obsRecords.length, obsRecords.length),
+                    total: obsRecords.length,
+                    access_note: trendMeasure ? `CBS trend enrichment applied for measure ${trendMeasure} (previous_period, previous_value, delta, delta_pct).` : undefined,
+                  });
                 }
               } catch {
                 // fall through to table-level response

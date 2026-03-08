@@ -10,6 +10,12 @@
 - `cbs_tables_search`
 - `cbs_table_info`
 - `cbs_observations`
+  - injects lightweight trend fields when the result shape clearly supports it:
+    - `previous_period`
+    - `previous_value`
+    - `delta`
+    - `delta_pct`
+  - only activates when there is a single clear period dimension and one numeric measure
 
 ## Tweede Kamer
 - `tweede_kamer_documents`

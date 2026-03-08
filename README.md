@@ -103,6 +103,14 @@ Pagination via `offset` / `limit` with metadata (`pagination`).
 - `dryRun`: shows planned API calls without executing them
 - `verbose`: adds request timings, fallback steps, and connector health snapshots
 
+### CBS trend enrichment
+- `cbs_observations` now injects lightweight trend fields when the result shape clearly supports it:
+  - `previous_period`
+  - `previous_value`
+  - `delta`
+  - `delta_pct`
+- This only activates when there is a single clear period dimension and one numeric measure, so it stays inert on ambiguous wide tables.
+
 Available on `nl_gov_ask` and major individual tools (`cbs_tables_search`, `cbs_observations`, `data_overheid_datasets_search`, `duo_datasets_search`, `tweede_kamer_documents`, `tweede_kamer_search`, `officiele_bekendmakingen_search`, `rijksoverheid_search`, `rijksbegroting_search`, `overheid_api_register_search`).
 
 ### Smart routing + temporal parsing
@@ -127,6 +135,7 @@ npm run check
 npm test
 npm run build
 npm run test:questions
+npm run test:live
 ```
 
 ### stdio transport (Claude Desktop, Claude Code)

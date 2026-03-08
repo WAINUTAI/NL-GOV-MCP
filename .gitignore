@@ -3,3 +3,4 @@ dist/
 .env
 .DS_Store
 scripts/question-suite-report.json
+scripts/live-suite-report.json

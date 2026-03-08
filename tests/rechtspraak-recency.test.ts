@@ -4,6 +4,12 @@ import { RechtspraakSource } from "../src/sources/rechtspraak.js";
 
 const config = loadConfig();
 
+function getMockRequestBody(fetchMock: ReturnType<typeof vi.fn>) {
+  const call = fetchMock.mock.calls[0] as unknown as Array<unknown> | undefined;
+  const init = call?.[1] as RequestInit | undefined;
+  return JSON.parse(String(init?.body));
+}
+
 describe("Rechtspraak recency intent", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -30,8 +36,7 @@ describe("Rechtspraak recency intent", () => {
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    const init = (fetchMock.mock.calls[0] as unknown as Array<unknown> | undefined)?.[1] as RequestInit | undefined;
-    const body = JSON.parse(String(init?.body));
+    const body = getMockRequestBody(fetchMock);
 
     expect(body.SortOrder).toBe("PublicatieDatumDesc");
     expect(body.SearchTerms[0].Term).toBe("waterschade");
@@ -62,8 +67,7 @@ describe("Rechtspraak recency intent", () => {
       rows: 5,
     });
 
-    const init = (fetchMock.mock.calls[0] as unknown as Array<unknown> | undefined)?.[1] as RequestInit | undefined;
-    const body = JSON.parse(String(init?.body));
+    const body = getMockRequestBody(fetchMock);
 
     expect(body.SortOrder).toBe("PublicatieDatumDesc");
     expect(body.SearchTerms[0].Term).toBe("waterschade");

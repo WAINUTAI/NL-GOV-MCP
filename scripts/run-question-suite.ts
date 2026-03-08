@@ -16,6 +16,8 @@ interface CaseDef {
   args?: ArgMap | ((ctx: Context) => ArgMap);
   minRecords?: number;
   allowErrors?: string[];
+  skipErrors?: string[];
+  skipMessageIncludes?: string[];
   requireEnv?: string[];
   saveContext?: Record<string, string>;
 }
@@ -84,6 +86,30 @@ function runTool(tool: string, args: ArgMap): { payload?: Record<string, unknown
     return { elapsedMs, execError: msg };
   }
 }
+
+const requestedProfile = (() => {
+  const idx = process.argv.indexOf("--profile");
+  return idx >= 0 ? String(process.argv[idx + 1] ?? "full") : "full";
+})();
+
+const LIVE_CASE_IDS = new Set([
+  "cbs_search",
+  "cbs_table_info",
+  "cbs_observations",
+  "tk_documents",
+  "tk_document_get",
+  "ob_search",
+  "ob_get",
+  "rijk_search",
+  "rijk_document",
+  "rechtspraak_search_ecli",
+  "pdok_search",
+  "bag_lookup",
+  "luchtmeetnet_latest",
+  "ask_cbs",
+  "ask_tk",
+  "ask_rijk",
+]);
 
 const cases: CaseDef[] = [
   {
@@ -258,6 +284,8 @@ const cases: CaseDef[] = [
     tool: "overheid_api_register_search",
     args: { query: "kadaster", top: 3 },
     minRecords: 1,
+    skipErrors: ["circuit_open", "http_error"],
+    skipMessageIncludes: ["temporarily unavailable", "status 503"],
     requireEnv: ["OVERHEID_API_KEY"],
   },
   {
@@ -432,6 +460,8 @@ const cases: CaseDef[] = [
     tool: "nl_gov_ask",
     args: { question: "Welke API heeft kadaster", top: 3 },
     minRecords: 1,
+    skipErrors: ["circuit_open", "http_error"],
+    skipMessageIncludes: ["temporarily unavailable", "status 503"],
     requireEnv: ["OVERHEID_API_KEY"],
   },
   {
@@ -448,6 +478,9 @@ async function main() {
   const results: CaseResult[] = [];
 
   for (const testCase of cases) {
+    if (requestedProfile === "live" && !LIVE_CASE_IDS.has(testCase.id)) {
+      continue;
+    }
     const missingEnv = (testCase.requireEnv ?? []).filter((k) => !process.env[k]);
     if (missingEnv.length) {
       results.push({
@@ -463,7 +496,7 @@ async function main() {
     }
 
     const args = typeof testCase.args === "function" ? testCase.args(context) : (testCase.args ?? {});
-    const maxAttempts = 2;
+    const maxAttempts = requestedProfile === "live" ? 3 : 2;
     let finalResult: CaseResult | undefined;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -486,16 +519,23 @@ async function main() {
 
         if (isError) {
           const code = String(payload.error);
+          const message = String(payload.message ?? "unknown error");
           const allowed = (testCase.allowErrors ?? []).includes(code);
+          const shouldSkip =
+            (testCase.skipErrors ?? []).includes(code) &&
+            ((testCase.skipMessageIncludes ?? []).length === 0 ||
+              (testCase.skipMessageIncludes ?? []).some((part) =>
+                message.toLowerCase().includes(part.toLowerCase()),
+              ));
           finalResult = {
             id: testCase.id,
             tool: testCase.tool,
             description: testCase.description,
-            status: allowed ? "PASS" : "FAIL",
+            status: allowed ? "PASS" : shouldSkip ? "SKIP" : "FAIL",
             elapsedMs: out.elapsedMs,
             records: 0,
             error: code,
-            message: String(payload.message ?? "unknown error"),
+            ...(shouldSkip ? { reason: `${code}: ${message}` } : { message }),
           };
         } else {
           const records = Array.isArray(payload.records) ? payload.records.length : 0;
@@ -545,7 +585,9 @@ async function main() {
   const fail = results.filter((r) => r.status === "FAIL").length;
   const skip = results.filter((r) => r.status === "SKIP").length;
 
-  console.log(`\nNL-GOV-MCP question suite @ ${nowIso()}`);
+  const suiteLabel = requestedProfile === "live" ? "live suite" : "question suite";
+
+  console.log(`\nNL-GOV-MCP ${suiteLabel} @ ${nowIso()}`);
   console.log(`PASS=${pass} FAIL=${fail} SKIP=${skip} TOTAL=${results.length}\n`);
 
   for (const r of results) {
@@ -568,7 +610,10 @@ async function main() {
     results,
   };
 
-  const reportPath = path.resolve(process.cwd(), "scripts/question-suite-report.json");
+  const reportPath = path.resolve(
+    process.cwd(),
+    requestedProfile === "live" ? "scripts/live-suite-report.json" : "scripts/question-suite-report.json",
+  );
   fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
   console.log(`\nReport written: ${reportPath}`);
 
