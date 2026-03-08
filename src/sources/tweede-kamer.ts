@@ -186,6 +186,7 @@ export class TweedeKamerSource {
         item.text_preview_unavailable_reason = "content_type_not_text_like";
       } else {
         const resource = await getText(resourceUrl, {
+          disableCache: true,
           headers: {
             accept: "text/plain, text/html, application/json, application/xml;q=0.9, */*;q=0.1",
           },

@@ -60,6 +60,8 @@ function prov(tool: string, endpoint: string, query_params: Record<string, strin
 }
 
 const outputFormatSchema = z.enum(["json", "csv", "geojson", "markdown_table"]).default("json");
+const cbsFilterScalarSchema = z.union([z.string(), z.number(), z.boolean()]);
+const cbsFilterValueSchema = z.union([cbsFilterScalarSchema, z.array(cbsFilterScalarSchema)]);
 const paginationInputSchema = {
   offset: z.number().int().min(0).default(0),
   limit: z.number().int().min(1).max(config.limits.maxRows).optional(),
@@ -279,7 +281,7 @@ export function registerTools(server: McpServer): void {
     } catch (e) { return toMcpToolPayload(mapSourceError(e, "CBS")); }
   });
 
-  server.registerTool("cbs_observations", { inputSchema: { tableId: z.string(), top: z.number().int().min(1).max(config.limits.maxRows).default(50), select: z.array(z.string()).optional(), filters: z.record(z.string(), z.any()).optional(), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) } }, async ({ tableId, top, select, filters, offset, limit, outputFormat, verbose, dryRun }) => {
+  server.registerTool("cbs_observations", { inputSchema: { tableId: z.string(), top: z.number().int().min(1).max(config.limits.maxRows).default(50), select: z.array(z.string()).optional(), filters: z.record(z.string(), cbsFilterValueSchema).optional(), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) } }, async ({ tableId, top, select, filters, offset, limit, outputFormat, verbose, dryRun }) => {
     try {
       const effectiveLimit = limit ?? top;
       const fetchRows = Math.min(config.limits.maxRows, Math.max(top, offset + effectiveLimit));
@@ -1535,10 +1537,25 @@ export function registerTools(server: McpServer): void {
           return toMcpToolPayload(errorResponse({ error: "not_configured", message: "OVERHEID_API_KEY ontbreekt voor API-register queries", suggestion: "Set OVERHEID_API_KEY" }));
         }
         const apiQuery = makeKeywordQuery(questionForSearch, 4) || questionForSearch;
-        const out = await timed("api_register", () => new ApiRegisterSource(config, apiKey).search(apiQuery, top));
-        const records = out.items.map((x)=>record("api-register", String(x.name ?? x.title ?? x.id ?? "API"), String(x.portalUrl ?? x.url ?? "https://apis.developer.overheid.nl"), x));
-        if (records.length) {
-          return askSuccess({ summary: `Router: API Register (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, records.length), access_note: "Requires OVERHEID_API_KEY", total: records.length });
+        try {
+          const out = await timed("api_register", () => new ApiRegisterSource(config, apiKey).search(apiQuery, top));
+          const records = out.items.map((x)=>record("api-register", String(x.name ?? x.title ?? x.id ?? "API"), String(x.portalUrl ?? x.url ?? "https://apis.developer.overheid.nl"), x));
+          if (records.length) {
+            return askSuccess({ summary: `Router: API Register (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, records.length), access_note: "Requires OVERHEID_API_KEY", total: records.length });
+          }
+        } catch (apiError) {
+          const mapped = mapSourceError(apiError, "API Register", "https://apis.developer.overheid.nl");
+          return toMcpToolPayload(errorResponse({
+            error: mapped.error,
+            message: mapped.message,
+            suggestion: mapped.suggestion,
+            retry_after: mapped.retry_after,
+            details: {
+              ...(mapped.details ?? {}),
+              connector: "api_register",
+              route: "nl_gov_ask",
+            },
+          }));
         }
       }
 
