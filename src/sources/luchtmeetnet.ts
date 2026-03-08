@@ -42,7 +42,7 @@ export class LuchtmeetnetSource {
     };
     if (args.component) params.formula = args.component;
 
-    const { data, meta } = await getJson<LuchtMeetnetResponse>(LUCHTMEETNET_ENDPOINT, { query: params });
+    const { data, meta } = await getJson<LuchtMeetnetResponse>(LUCHTMEETNET_ENDPOINT, { query: params, retries: 4 });
     const items = (Array.isArray(data.data) ? data.data : []).map(enrich);
 
     return {

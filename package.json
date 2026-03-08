@@ -7,8 +7,10 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/index.ts",
     "dev:sse": "tsx src/index.ts --sse",
+    "dev:streamable-http": "tsx src/index.ts --streamable-http",
     "start": "node dist/src/index.js",
     "start:sse": "node dist/src/index.js --sse",
+    "start:streamable-http": "node dist/src/index.js --streamable-http",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:questions": "tsx scripts/run-question-suite.ts --profile full",
@@ -22,6 +24,9 @@
   "keywords": [],
   "author": "",
   "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "bugs": {
     "url": "https://github.com/WAINUTAI/NL-GOV-MCP/issues"
   },

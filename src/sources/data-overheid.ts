@@ -46,12 +46,14 @@ export class DataOverheidSource {
   async datasetsSearch(args: {
     query: string;
     rows: number;
+    sort?: "relevance" | "date_newest";
     organization?: string;
     theme?: string;
   }): Promise<{ items: CkanDataset[]; total: number; endpoint: string; query: Record<string, string> }> {
     const queryParams: Record<string, string> = {
       q: args.query,
       rows: String(args.rows),
+      ...(args.sort === "date_newest" ? { sort: "metadata_modified desc" } : {}),
     };
 
     const fqParts: string[] = [];

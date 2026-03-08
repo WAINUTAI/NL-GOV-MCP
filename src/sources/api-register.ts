@@ -91,41 +91,27 @@ export class ApiRegisterSource {
   constructor(private readonly config: AppConfig, private readonly apiKey: string) {}
 
   private async tryOfficialApi(query: string, top: number) {
-    const endpoints = [
-      `${this.config.endpoints.apiRegister}/api/v1/apis`,
-      `${this.config.endpoints.apiRegister}/v1/apis`,
-      `${this.config.endpoints.apiRegister}/api/apis`,
-    ];
+    // Single attempt at the most likely JSON API endpoint.
+    // The developer.overheid.nl JSON API has been unreliable (often 404);
+    // if this fails, we fall back to HTML scraping which is reliable.
+    const endpoint = `${this.config.endpoints.apiRegister}/api/v1/apis`;
+    try {
+      const { data, meta } = await getJson<Record<string, unknown>>(endpoint, {
+        query: { q: query, limit: String(top) },
+        headers: { "X-API-Key": this.apiKey },
+        timeoutMs: 5_000,
+      });
 
-    for (const endpoint of endpoints) {
-      const paramVariants: Array<Record<string, string>> = [
-        { q: query, limit: String(top) },
-        { query, limit: String(top) },
-        { search: query, limit: String(top) },
-      ];
+      const items =
+        (data.items as Array<Record<string, unknown>> | undefined) ??
+        (data.apis as Array<Record<string, unknown>> | undefined) ??
+        [];
 
-      for (const params of paramVariants) {
-        try {
-          const { data, meta } = await getJson<Record<string, unknown>>(endpoint, {
-            query: params,
-            headers: {
-              "X-API-Key": this.apiKey,
-              Authorization: this.apiKey,
-            },
-          });
-
-          const items =
-            (data.items as Array<Record<string, unknown>> | undefined) ??
-            (data.apis as Array<Record<string, unknown>> | undefined) ??
-            [];
-
-          if (items.length) {
-            return { items, endpoint: meta.url, params };
-          }
-        } catch {
-          // try next variant
-        }
+      if (items.length) {
+        return { items, endpoint: meta.url, params: { q: query, limit: String(top) } };
       }
+    } catch {
+      // JSON API not available — fall through to HTML scraping
     }
 
     return undefined;

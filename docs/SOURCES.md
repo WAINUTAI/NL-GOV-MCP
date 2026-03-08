@@ -5,8 +5,9 @@
 - endpoints: `package_search`, `package_show`, `organization_list`, `group_list`
 
 ## CBS
-- Primary: `https://odata4.cbs.nl/CBS`
+- Primary: `https://datasets.cbs.nl/odata/v1/CBS`
 - Fallback: `https://opendata.cbs.nl/ODataApi/OData`
+- Second fallback: `data.overheid.nl` (CBS organization filter)
 
 ## Tweede Kamer
 - `https://gegevensmagazijn.tweedekamer.nl/OData/v4/2.0`

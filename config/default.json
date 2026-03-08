@@ -22,7 +22,7 @@
   },
   "endpoints": {
     "dataOverheid": "https://data.overheid.nl/data/api/3/action",
-    "cbsV4": "https://odata4.cbs.nl/CBS",
+    "cbsV4": "https://datasets.cbs.nl/odata/v1/CBS",
     "cbsV3": "https://opendata.cbs.nl/ODataApi/OData",
     "tweedeKamer": "https://gegevensmagazijn.tweedekamer.nl/OData/v4/2.0",
     "bekendmakingenSru": "https://repository.overheid.nl/sru",

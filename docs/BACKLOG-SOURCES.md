@@ -63,12 +63,13 @@ Captured from operator guidance on 2026-03-02.
 
 - **DSO / Omgevingswet APIs**
   - Availability depends on confidentiality/access profile
+  - API key: [request access](https://developer.omgevingswet.overheid.nl/formulieren/api-key-aanvragen-0/)
   - Add once endpoint access model is confirmed per service
 
 ## Optional EU bonus
 
 - **Eurostat Statistics API** ✅ (`eurostat_datasets_search`, `eurostat_dataset_preview`)
-- **data.europa.eu CKAN API** ✅ (`data_europa_datasets_search`)
+- **data.europa.eu Search API** ✅ (`data_europa_datasets_search`)
 
 ## Explicit exclusion (for now)
 

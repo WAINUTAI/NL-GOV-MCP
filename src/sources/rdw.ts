@@ -90,20 +90,17 @@ export class RdwSource {
         $limit: String(Math.min(args.rows * 5, 100)),
         $where: `upper(merk) like '%${escapedLike}%' or upper(handelsbenaming) like '%${escapedLike}%' or upper(voertuigsoort) like '%${escapedLike}%'`,
         $order: "datum_tenaamstelling DESC",
+        __timeoutMs: "8000", // LIKE with leading wildcards is slow on Socrata
       });
     }
 
-    // Last-resort broad fetch + local filter.
-    attemptParams.push({
-      $limit: String(Math.min(args.rows * 20, 200)),
-      $order: "datum_tenaamstelling DESC",
-    });
-
     for (const params of attemptParams) {
       try {
+        const timeoutMs = params.__timeoutMs ? Number(params.__timeoutMs) : 15_000;
+        const { __timeoutMs: _, ...cleanParams } = params;
         const { data, meta } = await getJson<RdwRecord[]>(RDW_ENDPOINT, {
-          query: params,
-          timeoutMs: 15_000,
+          query: cleanParams,
+          timeoutMs,
         });
 
         const raw = Array.isArray(data) ? data : [];

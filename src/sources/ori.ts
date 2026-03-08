@@ -57,31 +57,42 @@ function toOriItem(hit: ElasticHit): OriItem {
 export class OriSource {
   constructor(private readonly config: AppConfig) {}
 
-  async search(args: { query: string; rows: number; bestuurslaag?: string }) {
-    const query = {
-      q: args.bestuurslaag ? `${args.query} ${args.bestuurslaag}` : args.query,
-      size: String(args.rows),
-      sort: "_score:desc",
-    };
+  async search(args: { query: string; rows: number; sort?: "relevance" | "date_newest"; bestuurslaag?: string }) {
+    const wantDateSort = args.sort === "date_newest";
+    const baseQ = args.bestuurslaag ? `${args.query} ${args.bestuurslaag}` : args.query;
 
-    for (const endpoint of ORI_DISCOVERY_ENDPOINTS) {
-      try {
-        const { data, meta } = await getJson<ElasticResponse>(endpoint, { query, timeoutMs: 20_000, retries: 1 });
-        const hits = Array.isArray(data.hits?.hits) ? data.hits?.hits : [];
-        const items = hits.map(toOriItem).filter((x) => x.id || x.title);
-        const totalRaw = data.hits?.total;
-        const total = typeof totalRaw === "number" ? totalRaw : Number(totalRaw?.value ?? items.length);
+    // Try with sort parameter first, then fall back to no-sort + client-side sort
+    const queryVariants: Array<Record<string, string>> = [
+      { q: baseQ, size: String(args.rows), sort: wantDateSort ? "datePublished:desc" : "_score:desc" },
+      { q: baseQ, size: String(args.rows) }, // without sort (some ORI versions reject it)
+    ];
 
-        if (items.length) {
-          return {
-            items,
-            total,
-            endpoint: meta.url,
-            params: query,
-          };
+    for (const query of queryVariants) {
+      for (const endpoint of ORI_DISCOVERY_ENDPOINTS) {
+        try {
+          const { data, meta } = await getJson<ElasticResponse>(endpoint, { query, timeoutMs: 20_000, retries: 1 });
+          const hits = Array.isArray(data.hits?.hits) ? data.hits?.hits : [];
+          let items = hits.map(toOriItem).filter((x) => x.id || x.title);
+          const totalRaw = data.hits?.total;
+          const total = typeof totalRaw === "number" ? totalRaw : Number(totalRaw?.value ?? items.length);
+
+          if (items.length) {
+            // Client-side date sort when server-side sort was unavailable
+            if (wantDateSort && !query.sort) {
+              items = [...items].sort((a, b) =>
+                (b.publishedAt ?? "").localeCompare(a.publishedAt ?? ""),
+              );
+            }
+            return {
+              items,
+              total,
+              endpoint: meta.url,
+              params: query,
+            };
+          }
+        } catch {
+          // try next endpoint
         }
-      } catch {
-        // try next endpoint
       }
     }
 

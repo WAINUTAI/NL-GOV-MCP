@@ -107,8 +107,9 @@
 
 ## RIVM
 - `rivm_discovery_search`
-  - discovery/search helper for RIVM public API/dataset references
-  - tries structured CKAN-like endpoint first, then web-link discovery
+  - discovery/search helper for RIVM public datasets
+  - primary: GeoNetwork CSW (`data.rivm.nl/geonetwork/srv/eng/csw`) with CQL AnyText
+  - secondary: directory listing fallback (`data.rivm.nl/data/`)
   - deterministic fallback record when live discovery is unstable
 
 ## Linked Data / SPARQL (guarded)
@@ -128,7 +129,7 @@
 - `eurostat_dataset_preview`
   - fetches preview observations from Eurostat dataset code
 - `data_europa_datasets_search`
-  - data.europa.eu CKAN package_search helper (+ fallback)
+  - data.europa.eu Search API helper (`data.europa.eu/api/hub/search/search`) (+ fallback)
 
 ## Meta router
 - `nl_gov_ask`
@@ -137,7 +138,7 @@
   - improved CBS ranking for municipality/education phrasing
 
 ## Known limits / behavior notes
-- KNMI `knmi_warnings` and `knmi_earthquakes` try multiple likely datasets and return a clear `access_note` if no public dataset name currently resolves.
+- KNMI `knmi_warnings` (`waarschuwingen_nederland_48h`) and `knmi_earthquakes` (`aardbevingen_nederland`) try multiple dataset candidates and return a clear `access_note` if none currently resolves.
 - DUO `duo_schools` and `duo_exam_results` aggregate several query variants and include `helper_query` in record data for provenance.
 - API register search uses official endpoints first; if unavailable, deterministic HTML-card scoring fallback is used.
 

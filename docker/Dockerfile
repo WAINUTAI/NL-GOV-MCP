@@ -5,4 +5,4 @@ RUN npm ci
 COPY . .
 RUN npm run build
 EXPOSE 3333
-CMD ["node", "dist/index.js", "--sse"]
+CMD ["node", "dist/src/index.js", "--sse"]

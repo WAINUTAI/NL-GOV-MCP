@@ -32,14 +32,14 @@ const KNMI_KNOWN_DATASETS: Array<Record<string, unknown>> = [
     description: "Radar reflectivity composites",
   },
   {
-    datasetName: "waarschuwingen_huidige",
-    version: "1",
-    description: "Current weather warnings (dataset name may vary by platform release)",
+    datasetName: "waarschuwingen_nederland_48h",
+    version: "1.0",
+    description: "Weather warnings for the Netherlands (next 48 hours)",
   },
   {
-    datasetName: "knmi_seismologie",
-    version: "1",
-    description: "Seismology / earthquakes (dataset name may vary by platform release)",
+    datasetName: "aardbevingen_nederland",
+    version: "2",
+    description: "Last 100 earthquakes in/around the Netherlands",
   },
 ];
 
@@ -160,9 +160,8 @@ export class KnmiSource {
     const discovered = await this.discoverByTerms(["waarschu", "warning", "alert"]);
     return this.firstWorkingDataset(
       [
-        { datasetName: "waarschuwingen_huidige", version: "1" },
-        { datasetName: "weather-warnings", version: "1" },
-        { datasetName: "weather_warnings", version: "1" },
+        { datasetName: "waarschuwingen_nederland_48h", version: "1.0" },
+        { datasetName: "potential_weather_warnings_upcoming_week", version: "1" },
         ...discovered,
       ],
       top,
@@ -173,9 +172,8 @@ export class KnmiSource {
     const discovered = await this.discoverByTerms(["seismo", "earthquake", "aardbeving"]);
     return this.firstWorkingDataset(
       [
-        { datasetName: "knmi_seismologie", version: "1" },
-        { datasetName: "earthquakes", version: "1" },
-        { datasetName: "seismology", version: "1" },
+        { datasetName: "aardbevingen_nederland", version: "2" },
+        { datasetName: "aardbevingen_catalogus", version: "1" },
         ...discovered,
       ],
       top,

@@ -4,7 +4,7 @@ Dutch public-sector data is scattered across many sources that do not natively w
 
 `NL-GOV-MCP` connects what the Dutch government has not connected itself: **one interface, many sources, one question, one answer — with provenance**.
 
-It is an open-source [Model Context Protocol](https://modelcontextprotocol.io/) server that lets AI assistants search, combine, and return data from Dutch public-sector sources. Built by [WAiNuT](https://wainut.ai), a one-stop AI shop in the Netherlands (AI Recruitment, AI Consulting & Implementation, AI & Data Training).
+It is an open-source [Model Context Protocol](https://modelcontextprotocol.io/) server that lets AI assistants search, combine, and return data from Dutch public-sector sources. Built by [WAINUT](https://wainut.ai), a one-stop AI shop in the Netherlands (AI Recruitment, AI Consulting & Implementation, AI & Data Training).
 
 ## What can you do with this?
 
@@ -24,7 +24,7 @@ Examples:
 
 `NL-GOV-MCP` actively retrieves and normalizes data across many sources, can combine cross-source results, and returns a consistent MCP response contract ready for assistants and automations.
 
-## Sources
+## Sources (22 connectors, 48 tools)
 
 | Source | What it covers |
 |---|---|
@@ -60,6 +60,8 @@ Every tool returns the same shape:
 - `provenance`
 - optional `access_note`
 - optional `failures[]`
+- optional `pagination` (offset, limit, total, has_more)
+- optional `verbose` (request timings, connector health snapshots)
 
 ### Built-in resilience (zero-config)
 No setup required — the following run automatically in-process:
@@ -67,7 +69,6 @@ No setup required — the following run automatically in-process:
 - Per-connector concurrency limiter (default 3 in-flight, overflow queued with timeout)
 - In-process HTTP response cache with hardcoded TTL per source category
 - Per-connector health counters (exposed via `/health/sources` on SSE transport)
-- Shared composable tool runner for search-style tools (single implementation for pagination, formatting, dry-run and verbose diagnostics rollout)
 
 ### Graceful error handling
 Typed errors:
@@ -81,28 +82,21 @@ Typed errors:
 
 This lets assistants respond meaningfully instead of failing hard.
 
-### Structured output
-Optional `outputFormat` on supported tools:
-- `json`
-- `csv`
-- `geojson`
-- `markdown_table`
-
-Pagination via `offset` / `limit` with metadata (`pagination`).
-
-### Debug modes
+### Structured output & debug modes
+- `outputFormat`: `json` (default), `csv`, `geojson`, `markdown_table`
+- `offset` / `limit`: pagination with metadata
 - `dryRun`: shows planned API calls without executing them
 - `verbose`: adds request timings, fallback steps, and connector health snapshots
 
+Available on `nl_gov_ask` and major individual tools: `cbs_tables_search`, `cbs_observations`, `data_overheid_datasets_search`, `duo_datasets_search`, `tweede_kamer_documents`, `tweede_kamer_search`, `officiele_bekendmakingen_search`, `rijksoverheid_search`, `rijksbegroting_search`, `overheid_api_register_search`.
+
 ### CBS trend enrichment
-- `cbs_observations` now injects lightweight trend fields when the result shape clearly supports it:
+- `cbs_observations` injects lightweight trend fields when the result shape clearly supports it:
   - `previous_period`
   - `previous_value`
   - `delta`
   - `delta_pct`
 - This only activates when there is a single clear period dimension and one numeric measure, so it stays inert on ambiguous wide tables.
-
-Available on `nl_gov_ask` and major individual tools (`cbs_tables_search`, `cbs_observations`, `data_overheid_datasets_search`, `duo_datasets_search`, `tweede_kamer_documents`, `tweede_kamer_search`, `officiele_bekendmakingen_search`, `rijksoverheid_search`, `rijksbegroting_search`, `overheid_api_register_search`).
 
 ### Smart routing + temporal parsing
 - `nl_gov_ask` routes by intent, and can run multi-source queries in parallel.
@@ -120,34 +114,44 @@ Post-processing adds `related_links[]` when records share key identifiers (e.g. 
 
 ## Quick start
 
+Requires **Node.js >= 22**.
+
 ```bash
 npm ci
-npm run check
-npm test
 npm run build
-npm run test:questions
-npm run test:live
+npm run dev                    # start stdio server (for Claude Desktop / Claude Code)
+npm run dev:sse                # SSE/HTTP server on port 3333
+npm run dev:streamable-http    # Streamable HTTP server on port 3333 (MCP spec 2025-03-26)
+```
+
+To verify your setup:
+
+```bash
+npm run check        # type-check without emitting
+npm test             # unit tests
+npm run test:questions  # integration test suite (offline fixtures)
+npm run test:live    # integration test suite (live API calls)
 ```
 
 ## Configuration
 
 ### Transport modes
 
-#### stdio transport (Claude Desktop, Claude Code)
+Three transport modes are supported. All expose the same 48 tools.
+
+#### stdio (Claude Desktop, Claude Code)
 
 ```bash
 npm run dev     # development
 npm run start   # production
 ```
 
-#### SSE/HTTP transport
+#### SSE/HTTP (Open WebUI, legacy MCP clients)
 
 ```bash
 npm run dev:sse    # development
 npm run start:sse  # production
 ```
-
-SSE endpoints:
 
 | Endpoint | Description |
 |----------|-------------|
@@ -156,11 +160,40 @@ SSE endpoints:
 | `GET /health` | Server health check |
 | `GET /health/sources` | Per-connector runtime health snapshot |
 
+#### Streamable HTTP (MCP spec 2025-03-26)
+
+```bash
+npm run dev:streamable-http    # development
+npm run start:streamable-http  # production
+```
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /mcp` | Initialize session + send messages |
+| `GET /mcp` | Open SSE stream for server-initiated messages |
+| `DELETE /mcp` | Terminate session |
+| `GET /health` | Server health check |
+| `GET /health/sources` | Per-connector runtime health snapshot |
+
+Session management uses the `mcp-session-id` header.
+
+#### Selecting transport via environment
+
+Instead of CLI flags, you can set `MCP_TRANSPORT`:
+
+```bash
+MCP_TRANSPORT=sse node dist/src/index.js
+MCP_TRANSPORT=streamable-http node dist/src/index.js
+```
+
 ### Docker
 
 ```bash
 docker build -f docker/Dockerfile -t nl-gov-mcp .
-docker run --rm -p 3333:3333 nl-gov-mcp
+docker run --rm -p 3333:3333 \
+  -e KNMI_API_KEY=your-key \
+  -e OVERHEID_API_KEY=your-key \
+  nl-gov-mcp
 ```
 
 ### Claude Desktop integration
@@ -194,8 +227,12 @@ Restart Claude Desktop after saving.
 |----------|---------|-------------|
 | `NL_GOV_HTTP_PORT` | `3333` | HTTP port for SSE transport |
 | `NL_GOV_TIMEZONE` | `Europe/Amsterdam` | Default timezone used by `nl_gov_ask` for natural date parsing |
-| `KNMI_API_KEY` | — | Required for KNMI weather tools |
-| `OVERHEID_API_KEY` | — | Required for API register tool |
+| `KNMI_API_KEY` | — | Required for KNMI weather tools ([get a free token](https://developer.dataplatform.knmi.nl/open-data-api#token)) |
+| `OVERHEID_API_KEY` | — | Required for API register tool ([request a key](https://apis.developer.overheid.nl/apis/key-aanvragen)) |
+| `BAG_API_KEY` | — | Required for BAG address lookups ([request access](https://www.kadaster.nl/zakelijk/producten/adressen-en-gebouwen/bag-api-individuele-bevragingen)) |
+| `DSO_API_KEY` | — | Reserved for future Omgevingswet/DSO connector ([request access](https://developer.omgevingswet.overheid.nl/formulieren/api-key-aanvragen-0/)) |
+| `MCP_TRANSPORT` | `stdio` | Transport mode: `stdio`, `sse`, or `streamable-http` (alternative to CLI flags) |
+| `LOG_LEVEL` | `info` | Pino log level (`debug`, `info`, `warn`, `error`, `silent`) |
 
 ## Source-specific details
 
@@ -212,28 +249,36 @@ Restart Claude Desktop after saving.
 
 `rechtspraak_search_ecli` mirrors the official frontend search backend (`/api/zoek`) instead of the legacy open-data feed.
 
-Date/publication filters are inferred from natural language:
-- *"tot 1 maand geleden"* → `BinnenEenMaand`
-- *"heel 2026"* / *"dit jaar"* → `DitJaar`
+Uses structured parameters instead of natural-language parsing:
+- `sort`: `relevance` (default), `date_newest` (publication date desc), `ruling_newest` (ruling date desc)
+- `date_filter`: `week`, `month`, `year`, `last_year` (maps to Rechtspraak facet filters)
+
+The LLM interprets user intent and maps it to these parameters. A lightweight server-side query rewriter strips residual question framing as a safety net.
 
 Responses include facet-driven context in `access_note` when filters are applied.
 
 ## Documentation
 
 See:
-- `docs/SOURCES.md`
-- `docs/TOOLS.md`
-- `docs/BACKLOG-SOURCES.md`
+- `docs/ARCHITECTURE.md` — technical internals, layer diagram, request lifecycle, resilience stack
+- `docs/SOURCES.md` — endpoint details per connector
+- `docs/TOOLS.md` — full tool catalog with behavior notes
+- `docs/BACKLOG-SOURCES.md` — planned integrations
 
 ## Contributing
 
-NL-GOV-MCP is open source. If you find a bug, want to add a source connector, or improve existing ones — PRs are welcome.
+PRs are welcome — bug fixes, new source connectors, or improvements to existing ones.
+
+See **[CONTRIBUTING.md](CONTRIBUTING.md)** for setup, workflow, and a step-by-step guide for adding a new source connector.
 
 ## License
 
-This project is licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for additional details.
+This project is licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for required attribution.
+
+**WAINUT** and **NL-GOV-MCP** are trademarks of WAINUT B.V. The Apache License 2.0 does not grant permission to use these names, trademarks, or branding to imply endorsement of derivative works. Forks and derivative works must retain the [NOTICE](NOTICE) file as required by the license.
 
 ---
 
-Built and maintained by [WAiNuT](https://wainut.ai) — AI Recruitment, AI Consulting & Implementation, AI & Data Training.
-For custom implementations, government integrations, or AI training: [get in touch](https://wainut.ai).
+**About WAINUT** — WAINUT is your one-stop AI shop in the Netherlands. We help organizations adopt AI and build an AI-enabled workforce — from recruiting the right talent, to implementing the right tools, to training teams that actually use them.
+
+Exploring AI for your organization? → [wainut.ai](https://wainut.ai) — Unleash Your Potential.

@@ -84,129 +84,6 @@ function resolveSearchTerm(query: string): string {
   return query.trim().replace(/\s+/g, " ");
 }
 
-function cleanupRecencyQuery(input: string): string {
-  const stopwords = new Set([
-    "wat",
-    "is",
-    "de",
-    "het",
-    "een",
-    "van",
-    "voor",
-    "met",
-    "in",
-    "over",
-    "rondom",
-    "omtrent",
-    "betreffende",
-    "about",
-    "around",
-    "regarding",
-    "latest",
-    "newest",
-    "most",
-    "recent",
-    "laatste",
-    "nieuwste",
-    "recentste",
-    "meest",
-    "recente",
-    "ecli",
-    "nummer",
-    "number",
-    "uitspraak",
-    "uitspraken",
-    "waterschades",
-    "geef",
-    "toon",
-    "zoek",
-    "vind",
-  ]);
-
-  const tokens = input
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
-    .split(/\s+/)
-    .filter((token) => token.length > 1 && !stopwords.has(token));
-
-  return tokens.join(" ").trim();
-}
-
-function resolveRecencyIntent(query: string):
-  | { sortOrder: RechtspraakSortOrder; cleanedQuery: string; reason: string }
-  | undefined {
-  const raw = query.trim();
-  if (!raw) return undefined;
-
-  const recencyPattern = /\b(?:laatste|nieuwste|recentste|meest\s+recent(?:e)?|latest|newest|most\s+recent)\b/i;
-  if (!recencyPattern.test(raw)) return undefined;
-
-  const sortOrder: RechtspraakSortOrder = /\buitspraakdatum\b/i.test(raw)
-    ? "UitspraakDatumDesc"
-    : "PublicatieDatumDesc";
-
-  const cleanedQuery = cleanupRecencyQuery(raw) || raw;
-
-  return {
-    sortOrder,
-    cleanedQuery,
-    reason:
-      sortOrder === "UitspraakDatumDesc"
-        ? "gesorteerd op uitspraakdatum aflopend"
-        : "gesorteerd op publicatiedatum aflopend",
-  };
-}
-
-function cleanupQueryAfterFilter(input: string): string {
-  return input
-    .replace(/\b(publicatie|publicaties|publicatiedatum|datum|geleden|tot|binnen|laatste|afgelopen|maand|week|jaar|dit|vorig|heel|qua|en|de|het|op)\b/gi, " ")
-    .replace(/\b(pd[1-4]|ud[1-4]|2025|2026)\b/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function resolvePublicatieFilter(query: string):
-  | { identifier: "BinnenEenMaand" | "DitJaar" | "BinnenEenWeek" | "VorigJaar"; cleanedQuery: string; reason: string }
-  | undefined {
-  const raw = query;
-
-  const candidates: Array<{ regex: RegExp; identifier: "BinnenEenMaand" | "DitJaar" | "BinnenEenWeek" | "VorigJaar"; reason: string }> = [
-    {
-      regex: /(publicatie\s*:\s*pd2|tot\s*1\s*maand\s*geleden|binnen\s*een\s*maand|laatste\s*maand|afgelopen\s*maand|tot\s*1\s*maand)/i,
-      identifier: "BinnenEenMaand",
-      reason: "publicatie <= 1 maand",
-    },
-    {
-      regex: /(publicatie\s*:\s*pd3|\bdit\s*jaar\b|\b2026\b|heel\s*2026)/i,
-      identifier: "DitJaar",
-      reason: "publicatie dit jaar",
-    },
-    {
-      regex: /(publicatie\s*:\s*pd1|tot\s*7\s*dagen\s*geleden|binnen\s*een\s*week|laatste\s*week)/i,
-      identifier: "BinnenEenWeek",
-      reason: "publicatie <= 7 dagen",
-    },
-    {
-      regex: /(publicatie\s*:\s*pd4|vorig\s*jaar|\b2025\b)/i,
-      identifier: "VorigJaar",
-      reason: "publicatie vorig jaar",
-    },
-  ];
-
-  for (const candidate of candidates) {
-    if (!candidate.regex.test(raw)) continue;
-    const removed = raw.replace(candidate.regex, " ").replace(/\s+/g, " ").trim();
-    const cleaned = cleanupQueryAfterFilter(removed);
-    return {
-      identifier: candidate.identifier,
-      cleanedQuery: cleaned || cleanupQueryAfterFilter(raw) || raw,
-      reason: candidate.reason,
-    };
-  }
-
-  return undefined;
-}
-
 function mapResult(item: RechtspraakApiResult): RechtspraakItem {
   const emphasis = String(item.TitelEmphasis ?? "").trim();
   const title = String(item.Titel ?? "").trim();
@@ -267,16 +144,27 @@ function facetCount(
 export class RechtspraakSource {
   constructor(private readonly config: AppConfig) {}
 
-  async searchEcli(args: { query: string; rows: number }) {
-    const filter = resolvePublicatieFilter(args.query);
-    const recency = resolveRecencyIntent(args.query);
+  async searchEcli(args: {
+    query: string;
+    rows: number;
+    sort?: "relevance" | "date_newest" | "ruling_newest";
+    date_filter?: "week" | "month" | "year" | "last_year";
+  }) {
+    // Map structured parameters to API values
+    const sortOrder: RechtspraakSortOrder =
+      args.sort === "date_newest" ? "PublicatieDatumDesc"
+      : args.sort === "ruling_newest" ? "UitspraakDatumDesc"
+      : "Relevance";
 
-    let searchTermCandidate = recency?.cleanedQuery ?? filter?.cleanedQuery ?? args.query;
-    if (filter) {
-      searchTermCandidate = cleanupQueryAfterFilter(searchTermCandidate) || searchTermCandidate;
-    }
-    const searchTerm = resolveSearchTerm(searchTermCandidate);
-    const sortOrder: RechtspraakSortOrder = recency?.sortOrder ?? "Relevance";
+    const filterMap: Record<string, "BinnenEenWeek" | "BinnenEenMaand" | "DitJaar" | "VorigJaar"> = {
+      week: "BinnenEenWeek",
+      month: "BinnenEenMaand",
+      year: "DitJaar",
+      last_year: "VorigJaar",
+    };
+    const filterIdentifier = args.date_filter ? filterMap[args.date_filter] : undefined;
+
+    const searchTerm = resolveSearchTerm(args.query);
 
     const payload = {
       StartRow: 0,
@@ -288,11 +176,11 @@ export class RechtspraakSource {
       Contentsoorten: [] as Array<Record<string, unknown>>,
       Rechtsgebieden: [] as Array<Record<string, unknown>>,
       Instanties: [] as Array<Record<string, unknown>>,
-      DatumPublicatie: filter
+      DatumPublicatie: filterIdentifier
         ? [
             {
               NodeType: 4,
-              Identifier: filter.identifier,
+              Identifier: filterIdentifier,
               level: 0,
             },
           ]
@@ -333,20 +221,20 @@ export class RechtspraakSource {
       typeof data.ResultCount === "number" ? data.ResultCount : items.length;
 
     const accessNotes: string[] = [];
-    if (filter) {
+    if (filterIdentifier) {
       const publicatieCount = facetCount(
         data.FacetCounts,
         "DatumPublicatie",
-        filter.identifier,
+        filterIdentifier,
       );
       accessNotes.push(
         publicatieCount === undefined
-          ? `Filter actief: ${filter.reason}.`
-          : `Filter actief: ${filter.reason} (facetcount=${publicatieCount}).`,
+          ? `Filter actief: ${filterIdentifier}.`
+          : `Filter actief: ${filterIdentifier} (facetcount=${publicatieCount}).`,
       );
     }
-    if (recency) {
-      accessNotes.push(`Recency-intent gedetecteerd: ${recency.reason}.`);
+    if (sortOrder !== "Relevance") {
+      accessNotes.push(`Sortering: ${sortOrder}.`);
     }
 
     const monthCount = facetCount(data.FacetCounts, "DatumPublicatie", "BinnenEenMaand");
@@ -366,7 +254,7 @@ export class RechtspraakSource {
           term: searchTerm,
           rows: String(args.rows),
           sortOrder,
-          ...(filter ? { publicatieFilter: filter.identifier } : {}),
+          ...(filterIdentifier ? { publicatieFilter: filterIdentifier } : {}),
         },
         access_note:
           accessNotes.join(" ") ||
@@ -382,7 +270,7 @@ export class RechtspraakSource {
         term: searchTerm,
         rows: String(args.rows),
         sortOrder,
-        ...(filter ? { publicatieFilter: filter.identifier } : {}),
+        ...(filterIdentifier ? { publicatieFilter: filterIdentifier } : {}),
       },
       ...(accessNotes.length ? { access_note: accessNotes.join(" ") } : {}),
     };

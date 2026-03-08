@@ -134,7 +134,7 @@ export function inferConnectorName(endpointUrl: string): string {
     if (host.includes("developer.overheid.nl")) return "api_register";
     if (host.includes("knmi.nl")) return "knmi";
     if (host.includes("pdok.nl") || host.includes("kadaster.nl")) {
-      if (host.includes("data.labs.kadaster.nl")) return "bag_linked_data";
+      if (host.includes("labs.kadaster.nl")) return "bag_linked_data";
       return "pdok_bag";
     }
     if (host.includes("nationaalgeoregister.nl")) return "ngr";

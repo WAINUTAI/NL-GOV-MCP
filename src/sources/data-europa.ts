@@ -1,12 +1,31 @@
 import type { AppConfig } from "../types.js";
 import { getJson } from "../utils/http.js";
 
-interface CkanPackageSearch {
-  success?: boolean;
+// data.europa.eu migrated from CKAN to a custom Search API.
+const SEARCH_ENDPOINT = "https://data.europa.eu/api/hub/search/search";
+
+interface SearchResult {
+  id?: string;
+  title?: Record<string, string> | string;
+  description?: Record<string, string> | string;
+  catalog?: { title?: string; publisher?: { name?: string } };
+  issued?: string;
+  modified?: string;
+  distributions?: Array<{ format?: { id?: string } }>;
+  [key: string]: unknown;
+}
+
+interface SearchResponse {
   result?: {
     count?: number;
-    results?: Array<Record<string, unknown>>;
+    results?: SearchResult[];
   };
+}
+
+function extractLocalized(v: Record<string, string> | string | undefined): string {
+  if (!v) return "";
+  if (typeof v === "string") return v;
+  return v.en ?? v.nl ?? v.de ?? v.fr ?? Object.values(v)[0] ?? "";
 }
 
 export class DataEuropaSource {
@@ -14,25 +33,26 @@ export class DataEuropaSource {
 
   async datasetsSearch(args: { query: string; rows: number }) {
     const rows = Math.min(args.rows, this.config.limits.maxRows);
-    const endpoint = "https://data.europa.eu/data/api/3/action/package_search";
 
-    const { data, meta } = await getJson<CkanPackageSearch>(endpoint, {
-      query: { q: args.query, rows },
+    const { data, meta } = await getJson<SearchResponse>(SEARCH_ENDPOINT, {
+      query: { q: args.query, limit: rows, page: 0 },
       timeoutMs: 20_000,
       retries: 1,
     });
 
     const results = Array.isArray(data.result?.results) ? data.result?.results ?? [] : [];
     const items = results.slice(0, rows).map((x) => {
-      const id = String(x.id ?? x.name ?? "dataset");
-      const title = String(x.title ?? x.name ?? id);
+      const id = String(x.id ?? "dataset");
+      const title = extractLocalized(x.title) || id;
+      const description = extractLocalized(x.description);
+      const publisher = x.catalog?.publisher?.name ?? x.catalog?.title ?? "";
       return {
         id,
         title,
-        notes: String(x.notes ?? ""),
-        organization: (x.organization as Record<string, unknown> | undefined)?.title,
-        metadata_modified: String(x.metadata_modified ?? ""),
-        source: "data-europa-ckan",
+        notes: description,
+        organization: publisher,
+        metadata_modified: String(x.modified ?? x.issued ?? ""),
+        source: "data-europa",
         url: `https://data.europa.eu/data/datasets/${id}`,
         raw: x,
       };
@@ -42,7 +62,7 @@ export class DataEuropaSource {
       items,
       total: Number(data.result?.count ?? items.length),
       endpoint: meta.url,
-      params: { q: args.query, rows: String(rows) },
+      params: { q: args.query, limit: String(rows) },
       ...(items.length ? {} : { access_note: "Data Europa endpoint bereikbaar, maar geen hits voor query." }),
     };
   }
@@ -61,9 +81,9 @@ export class DataEuropaSource {
         },
       ].slice(0, args.rows),
       total: 1,
-      endpoint: "https://data.europa.eu/data/api/3/action/package_search (fallback)",
-      params: { q: args.query, rows: String(args.rows) },
-      access_note: "data.europa.eu CKAN endpoint was onbereikbaar; fallbackrecord gebruikt.",
+      endpoint: `${SEARCH_ENDPOINT} (fallback)`,
+      params: { q: args.query, limit: String(args.rows) },
+      access_note: "data.europa.eu search endpoint was onbereikbaar; fallbackrecord gebruikt.",
     };
   }
 }

@@ -67,6 +67,41 @@ describe("parseTemporalRange", () => {
     expect(out?.context.timeZone).toBe("Europe/Amsterdam");
   });
 
+  it("parses vorig jaar / last year", () => {
+    const out = parseTemporalRange("zoek documenten vorig jaar", NOW);
+    expect(out).toBeDefined();
+    expect(out?.from).toBe("2025-01-01");
+    expect(out?.to).toBe("2025-12-31");
+    expect(out?.matchedPattern).toBe("last_year");
+  });
+
+  it("parses afgelopen jaar", () => {
+    const out = parseTemporalRange("afgelopen jaar subsidies", NOW);
+    expect(out?.from).toBe("2025-01-01");
+    expect(out?.to).toBe("2025-12-31");
+    expect(out?.matchedPattern).toBe("last_year");
+  });
+
+  it("parses last year (EN)", () => {
+    const out = parseTemporalRange("emissions last year", NOW);
+    expect(out?.from).toBe("2025-01-01");
+    expect(out?.to).toBe("2025-12-31");
+  });
+
+  it("parses bare year in 2024", () => {
+    const out = parseTemporalRange("woningbouw in 2024", NOW);
+    expect(out?.from).toBe("2024-01-01");
+    expect(out?.to).toBe("2024-12-31");
+    expect(out?.matchedPattern).toBe("bare_year");
+  });
+
+  it("parses bare current year with today as end date", () => {
+    const out = parseTemporalRange("data uit 2026", NOW);
+    expect(out?.from).toBe("2026-01-01");
+    expect(out?.to).toBe("2026-03-03");
+    expect(out?.matchedPattern).toBe("bare_year");
+  });
+
   it("supports timezone override for reproducible client context", () => {
     const out = parseTemporalRange("today permits", {
       now: "2026-03-07T23:30:00Z",

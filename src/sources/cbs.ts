@@ -147,9 +147,17 @@ export class CbsSource {
     let result;
     try {
       result = await this.tryCatalogRequest(query, limit);
+      // CBS v4 OData uses literal substring match — multi-word queries often return 0.
+      // Fall through to data.overheid when v4 succeeds but has no hits.
+      if (!result.items.length) {
+        result = await this.tryCatalogViaDataOverheid(query, limit);
+      }
     } catch {
       try {
         result = await this.tryCatalogRequestV3(query, limit);
+        if (!result.items.length) {
+          result = await this.tryCatalogViaDataOverheid(query, limit);
+        }
       } catch {
         result = await this.tryCatalogViaDataOverheid(query, limit);
       }
@@ -190,10 +198,12 @@ export class CbsSource {
 
     for (const endpoint of probes) {
       try {
-        if (endpoint.endsWith("/TableInfos")) {
-          params = { $top: "1" };
-        } else if (endpoint.endsWith("/TableInfos") || endpoint.endsWith("TableInfos")) {
+        if (endpoint === `${this.config.endpoints.cbsV3}/TableInfos`) {
+          // Global TableInfos endpoint — needs filter by Identifier
           params = { $filter: equals("Identifier", tableId), $top: "1" };
+        } else if (endpoint.endsWith("/TableInfos")) {
+          // Table-specific TableInfos (e.g. /37296ned/TableInfos) — no filter needed
+          params = { $top: "1" };
         } else {
           params = { $top: "1" };
         }

@@ -193,6 +193,34 @@ export function parseTemporalRange(input: string, nowOrOptions: Date | TemporalP
     );
   }
 
+  // vorig jaar / last year
+  const lastYearMatch = query.match(/\b(?:vorig\s+jaar|afgelopen\s+jaar|last\s+year)\b/i);
+  if (lastYearMatch) {
+    const year = today.getUTCFullYear() - 1;
+    return makeRange(
+      `${year}-01-01`,
+      `${year}-12-31`,
+      "last_year",
+      cleanQuery(query, lastYearMatch),
+      context,
+    );
+  }
+
+  // bare year: "in 2024", "uit 2024", "from 2024", or standalone "2024"
+  const bareYearMatch = query.match(/\b(?:in|uit|from|van|over)?\s*(20\d{2})\b/i);
+  if (bareYearMatch) {
+    const year = Number(bareYearMatch[1]);
+    const currentYear = today.getUTCFullYear();
+    const to = year === currentYear ? todayIso : `${year}-12-31`;
+    return makeRange(
+      `${year}-01-01`,
+      to,
+      "bare_year",
+      cleanQuery(query, bareYearMatch),
+      context,
+    );
+  }
+
   // afgelopen kwartaal / last quarter
   const lastQuarterMatch = query.match(/\b(?:afgelopen\s+kwartaal|vorige\s+kwartaal|last\s+quarter)\b/i);
   if (lastQuarterMatch) {
