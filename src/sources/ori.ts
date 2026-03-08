@@ -43,6 +43,9 @@ function toOriItem(hit: ElasticHit): OriItem {
       (id && id.startsWith("http") ? id : "https://www.openraadsinformatie.nl"),
   );
 
+  // Keep only essential fields — full _source can be 100KB+ per hit
+  const description = String(source.description ?? source.text ?? "").slice(0, 500);
+
   return {
     id,
     title,
@@ -50,7 +53,7 @@ function toOriItem(hit: ElasticHit): OriItem {
     organization,
     publishedAt,
     url,
-    raw: source,
+    ...(description ? { description } : {}),
   };
 }
 
