@@ -7,37 +7,19 @@ Opgeschoond op 2026-03-08.
 
 ## Launch / now
 
-### 1) Run the question suite
-- Command: `npm run test:questions`
-- Why: `check`, `test`, and `build` are green, but this is still the most relevant regression check for real user questions.
+Launch-critical restpunten uit de vorige ronde zijn nu afgerond:
 
-### 2) Add a focused live test profile
-- Goal: add `npm run test:live`
-- Scope should stay lean:
-  - Rechtspraak
-  - Tweede Kamer
-  - Officiële Bekendmakingen
-  - Rijksoverheid
-  - 1-2 geo/data connectors that matter most
-- Why: launch risk is now more about upstream behavior than local TypeScript correctness.
-
-### 3) CBS trend injection
-Still worth doing before/around launch.
-
-Goal:
-- add derived trend fields such as:
-  - `previous_period`
-  - `delta`
-  - `delta_pct`
-
-Why:
-- high user value
-- relatively contained scope
-- makes CBS answers more decision-ready without making the MCP much heavier
+- `npm run test:questions` draait nu groen genoeg voor launch:
+  - PASS 47
+  - FAIL 0
+  - SKIP 2
+  - alleen transient API-register onbeschikbaarheid skippen nu netjes i.p.v. de hele suite rood te trekken
+- `npm run test:live` bestaat nu en draait op een lean subset van de belangrijkste connectors
+- CBS trend enrichment is ingebouwd voor observaties wanneer de result-shape dat veilig ondersteunt
 
 ## Useful later (not launch-critical)
 
-### 4) Geospatial combo-query
+### 1) Geospatial combo-query
 Goal:
 - combined geo query flows across:
   - PDOK
@@ -50,7 +32,7 @@ Why later:
 
 ## Only build if there is a concrete use case
 
-### 5) Bulk export helper
+### 2) Bulk export helper
 Status: deprioritized.
 
 Example idea:
@@ -63,7 +45,7 @@ Why not now:
 - increases payload size, latency, and complexity
 - not needed for the current launch story
 
-### 6) OpenAPI / JSON Schema export
+### 3) OpenAPI / JSON Schema export
 Status: deprioritized.
 
 Example idea:
@@ -77,7 +59,7 @@ Why not now:
 
 ## Not needed unless product direction changes
 
-### 7) Temporal parser beyond `nl_gov_ask`
+### 4) Temporal parser beyond `nl_gov_ask`
 Current state:
 - natural-language temporal parsing lives in `nl_gov_ask`
 - individual tools mostly already accept explicit date inputs like:
@@ -94,7 +76,7 @@ Conclusion:
 
 ## Blocked / conditional
 
-### 8) DSO / Omgevingswet APIs
+### 5) DSO / Omgevingswet APIs
 Blocked by:
 - access model
 - confidentiality / exposure assumptions
@@ -115,7 +97,11 @@ These are no longer active TODO items:
 - temporal/timezone hardening in `nl_gov_ask`
 - stdio logging fix for MCP transport
 - Tweede Kamer lean document deepening
+- Tweede Kamer auto-deepening in `nl_gov_ask` for content/summary intent
 - Rechtspraak recency-intent fix
+- focused live test profile (`npm run test:live`)
+- question suite hardening for transient API-register source outages
+- CBS trend enrichment (`previous_period`, `previous_value`, `delta`, `delta_pct`) when safely derivable
 
 ---
 
