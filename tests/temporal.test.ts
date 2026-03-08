@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseTemporalRange } from "../src/utils/temporal.js";
+import { DEFAULT_TEMPORAL_TIME_ZONE, parseTemporalRange } from "../src/utils/temporal.js";
 
 const NOW = new Date("2026-03-03T12:00:00Z");
 
@@ -9,6 +9,8 @@ describe("parseTemporalRange", () => {
     expect(out).toBeDefined();
     expect(out?.from).toBe("2026-03-03");
     expect(out?.to).toBe("2026-03-03");
+    expect(out?.context.timeZone).toBe(DEFAULT_TEMPORAL_TIME_ZONE);
+    expect(out?.context.referenceNow).toBe("2026-03-03T12:00:00.000Z");
   });
 
   it("parses yesterday", () => {
@@ -51,5 +53,29 @@ describe("parseTemporalRange", () => {
     const out = parseTemporalRange("tussen 2018 en 2022 bevolking", NOW);
     expect(out?.from).toBe("2018-01-01");
     expect(out?.to).toBe("2022-12-31");
+  });
+
+  it("uses configured timezone calendar day instead of raw UTC day", () => {
+    const out = parseTemporalRange("vandaag stikstof", {
+      now: "2026-03-07T23:30:00Z",
+      timeZone: "Europe/Amsterdam",
+    });
+
+    expect(out?.from).toBe("2026-03-08");
+    expect(out?.to).toBe("2026-03-08");
+    expect(out?.context.today).toBe("2026-03-08");
+    expect(out?.context.timeZone).toBe("Europe/Amsterdam");
+  });
+
+  it("supports timezone override for reproducible client context", () => {
+    const out = parseTemporalRange("today permits", {
+      now: "2026-03-07T23:30:00Z",
+      timeZone: "America/New_York",
+    });
+
+    expect(out?.from).toBe("2026-03-07");
+    expect(out?.to).toBe("2026-03-07");
+    expect(out?.context.today).toBe("2026-03-07");
+    expect(out?.context.timeZone).toBe("America/New_York");
   });
 });

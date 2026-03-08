@@ -98,7 +98,14 @@ Available on `nl_gov_ask` and major individual tools (`cbs_tables_search`, `cbs_
 
 ### Smart routing + temporal parsing
 - `nl_gov_ask` routes by intent, and can run multi-source queries in parallel.
-- Natural date expressions in NL/EN are parsed and mapped to source filters (`vorige week`, `sinds 2020`, `between 2018 and 2022`, etc.).
+- Natural date expressions in NL/EN are currently parsed in `nl_gov_ask` and mapped to source filters (`vorige week`, `sinds 2020`, `between 2018 and 2022`, etc.).
+- Temporal parsing is resolved server-side with a real reference timestamp, cross-platform via Node runtime APIs (Windows/macOS/Linux).
+- Default timezone: `Europe/Amsterdam`.
+- Override options for `nl_gov_ask`:
+  - tool input: `timezone`
+  - tool input: `reference_now`
+  - environment: `NL_GOV_TIMEZONE`
+  - config: `config/default.json` → `temporal.defaultTimeZone`
 
 ### Cross-reference linking
 Post-processing adds `related_links[]` when records share key identifiers (e.g. `ECLI`, `BWBR`, municipality codes), and can enrich legal references with direct links to `wetten.overheid.nl`.
@@ -158,7 +165,8 @@ Build the project, then add an entry to your Claude Desktop config.
       "args": ["/absolute/path/to/NL-GOV-MCP/dist/src/index.js"],
       "env": {
         "OVERHEID_API_KEY": "...",
-        "KNMI_API_KEY": "..."
+        "KNMI_API_KEY": "...",
+        "NL_GOV_TIMEZONE": "Europe/Amsterdam"
       }
     }
   }
@@ -172,6 +180,7 @@ Restart Claude Desktop after saving.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `NL_GOV_HTTP_PORT` | `3333` | HTTP port for SSE transport |
+| `NL_GOV_TIMEZONE` | `Europe/Amsterdam` | Default timezone used by `nl_gov_ask` for natural date parsing |
 | `KNMI_API_KEY` | — | Required for KNMI weather tools |
 | `OVERHEID_API_KEY` | — | Required for API register tool |
 

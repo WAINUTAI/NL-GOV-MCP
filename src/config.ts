@@ -34,6 +34,10 @@ export function loadConfig(): AppConfig {
     parsed.server.httpPort = Number(process.env.NL_GOV_HTTP_PORT);
   }
 
+  if (process.env.NL_GOV_TIMEZONE) {
+    parsed.temporal.defaultTimeZone = process.env.NL_GOV_TIMEZONE;
+  }
+
   return parsed;
 }
 

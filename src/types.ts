@@ -71,6 +71,9 @@ export interface AppConfig {
     version: string;
     httpPort: number;
   };
+  temporal: {
+    defaultTimeZone: string;
+  };
   cacheTtlMs: {
     default: number;
     cbsCatalog: number;

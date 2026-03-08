@@ -4,6 +4,9 @@
     "version": "0.1.0",
     "httpPort": 3333
   },
+  "temporal": {
+    "defaultTimeZone": "Europe/Amsterdam"
+  },
   "cacheTtlMs": {
     "default": 900000,
     "cbsCatalog": 86400000,

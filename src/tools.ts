@@ -873,11 +873,11 @@ export function registerTools(server: McpServer): void {
     }
   });
 
-  server.registerTool("nl_gov_ask", { inputSchema: { question: z.string(), top: z.number().int().min(1).max(config.limits.maxRows).default(10), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) }, description: "Meta-router for Dutch govt sources" }, async ({ question, top, offset, limit, outputFormat, verbose, dryRun }) => {
+  server.registerTool("nl_gov_ask", { inputSchema: { question: z.string(), top: z.number().int().min(1).max(config.limits.maxRows).default(10), reference_now: z.string().optional(), timezone: z.string().optional(), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) }, description: "Meta-router for Dutch govt sources" }, async ({ question, top, reference_now, timezone, offset, limit, outputFormat, verbose, dryRun }) => {
     const decodedQuestion = (() => {
       try { return decodeURIComponent(question.replace(/\+/g, " ")); } catch { return question; }
     })();
-    const temporal = parseTemporalRange(decodedQuestion);
+    const temporal = parseTemporalRange(decodedQuestion, { now: reference_now, timeZone: timezone ?? config.temporal.defaultTimeZone });
     const questionForSearch = temporal?.cleanedQuery?.trim() ? temporal.cleanedQuery : decodedQuestion;
     const q = questionForSearch.toLowerCase();
     const has = (terms: string[]) => terms.some((t) => q.includes(t));
@@ -942,6 +942,7 @@ export function registerTools(server: McpServer): void {
         requests: requestDebug,
         fallbacks_used: fallbackSteps,
         connector_health: health,
+        temporal_context: temporal?.context,
       } as Record<string, unknown>;
     };
 
@@ -1051,6 +1052,9 @@ export function registerTools(server: McpServer): void {
                   from: temporal.from,
                   to: temporal.to,
                   matched_pattern: temporal.matchedPattern,
+                  reference_now: temporal.context.referenceNow,
+                  time_zone: temporal.context.timeZone,
+                  today: temporal.context.today,
                 },
               }
             : {}),
@@ -1222,7 +1226,7 @@ export function registerTools(server: McpServer): void {
         if (mergedRecords.length) {
           const notes: string[] = [];
           if (temporal) {
-            notes.push(`Temporal range applied: ${temporal.from}..${temporal.to} (${temporal.matchedPattern}).`);
+            notes.push(`Temporal range applied: ${temporal.from}..${temporal.to} (${temporal.matchedPattern}, ref=${temporal.context.referenceNow}, tz=${temporal.context.timeZone}).`);
           }
           if (failures.length) {
             notes.push(`Partial failures: ${failures.map((f) => `${f.connector}(${f.error_type})`).join(", ")}`);

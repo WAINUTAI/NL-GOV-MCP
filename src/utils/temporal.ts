@@ -1,9 +1,23 @@
+export interface TemporalContext {
+  referenceNow: string;
+  timeZone: string;
+  today: string;
+}
+
 export interface TemporalRange {
   from: string;
   to: string;
   matchedPattern: string;
   cleanedQuery: string;
+  context: TemporalContext;
 }
+
+export interface TemporalParseOptions {
+  now?: Date | string;
+  timeZone?: string;
+}
+
+export const DEFAULT_TEMPORAL_TIME_ZONE = "Europe/Amsterdam";
 
 function toIsoDateUtc(date: Date): string {
   return date.toISOString().slice(0, 10);
@@ -11,10 +25,6 @@ function toIsoDateUtc(date: Date): string {
 
 function dateUtc(year: number, month: number, day: number): Date {
   return new Date(Date.UTC(year, month, day));
-}
-
-function startOfDayUtc(date: Date): Date {
-  return dateUtc(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
 }
 
 function endOfMonthUtc(year: number, month: number): Date {
@@ -28,12 +38,104 @@ function cleanQuery(query: string, matched: RegExpMatchArray | null): string {
   return query.replace(full, " ").replace(/\s+/g, " ").trim();
 }
 
-export function parseTemporalRange(input: string, now = new Date()): TemporalRange | undefined {
+function normalizeNow(value?: Date | string): Date {
+  if (!value) return new Date();
+
+  const date = value instanceof Date ? new Date(value.getTime()) : new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    throw new Error(`Invalid temporal reference time: ${String(value)}`);
+  }
+
+  return date;
+}
+
+function resolveTimeZone(value?: string): string {
+  const candidate = value?.trim() || DEFAULT_TEMPORAL_TIME_ZONE;
+
+  try {
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: candidate,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(new Date());
+    return candidate;
+  } catch {
+    return DEFAULT_TEMPORAL_TIME_ZONE;
+  }
+}
+
+function getDatePartsInTimeZone(date: Date, timeZone: string): { year: number; month: number; day: number } {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+
+  const parts = formatter.formatToParts(date);
+  const year = Number(parts.find((part) => part.type === "year")?.value);
+  const month = Number(parts.find((part) => part.type === "month")?.value);
+  const day = Number(parts.find((part) => part.type === "day")?.value);
+
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
+    throw new Error(`Unable to resolve date parts for timezone ${timeZone}`);
+  }
+
+  return { year, month, day };
+}
+
+function startOfDayForTimeZone(date: Date, timeZone: string): Date {
+  const parts = getDatePartsInTimeZone(date, timeZone);
+  return dateUtc(parts.year, parts.month - 1, parts.day);
+}
+
+function normalizeParseOptions(nowOrOptions?: Date | TemporalParseOptions): { now: Date; timeZone: string } {
+  if (nowOrOptions instanceof Date) {
+    return { now: new Date(nowOrOptions.getTime()), timeZone: DEFAULT_TEMPORAL_TIME_ZONE };
+  }
+
+  if (typeof nowOrOptions === "object" && nowOrOptions !== null) {
+    return {
+      now: normalizeNow(nowOrOptions.now),
+      timeZone: resolveTimeZone(nowOrOptions.timeZone),
+    };
+  }
+
+  return {
+    now: new Date(),
+    timeZone: DEFAULT_TEMPORAL_TIME_ZONE,
+  };
+}
+
+function makeRange(
+  from: string,
+  to: string,
+  matchedPattern: string,
+  cleanedQuery: string,
+  context: TemporalContext,
+): TemporalRange {
+  return {
+    from,
+    to,
+    matchedPattern,
+    cleanedQuery,
+    context,
+  };
+}
+
+export function parseTemporalRange(input: string, nowOrOptions: Date | TemporalParseOptions = new Date()): TemporalRange | undefined {
   const query = input.trim();
   if (!query) return undefined;
 
-  const today = startOfDayUtc(now);
+  const { now, timeZone } = normalizeParseOptions(nowOrOptions);
+  const today = startOfDayForTimeZone(now, timeZone);
   const todayIso = toIsoDateUtc(today);
+  const context: TemporalContext = {
+    referenceNow: now.toISOString(),
+    timeZone,
+    today: todayIso,
+  };
 
   // tussen 2018 en 2022 / between 2018 and 2022
   const betweenYears = query.match(/\b(?:tussen|between)\s+(20\d{2})\s+(?:en|and)\s+(20\d{2})\b/i);
@@ -42,35 +144,32 @@ export function parseTemporalRange(input: string, now = new Date()): TemporalRan
     const y2 = Number(betweenYears[2]);
     const fromYear = Math.min(y1, y2);
     const toYear = Math.max(y1, y2);
-    return {
-      from: `${fromYear}-01-01`,
-      to: `${toYear}-12-31`,
-      matchedPattern: "between_years",
-      cleanedQuery: cleanQuery(query, betweenYears),
-    };
+    return makeRange(
+      `${fromYear}-01-01`,
+      `${toYear}-12-31`,
+      "between_years",
+      cleanQuery(query, betweenYears),
+      context,
+    );
   }
 
   // sinds 2020 / since 2020
   const sinceYear = query.match(/\b(?:sinds|since)\s+(20\d{2})\b/i);
   if (sinceYear) {
     const year = Number(sinceYear[1]);
-    return {
-      from: `${year}-01-01`,
-      to: todayIso,
-      matchedPattern: "since_year",
-      cleanedQuery: cleanQuery(query, sinceYear),
-    };
+    return makeRange(
+      `${year}-01-01`,
+      todayIso,
+      "since_year",
+      cleanQuery(query, sinceYear),
+      context,
+    );
   }
 
   // vandaag / today
   const todayMatch = query.match(/\b(?:vandaag|today)\b/i);
   if (todayMatch) {
-    return {
-      from: todayIso,
-      to: todayIso,
-      matchedPattern: "today",
-      cleanedQuery: cleanQuery(query, todayMatch),
-    };
+    return makeRange(todayIso, todayIso, "today", cleanQuery(query, todayMatch), context);
   }
 
   // gisteren / yesterday
@@ -78,24 +177,20 @@ export function parseTemporalRange(input: string, now = new Date()): TemporalRan
   if (yesterdayMatch) {
     const y = dateUtc(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 1);
     const d = toIsoDateUtc(y);
-    return {
-      from: d,
-      to: d,
-      matchedPattern: "yesterday",
-      cleanedQuery: cleanQuery(query, yesterdayMatch),
-    };
+    return makeRange(d, d, "yesterday", cleanQuery(query, yesterdayMatch), context);
   }
 
   // dit jaar / this year
   const thisYearMatch = query.match(/\b(?:dit\s+jaar|this\s+year)\b/i);
   if (thisYearMatch) {
     const year = today.getUTCFullYear();
-    return {
-      from: `${year}-01-01`,
-      to: todayIso,
-      matchedPattern: "this_year",
-      cleanedQuery: cleanQuery(query, thisYearMatch),
-    };
+    return makeRange(
+      `${year}-01-01`,
+      todayIso,
+      "this_year",
+      cleanQuery(query, thisYearMatch),
+      context,
+    );
   }
 
   // afgelopen kwartaal / last quarter
@@ -108,12 +203,13 @@ export function parseTemporalRange(input: string, now = new Date()): TemporalRan
     const startMonth = previousQuarter * 3;
     const endMonth = startMonth + 2;
 
-    return {
-      from: toIsoDateUtc(dateUtc(quarterYear, startMonth, 1)),
-      to: toIsoDateUtc(endOfMonthUtc(quarterYear, endMonth)),
-      matchedPattern: "last_quarter",
-      cleanedQuery: cleanQuery(query, lastQuarterMatch),
-    };
+    return makeRange(
+      toIsoDateUtc(dateUtc(quarterYear, startMonth, 1)),
+      toIsoDateUtc(endOfMonthUtc(quarterYear, endMonth)),
+      "last_quarter",
+      cleanQuery(query, lastQuarterMatch),
+      context,
+    );
   }
 
   // afgelopen maand / last month
@@ -124,12 +220,13 @@ export function parseTemporalRange(input: string, now = new Date()): TemporalRan
     const previousMonth = (month + 11) % 12;
     const previousYear = month === 0 ? year - 1 : year;
 
-    return {
-      from: toIsoDateUtc(dateUtc(previousYear, previousMonth, 1)),
-      to: toIsoDateUtc(endOfMonthUtc(previousYear, previousMonth)),
-      matchedPattern: "last_month",
-      cleanedQuery: cleanQuery(query, lastMonthMatch),
-    };
+    return makeRange(
+      toIsoDateUtc(dateUtc(previousYear, previousMonth, 1)),
+      toIsoDateUtc(endOfMonthUtc(previousYear, previousMonth)),
+      "last_month",
+      cleanQuery(query, lastMonthMatch),
+      context,
+    );
   }
 
   // vorige week / last week (ISO-style Monday..Sunday)
@@ -153,12 +250,13 @@ export function parseTemporalRange(input: string, now = new Date()): TemporalRan
       startCurrentWeek.getUTCDate() - 1,
     );
 
-    return {
-      from: toIsoDateUtc(startPrevWeek),
-      to: toIsoDateUtc(endPrevWeek),
-      matchedPattern: "last_week",
-      cleanedQuery: cleanQuery(query, lastWeekMatch),
-    };
+    return makeRange(
+      toIsoDateUtc(startPrevWeek),
+      toIsoDateUtc(endPrevWeek),
+      "last_week",
+      cleanQuery(query, lastWeekMatch),
+      context,
+    );
   }
 
   return undefined;
