@@ -860,6 +860,17 @@ export function registerTools(server: McpServer): void {
     }
   });
 
+  server.registerTool("rijkswaterstaat_waterdata_measurements", { inputSchema: { query: z.string().describe("Water measurement query with optional location. Examples: 'waterstand Maas', 'golfhoogte Noordzee', 'debiet Rijn', 'waterstand Lobith', 'temperatuur IJsselmeer'. Combine a measurement type with an optional location name."), rows: z.number().int().min(1).max(config.limits.maxRows).default(20) }, description: "Get latest real-time water measurements (water levels, waves, flow, temperature) from Rijkswaterstaat stations. Returns actual measured values with timestamps." }, async ({ query, rows }) => {
+    const rw = rewriteQuery(query, "moderate");
+    try {
+      const out = await rwsWaterdata.latestMeasurements({ query: rw.rewritten, rows });
+      const records = out.items.map((x) => record("rijkswaterstaat-waterdata", `${x.location_name} – ${x.measurement_type}`, "https://waterinfo.rws.nl", x as Record<string, unknown>, `${x.value ?? "?"} ${x.unit}`));
+      return toMcpToolPayload(successResponse({ summary: `${records.length} RWS metingen (${out.totalBeforeFilter ?? records.length} stations totaal)`, records, provenance: prov("rijkswaterstaat_waterdata_measurements", out.endpoint, out.params, records.length, out.totalBeforeFilter ?? out.total), access_note: (out as { access_note?: string }).access_note }));
+    } catch (e) {
+      return toMcpToolPayload(mapSourceError(e, "Rijkswaterstaat Waterdata", "https://waterinfo.rws.nl"));
+    }
+  });
+
   server.registerTool("ngr_discovery_search", { inputSchema: { query: z.string().describe("Geo/spatial data topic keywords. Examples: 'bodemkaart', 'hoogtemodel', 'kadastrale grenzen', 'natura 2000'. Do NOT pass full questions."), rows: z.number().int().min(1).max(config.limits.maxRows).default(20) }, description: "Search Nationaal GeoRegister (NGR) for geospatial metadata (maps, WMS/WFS services). Use spatial data topic keywords." }, async ({ query, rows }) => {
     const rw = rewriteQuery(query, "moderate");
     try {
