@@ -237,15 +237,18 @@ export class CbsSource {
     const info = asItems(raw)[0] ?? raw;
 
     const enrichTargets = ["MeasureCodes", "Dimensions", "Perioden", "RegioS"];
-    for (const target of enrichTargets) {
-      try {
+    const enrichResults = await Promise.allSettled(
+      enrichTargets.map(async (target) => {
         const enrichEndpoint = `${base}/${tableId}/${target}`;
         const { data } = await getJson<Record<string, unknown>>(enrichEndpoint, {
           query: { $top: 200 },
         });
-        info[target] = asItems(data);
-      } catch {
-        // ignore missing endpoints
+        return { target, items: asItems(data) };
+      }),
+    );
+    for (const result of enrichResults) {
+      if (result.status === "fulfilled") {
+        info[result.value.target] = result.value.items;
       }
     }
 

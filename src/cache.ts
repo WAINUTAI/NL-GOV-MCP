@@ -33,9 +33,10 @@ export class TTLCache {
   }
 
   size(): number {
+    const now = Date.now();
     let n = 0;
-    for (const [key] of this.store.entries()) {
-      if (this.has(key)) n += 1;
+    for (const [, entry] of this.store.entries()) {
+      if (now <= entry.expiresAt) n += 1;
     }
     return n;
   }

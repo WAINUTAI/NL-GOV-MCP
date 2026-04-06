@@ -29,6 +29,7 @@ import { getConnectorHealth } from "./utils/connector-runtime.js";
 import { buildFormattedResponse, dryRunPayload, mergeAccessNotes, singleConnectorVerbose } from "./utils/tool-runner.js";
 import type { MCPRecord } from "./types.js";
 import { rewriteQuery } from "./utils/query-rewriter.js";
+import { logger } from "./utils/logger.js";
 
 const config = loadConfig();
 const dataOverheid = new DataOverheidSource(config);
@@ -504,6 +505,7 @@ export function registerTools(server: McpServer): void {
         }),
       }));
     } catch (e) {
+      logger.warn({ err: e, tool: "officiele_bekendmakingen_search" }, "Primary source failed, using fallback");
       const started = Date.now();
       const fallback = bekend.fallbackSearch({ query: rw.rewritten, maximumRecords: effectiveLimit, startRecord: effectiveStartRecord, type, authority, date_from, date_to });
       const responseTimeMs = Date.now() - started;
@@ -539,6 +541,7 @@ export function registerTools(server: McpServer): void {
       const records = [record("officielebekendmakingen", String(r.title ?? r.identifier ?? identifier), String(r.canonical_url ?? `https://zoek.officielebekendmakingen.nl/${identifier}`), r, String(r.authority ?? ""), String(r.date ?? ""))];
       return toMcpToolPayload(successResponse({ summary: `Bekendmaking ${identifier}`, records, provenance: prov("officiele_bekendmakingen_record_get", out.endpoint, out.params, 1, 1) }));
     } catch (e) {
+      logger.warn({ err: e, tool: "officiele_bekendmakingen_record_get", identifier }, "Primary source failed, using fallback");
       const fallback = bekend.fallbackGet(identifier);
       const r = fallback.item;
       const records = [record("officielebekendmakingen", String(r.title ?? r.identifier ?? identifier), String(r.canonical_url ?? `https://zoek.officielebekendmakingen.nl/${identifier}`), r, String(r.authority ?? ""), String(r.date ?? ""))];
@@ -1260,7 +1263,9 @@ export function registerTools(server: McpServer): void {
               return { connector: "duo", records, endpoint: out.endpoint, params: out.params, total: out.total };
             }
             case "api": {
-              const out = await timed("api_register", () => new ApiRegisterSource(config, String(process.env[ENV_KEYS.OVERHEID_API_KEY])).search(makeKeywordQuery(questionForSearch, 4) || questionForSearch, top));
+              const apiKey = process.env[ENV_KEYS.OVERHEID_API_KEY];
+              if (!apiKey) throw new Error("OVERHEID_API_KEY is not set");
+              const out = await timed("api_register", () => new ApiRegisterSource(config, apiKey).search(makeKeywordQuery(questionForSearch, 4) || questionForSearch, top));
               const records = out.items.map((x) =>
                 record("api-register", String(x.name ?? x.title ?? x.id ?? "API"), String(x.portalUrl ?? x.url ?? "https://apis.developer.overheid.nl"), x),
               );
