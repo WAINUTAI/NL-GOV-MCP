@@ -68,7 +68,7 @@ export class RdwSource {
   async search(args: { query: string; rows: number }) {
     const q = args.query.trim();
     const normalizedKenteken = normalizeKenteken(q);
-    const escapedLike = q.toUpperCase().replace(/'/g, "''");
+    const escapedLike = q.toUpperCase().replace(/'/g, "''").replace(/[%_\\]/g, "\\$&");
 
     const attemptParams: Array<Record<string, string>> = [];
 

@@ -15,6 +15,11 @@ function toStringValue(value: unknown): string | undefined {
   return undefined;
 }
 
+/** Escape a value for use inside double-quoted CQL/SRU strings. */
+function escapeSruValue(v: string): string {
+  return v.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
 function extractMeta(record: Record<string, unknown>) {
   const meta = (record.originalData as Record<string, unknown> | undefined)?.meta as
     | Record<string, unknown>
@@ -103,7 +108,7 @@ export class BekendmakingenSource {
       params: {
         operation: "searchRetrieve",
         version: "2.0",
-        query: `dt.identifier=\"${identifier}\" AND c.product-area=\"officielepublicaties\"`,
+        query: `dt.identifier="${escapeSruValue(identifier)}" AND c.product-area="officielepublicaties"`,
         maximumRecords: "1",
         startRecord: "1",
         recordSchema: "gzd",
@@ -129,8 +134,8 @@ export class BekendmakingenSource {
     // On this SRU endpoint, free-text terms work directly; keyword="..." is unsupported.
     if (args.query?.trim()) cqlParts.push(args.query.trim());
     cqlParts.push('c.product-area="officielepublicaties"');
-    if (args.type?.trim()) cqlParts.push(`dt.type="${args.type.trim()}"`);
-    if (args.authority?.trim()) cqlParts.push(`dt.creator="${args.authority.trim()}"`);
+    if (args.type?.trim()) cqlParts.push(`dt.type="${escapeSruValue(args.type.trim())}"`);
+    if (args.authority?.trim()) cqlParts.push(`dt.creator="${escapeSruValue(args.authority.trim())}"`);
     if (args.date_from?.trim()) cqlParts.push(`dt.date>=${args.date_from.trim()}`);
     if (args.date_to?.trim()) cqlParts.push(`dt.date<=${args.date_to.trim()}`);
 
@@ -174,7 +179,7 @@ export class BekendmakingenSource {
     const params: Record<string, string | number> = {
       operation: "searchRetrieve",
       version: "2.0",
-      query: `dt.identifier="${identifier}" AND c.product-area="officielepublicaties"`,
+      query: `dt.identifier="${escapeSruValue(identifier)}" AND c.product-area="officielepublicaties"`,
       maximumRecords: 1,
       startRecord: 1,
       recordSchema: "gzd",

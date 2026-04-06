@@ -25,7 +25,7 @@ export class NgrSource {
       outputSchema: "http://www.isotc211.org/2005/gmd",
       constraintLanguage: "CQL_TEXT",
       constraint_language_version: "1.1.0",
-      constraint: `AnyText like '%${args.query.replace(/'/g, "")}%'`,
+      constraint: `AnyText like '%${args.query.replace(/'/g, "''").replace(/[%_\\]/g, "\\$&")}%'`,
     };
 
     const { data, meta } = await getText(NGR_CSW_ENDPOINT, { query: params, timeoutMs: 20_000, retries: 1 });

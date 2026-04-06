@@ -18,12 +18,22 @@ export function buildODataQuery(query: ODataQuery): Record<string, string> {
   return params;
 }
 
+const SAFE_FIELD = /^[A-Za-z_]\w*$/;
+
+function assertSafeField(field: string): void {
+  if (!SAFE_FIELD.test(field)) {
+    throw new Error(`Invalid OData field name: ${field}`);
+  }
+}
+
 export function contains(field: string, value: string): string {
+  assertSafeField(field);
   const escaped = value.replace(/'/g, "''");
   return `contains(${field},'${escaped}')`;
 }
 
 export function equals(field: string, value: string): string {
+  assertSafeField(field);
   const escaped = value.replace(/'/g, "''");
   return `${field} eq '${escaped}'`;
 }
