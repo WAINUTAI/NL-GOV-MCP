@@ -24,7 +24,7 @@ Examples:
 
 `NL-GOV-MCP` actively retrieves and normalizes data across many sources, can combine cross-source results, and returns a consistent MCP response contract ready for assistants and automations.
 
-## Sources (22 connectors, 48 tools)
+## Sources (22 connectors, 49 tools)
 
 | Source | What it covers |
 |---|---|
@@ -41,7 +41,7 @@ Examples:
 | Rechtspraak | Court rulings via official `uitspraken.rechtspraak.nl` search backend |
 | RDW | Vehicle open data |
 | Luchtmeetnet | Live air quality measurements |
-| Rijkswaterstaat | Water data catalog |
+| Rijkswaterstaat | Water data catalog + real-time measurements |
 | NDW | Traffic discovery/metadata |
 | ORI | Open Raadsinformatie discovery |
 | NGR | National Geo Register (CSW metadata) |
@@ -137,7 +137,7 @@ npm run test:live    # integration test suite (live API calls)
 
 ### Transport modes
 
-Three transport modes are supported. All expose the same 48 tools.
+Three transport modes are supported. All expose the same 49 tools.
 
 #### stdio (Claude Desktop, Claude Code)
 

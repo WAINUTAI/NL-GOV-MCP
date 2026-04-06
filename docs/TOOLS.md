@@ -94,6 +94,10 @@
 - `rijkswaterstaat_waterdata_search`
   - live cataloguszoeking via Waterwebservices metadata
   - resultaten bevatten parameter + eenheid/categorie/hoedanigheid
+- `rijkswaterstaat_waterdata_measurements`
+  - real-time metingen van RWS stations (waterstanden, golven, debiet, temperatuur)
+  - combineert meettype + optionele locatienaam in zoekopdracht
+  - retourneert actuele waarden met timestamp, eenheid en stationsinformatie
 
 ## Nationaal GeoRegister (NGR)
 - `ngr_discovery_search`
