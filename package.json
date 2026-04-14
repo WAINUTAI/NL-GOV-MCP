@@ -5,6 +5,7 @@
   "main": "dist/src/index.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "prepare": "tsc -p tsconfig.json",
     "dev": "tsx src/index.ts",
     "dev:sse": "tsx src/index.ts --sse",
     "dev:streamable-http": "tsx src/index.ts --streamable-http",
