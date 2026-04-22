@@ -24,7 +24,7 @@ Examples:
 
 `NL-GOV-MCP` actively retrieves and normalizes data across many sources, can combine cross-source results, and returns a consistent MCP response contract ready for assistants and automations.
 
-## Sources (22 connectors, 49 tools)
+## Sources (22 connectors, 50 tools)
 
 | Source | What it covers |
 |---|---|
@@ -37,7 +37,7 @@ Examples:
 | data.overheid.nl | National open data catalog (CKAN) |
 | Overheid API register | API directory (requires `OVERHEID_API_KEY`) |
 | KNMI | Weather datasets/files, warnings, earthquakes (requires `KNMI_API_KEY`) |
-| PDOK / BAG | Geospatial search and BAG address registry |
+| PDOK / BAG | Geospatial search, BAG address registry, and authoritative per-address detail (oppervlakte, bouwjaar, gebruiksdoelen) via Kadaster Individuele Bevragingen REST API |
 | Rechtspraak | Court rulings via official `uitspraken.rechtspraak.nl` search backend |
 | RDW | Vehicle open data |
 | Luchtmeetnet | Live air quality measurements |
@@ -137,7 +137,7 @@ npm run test:live    # integration test suite (live API calls)
 
 ### Transport modes
 
-Three transport modes are supported. All expose the same 49 tools.
+Three transport modes are supported. All expose the same 50 tools.
 
 #### stdio (Claude Desktop, Claude Code)
 
@@ -229,7 +229,7 @@ Restart Claude Desktop after saving.
 | `NL_GOV_TIMEZONE` | `Europe/Amsterdam` | Default timezone used by `nl_gov_ask` for natural date parsing |
 | `KNMI_API_KEY` | — | Required for KNMI weather tools ([get a free token](https://developer.dataplatform.knmi.nl/open-data-api#token)) |
 | `OVERHEID_API_KEY` | — | Required for API register tool ([request a key](https://apis.developer.overheid.nl/apis/key-aanvragen)) |
-| `BAG_API_KEY` | — | Required for BAG address lookups ([request access](https://www.kadaster.nl/zakelijk/producten/adressen-en-gebouwen/bag-api-individuele-bevragingen)) |
+| `BAG_API_KEY` | — | Required for authoritative per-address detail via `bag_address_detail` (Kadaster Individuele Bevragingen REST). Without it the tool returns Locatieserver-only (`data_kwaliteit: "lookup_only"`). ([request access](https://www.kadaster.nl/zakelijk/producten/adressen-en-gebouwen/bag-api-individuele-bevragingen)) |
 | `DSO_API_KEY` | — | Reserved for future Omgevingswet/DSO connector ([request access](https://developer.omgevingswet.overheid.nl/formulieren/api-key-aanvragen-0/)) |
 | `MCP_TRANSPORT` | `stdio` | Transport mode: `stdio`, `sse`, or `streamable-http` (alternative to CLI flags) |
 | `LOG_LEVEL` | `info` | Pino log level (`debug`, `info`, `warn`, `error`, `silent`) |

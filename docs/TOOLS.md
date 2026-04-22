@@ -66,6 +66,13 @@
 - `bag_lookup_address`
   - gebruikt PDOK Locatieserver v3_1
   - bij tijdelijke onbereikbaarheid: deterministische fallback met duidelijke `access_note`
+- `bag_address_detail`
+  - resolves an address (free-text `query` or PDOK `pdok_id`) to authoritative BAG detail
+  - step 1: PDOK Locatieserver `/free` + `/lookup` for official `adresseerbaarobject_id` + `pandid`
+  - step 2: Kadaster BAG REST (`/lvbag/individuelebevragingen/v2/verblijfsobjecten/{id}` + `/panden/{id}`) for `oppervlakte_m2`, `gebruiksdoelen`, `bouwjaar`, statuses
+  - requires `BAG_API_KEY` for step 2; without it the tool returns Locatieserver-only (`data_kwaliteit: "lookup_only"`)
+  - response flags `data_kwaliteit`: `hard` (both REST hits) | `partial` (one) | `lookup_only` (none)
+  - complements `bag_linked_data_select` when the Labs SPARQL endpoint is slow or down
 
 ## ORI / Open Raadsinformatie
 - `ori_search`
@@ -120,8 +127,10 @@
 - `bag_linked_data_select`
   - Kadaster BAG SPARQL endpoint (`SELECT` only)
   - keyword guardrails block update/construct/service-style operations
+  - comment-stripper is URI-aware: `#` inside `<http://...#fragment>` is not mistaken for a SPARQL `#` comment (previously caused valid queries with `XMLSchema#` / `rdf-schema#` prefixes to be rejected as "Alleen SELECT")
   - LIMIT is capped (max 100)
   - deterministic fallback on endpoint instability
+  - when the Labs SPARQL endpoint is down, prefer `bag_address_detail` for authoritative per-address detail
 - `rce_linked_data_select`
   - RCE SPARQL endpoint (`SELECT` only)
   - same read-only guardrails and LIMIT cap

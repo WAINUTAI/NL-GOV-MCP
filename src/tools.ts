@@ -20,6 +20,7 @@ import { RijkswaterstaatWaterdataSource } from "./sources/rijkswaterstaat-waterd
 import { NgrSource } from "./sources/ngr.js";
 import { RivmSource } from "./sources/rivm.js";
 import { SparqlLinkedDataSource, SPARQL_LIMIT_CAP } from "./sources/sparql-linked-data.js";
+import { BagDetailSource } from "./sources/bagDetail.js";
 import { EurostatSource } from "./sources/eurostat.js";
 import { DataEuropaSource } from "./sources/data-europa.js";
 import { mapSourceError, nowIso, successResponse, toMcpToolPayload, errorResponse } from "./utils/response.js";
@@ -52,6 +53,7 @@ const rwsWaterdata = new RijkswaterstaatWaterdataSource(config);
 const ngr = new NgrSource(config);
 const rivm = new RivmSource(config);
 const bagLinkedData = new SparqlLinkedDataSource(config, "https://api.labs.kadaster.nl/datasets/bag/lv/services/default/sparql", "Kadaster BAG Linked Data");
+const bagDetail = new BagDetailSource(config);
 const rceLinkedData = new SparqlLinkedDataSource(config, "https://api.linkeddata.cultureelerfgoed.nl/datasets/rce/cho/services/cho/sparql", "RCE Linked Data");
 const eurostat = new EurostatSource(config);
 const dataEuropa = new DataEuropaSource(config);
@@ -928,6 +930,40 @@ export function registerTools(server: McpServer): void {
       const out = bagLinkedData.fallback({ query, limit });
       const records = out.items.map((x, i) => record("bag-linked-data", `BAG fallback row ${i + 1}`, "https://api.labs.kadaster.nl/datasets/bag/lv", x, String(x.note ?? "")));
       return toMcpToolPayload(successResponse({ summary: `${records.length} BAG linked-data fallback rows`, records, provenance: prov("bag_linked_data_select", out.endpoint, out.params, records.length, out.total), access_note: out.access_note }));
+    }
+  });
+
+  server.registerTool("bag_address_detail", {
+    inputSchema: {
+      query: z.string().describe("Free-text address (e.g. 'Kelvinring 23a Alblasserdam'). Either `query` or `pdok_id` must be provided.").optional(),
+      pdok_id: z.string().describe("PDOK Locatieserver id (e.g. 'adr-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx') as returned by bag_lookup_address. Preferred over `query` when known.").optional(),
+    },
+    description: "Resolve an address (PDOK Locatieserver id or free-text) and fetch authoritative BAG building/unit detail from the Kadaster Individuele Bevragingen REST API: oppervlakte_m2, bouwjaar, gebruiksdoelen, verblijfsobject-status, pand-status. Requires BAG_API_KEY for full detail; falls back to Locatieserver-only when missing. Use this instead of bag_linked_data_select when the linked-data SPARQL endpoint is down or when you already have an address id.",
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ query, pdok_id }) => {
+    try {
+      const out = await bagDetail.lookupDetail({ query, pdok_id });
+      const rec = record(
+        "bag",
+        out.detail.weergavenaam ?? out.detail.pdok_id ?? "BAG address detail",
+        "https://api.bag.kadaster.nl/lvbag/individuelebevragingen/v2/",
+        out.detail as unknown as Record<string, unknown>,
+        out.detail.weergavenaam ?? undefined,
+      );
+      const hint =
+        out.detail.data_kwaliteit === "hard"
+          ? "Oppervlakte + bouwjaar uit BAG REST API (HARD)."
+          : out.detail.data_kwaliteit === "partial"
+          ? "Gedeeltelijke hit: niet alle BAG REST velden beschikbaar."
+          : "Alleen Locatieserver-lookup gelukt; BAG REST detail ontbreekt.";
+      return toMcpToolPayload(successResponse({
+        summary: `BAG detail ${out.detail.data_kwaliteit} voor ${out.detail.weergavenaam ?? out.detail.pdok_id ?? "(onbekend)"}`,
+        records: [rec],
+        provenance: prov("bag_address_detail", out.endpoints[0] ?? "https://api.pdok.nl/bzk/locatieserver/search/v3_1", { endpoints: String(out.endpoints.length) }, 1, 1),
+        access_note: mergeAccessNotes(hint, out.detail.notes.join(" | ") || undefined),
+      }));
+    } catch (e) {
+      return toMcpToolPayload(errorResponse(mapSourceError(e, "bag_address_detail")));
     }
   });
 

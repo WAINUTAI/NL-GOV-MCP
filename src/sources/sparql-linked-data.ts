@@ -35,7 +35,26 @@ const BLOCKED_KEYWORDS = [
 function stripComments(query: string): string {
   return query
     .split("\n")
-    .map((line) => line.replace(/#.*/, ""))
+    .map((line) => {
+      let depth = 0;
+      let inString: '"' | "'" | null = null;
+      for (let i = 0; i < line.length; i++) {
+        const c = line[i];
+        const prev = i > 0 ? line[i - 1] : "";
+        if (inString) {
+          if (c === inString && prev !== "\\") inString = null;
+          continue;
+        }
+        if (c === '"' || c === "'") {
+          inString = c;
+          continue;
+        }
+        if (c === "<") depth++;
+        else if (c === ">" && depth > 0) depth--;
+        else if (c === "#" && depth === 0) return line.slice(0, i);
+      }
+      return line;
+    })
     .join("\n")
     .trim();
 }
