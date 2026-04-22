@@ -274,6 +274,7 @@ export function registerTools(server: McpServer): void {
         offset,
         limit: effectiveLimit,
         total: records.length,
+        access_note: out.access_note,
         verbose: singleConnectorVerbose({
           enabled: verbose,
           connector: "cbs",
@@ -582,6 +583,7 @@ export function registerTools(server: McpServer): void {
         offset,
         limit: effectiveLimit,
         total: out.total,
+        access_note: out.access_note,
         verbose: singleConnectorVerbose({
           enabled: verbose,
           connector: "rijksoverheid",

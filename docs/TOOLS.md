@@ -8,6 +8,8 @@
 
 ## CBS
 - `cbs_tables_search`
+  - probeert CBS OData (v4 en v3); valt terug op data.overheid.nl CKAN-catalog als beide 0 resultaten geven (CBS v4 doet literal substring match — multi-word queries falen vaak)
+  - bij CKAN-fallback: expliciete `access_note` zodat duidelijk is dat de endpoint en index wijzigen (minder specifiek op CBS-tabellen)
 - `cbs_table_info`
 - `cbs_observations`
   - injects lightweight trend fields when the result shape clearly supports it:
@@ -35,6 +37,8 @@
 
 ## Rijksoverheid
 - `rijksoverheid_search`
+  - Rijksoverheid opendata API ondersteunt geen native `q=`; tool haalt tot 200 recentste items en filtert client-side op trefwoord
+  - niche-queries geven vaak 0; in dat geval: expliciete `access_note` die dit uitlegt en `topic/ministry/date_from` als alternatieven aanbeveelt
 - `rijksoverheid_document`
 - `rijksoverheid_topics`
 - `rijksoverheid_ministries`
@@ -63,6 +67,7 @@
 
 ## PDOK / BAG
 - `pdok_search`
+  - default field list bevat `centroide_ll` en `centroide_rd` zodat adres-records direct lat/lon (EPSG:4326) en RD (EPSG:28992) coördinaten meeleveren
 - `bag_lookup_address`
   - gebruikt PDOK Locatieserver v3_1
   - bij tijdelijke onbereikbaarheid: deterministische fallback met duidelijke `access_note`

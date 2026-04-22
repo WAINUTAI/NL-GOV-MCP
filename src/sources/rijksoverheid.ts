@@ -72,12 +72,25 @@ export class RijksoverheidSource {
     const filtered = items.filter((item) => matchesQuery(item, args.query));
     const sliced = filtered.slice(0, args.top);
 
-    return {
+    const result: {
+      items: Array<Record<string, unknown>>;
+      total: number;
+      endpoint: string;
+      params: Record<string, string>;
+      access_note?: string;
+    } = {
       items: sliced,
       total: filtered.length,
       endpoint: meta.url,
       params,
     };
+
+    if (args.query.trim().length > 0 && items.length > 0 && filtered.length === 0) {
+      result.access_note =
+        `Rijksoverheid API ondersteunt geen native q=-parameter; ${items.length} recente documenten opgehaald en client-side gefilterd op trefwoord. Niche-queries leveren vaak 0 op. Probeer bredere keywords, of gebruik de topic/ministry/date_from-parameters voor gerichter filteren.`;
+    }
+
+    return result;
   }
 
   async document(id: string) {

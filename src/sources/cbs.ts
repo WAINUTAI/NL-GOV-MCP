@@ -134,6 +134,7 @@ export class CbsSource {
     endpoint: string;
     params: Record<string, string>;
     base: string;
+    access_note?: string;
   }> {
     const cacheKey = makeCacheKey("cbs:searchTables", { query, limit });
     const cached = appCache.get<{
@@ -141,26 +142,45 @@ export class CbsSource {
       endpoint: string;
       params: Record<string, string>;
       base: string;
+      access_note?: string;
     }>(cacheKey);
     if (cached) return cached;
 
-    let result;
+    let result: {
+      items: Array<Record<string, unknown>>;
+      endpoint: string;
+      params: Record<string, string>;
+      base: string;
+      access_note?: string;
+    };
+    let usedFallback = false;
     try {
       result = await this.tryCatalogRequest(query, limit);
       // CBS v4 OData uses literal substring match — multi-word queries often return 0.
       // Fall through to data.overheid when v4 succeeds but has no hits.
       if (!result.items.length) {
         result = await this.tryCatalogViaDataOverheid(query, limit);
+        usedFallback = true;
       }
     } catch {
       try {
         result = await this.tryCatalogRequestV3(query, limit);
         if (!result.items.length) {
           result = await this.tryCatalogViaDataOverheid(query, limit);
+          usedFallback = true;
         }
       } catch {
         result = await this.tryCatalogViaDataOverheid(query, limit);
+        usedFallback = true;
       }
+    }
+
+    if (usedFallback) {
+      result = {
+        ...result,
+        access_note:
+          "CBS OData (v4/v3) gaf 0 resultaten voor deze query (literal substring match werkt niet goed voor multi-word); teruggevallen op data.overheid.nl CKAN-catalog (breder index, minder specifiek op CBS-tabellen). Probeer kortere, specifiekere trefwoorden voor directe CBS-hits.",
+      };
     }
 
     appCache.set(cacheKey, result, this.config.cacheTtlMs.cbsCatalog);

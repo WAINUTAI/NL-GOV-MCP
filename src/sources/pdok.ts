@@ -34,7 +34,7 @@ export class PdokSource {
     const params = {
       q: args.query,
       rows: String(args.rows),
-      fl: "id,weergavenaam,type,woonplaatsnaam,gemeentenaam,provinciecode,provincieafkorting,score",
+      fl: "id,weergavenaam,type,woonplaatsnaam,gemeentenaam,provinciecode,provincieafkorting,centroide_ll,centroide_rd,score",
     };
 
     const endpoint = `${PDOK_LOCATIESERVER}/free`;
