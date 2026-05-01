@@ -46,7 +46,7 @@ interface WmsFeatureCollection {
 }
 
 interface LocatieserverResponse {
-  response?: { docs?: Array<{ centroide_rd?: string; weergavenaam?: string }> };
+  response?: { docs?: Array<{ centroide_rd?: string; weergavenaam?: string; gemeentenaam?: string }> };
 }
 
 const STATUS_MAP: Record<Exclude<PlanStatus, "all">, string[]> = {
@@ -81,6 +81,23 @@ async function resolveGemeenteBbox(gemeente: string): Promise<string | undefined
   return bboxFromCenter(center, 5000);
 }
 
+async function resolveWoonplaatsen(gemeente: string, max: number): Promise<Array<[number, number]>> {
+  const params = {
+    q: gemeente,
+    rows: String(max),
+    fq: `type:woonplaats AND gemeentenaam:${JSON.stringify(gemeente)}`,
+    fl: "centroide_rd,weergavenaam,gemeentenaam",
+  };
+  const { data } = await getJson<LocatieserverResponse>(LOCATIESERVER_FREE, { query: params });
+  const docs = data.response?.docs ?? [];
+  const points: Array<[number, number]> = [];
+  for (const d of docs) {
+    const p = parseRdPoint(d.centroide_rd);
+    if (p) points.push(p);
+  }
+  return points;
+}
+
 function statusMatches(planstatus: string | undefined, status: PlanStatus): boolean {
   if (status === "all") return true;
   const allowed = STATUS_MAP[status];
@@ -113,39 +130,89 @@ export class RuimtelijkePlannenSource {
   }> {
     let bbox = args.bbox;
     let bboxNote: string | undefined;
+    let woonplaatsen: Array<[number, number]> = [];
     if (!bbox && args.gemeente) {
+      woonplaatsen = await resolveWoonplaatsen(args.gemeente, 12);
       bbox = await resolveGemeenteBbox(args.gemeente);
       if (!bbox) bboxNote = `Gemeente '${args.gemeente}' niet gevonden via PDOK Locatieserver, val terug op nationale bbox.`;
     }
     if (!bbox) bbox = "13000,306800,279000,620000";
 
-    const featureCount = Math.min(Math.max(args.rows * 2, 20), 100);
-    const params = {
-      service: "WMS",
-      version: "1.3.0",
-      request: "GetFeatureInfo",
-      query_layers: "plangebied",
-      layers: "plangebied",
-      info_format: "application/json",
-      crs: "EPSG:28992",
-      styles: "",
-      bbox,
-      width: "1024",
-      height: "1024",
-      i: "512",
-      j: "512",
-      feature_count: String(featureCount),
+    const featureCount = 100;
+
+    type Sample = { params: Record<string, string>; url?: string; features: Array<{ properties?: FeatureProperties }> };
+    const callGfi = async (sampleParams: Record<string, string>): Promise<Sample> => {
+      const { data, meta } = await getJson<WmsFeatureCollection>(WMS_ENDPOINT, {
+        query: sampleParams,
+        connector: CONNECTOR,
+        timeoutMs: 20_000,
+      });
+      return { params: sampleParams, url: meta.url, features: data.features ?? [] };
     };
 
-    const { data, meta } = await getJson<WmsFeatureCollection>(WMS_ENDPOINT, {
-      query: params,
-      connector: CONNECTOR,
-      timeoutMs: 20_000,
-    });
+    let sampleResults: Sample[];
+    if (woonplaatsen.length) {
+      sampleResults = await Promise.all(
+        woonplaatsen.map((center) => {
+          const cellBbox = bboxFromCenter(center, 1500);
+          return callGfi({
+            service: "WMS",
+            version: "1.3.0",
+            request: "GetFeatureInfo",
+            query_layers: "plangebied",
+            layers: "plangebied",
+            info_format: "application/json",
+            crs: "EPSG:28992",
+            styles: "",
+            bbox: cellBbox,
+            width: "256",
+            height: "256",
+            i: "128",
+            j: "128",
+            feature_count: String(featureCount),
+          });
+        }),
+      );
+    } else {
+      const baseParams = {
+        service: "WMS",
+        version: "1.3.0",
+        request: "GetFeatureInfo",
+        query_layers: "plangebied",
+        layers: "plangebied",
+        info_format: "application/json",
+        crs: "EPSG:28992",
+        styles: "",
+        bbox,
+        width: "1024",
+        height: "1024",
+        feature_count: String(featureCount),
+      };
+      const grid = [170, 512, 853];
+      sampleResults = await Promise.all(
+        grid.flatMap((j) =>
+          grid.map((i) => callGfi({ ...baseParams, i: String(i), j: String(j) })),
+        ),
+      );
+    }
 
-    const features = data.features ?? [];
-    const filtered = features
-      .map((f) => f.properties ?? {})
+    const seenIds = new Set<string>();
+    const mergedFeatures: FeatureProperties[] = [];
+    for (const { features } of sampleResults) {
+      for (const f of features) {
+        const props = f.properties ?? {};
+        const key = String(props.identificatie ?? props.dossierid ?? JSON.stringify(props));
+        if (seenIds.has(key)) continue;
+        seenIds.add(key);
+        mergedFeatures.push(props);
+      }
+    }
+    const params: Record<string, string> = woonplaatsen.length
+      ? { sampling: "woonplaats", samples: String(woonplaatsen.length), bbox }
+      : { sampling: "grid 3x3", samples: "9", bbox };
+    const meta = { url: sampleResults[0]?.url ?? WMS_ENDPOINT };
+
+    const filtered = mergedFeatures
       .filter((p) => statusMatches(p.planstatus, args.status))
       .filter((p) => gemeenteMatches(p, args.gemeente))
       .filter((p) => queryMatches(p, args.query));

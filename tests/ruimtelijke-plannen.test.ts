@@ -61,11 +61,18 @@ describe("RuimtelijkePlannenSource", () => {
       rows: 20,
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(9);
     const calledUrl = String((fetchMock.mock.calls[0] as unknown as Array<unknown>)[0]);
     expect(calledUrl).toContain("kadaster/ruimtelijke-plannen/wms");
     expect(calledUrl).toContain("query_layers=plangebied");
     expect(calledUrl).toContain("bbox=119000%2C486000%2C121000%2C488000");
+    const samplePositions = new Set(
+      fetchMock.mock.calls.map((c) => {
+        const u = new URL(String((c as unknown as Array<unknown>)[0]));
+        return `${u.searchParams.get("i")},${u.searchParams.get("j")}`;
+      }),
+    );
+    expect(samplePositions.size).toBe(9);
 
     expect(out.items).toHaveLength(1);
     const item = out.items[0];
@@ -121,7 +128,7 @@ describe("RuimtelijkePlannenSource", () => {
     expect(out.items[0].id).toBe("A");
   });
 
-  it("resolves gemeente to a bbox via PDOK Locatieserver when no explicit bbox is given", async () => {
+  it("samples each woonplaats centroid (1.5km half-width) via PDOK Locatieserver when only gemeente is given", async () => {
     const fetchMock = vi.fn(async (url: string) => {
       if (url.includes("locatieserver")) {
         return locatieserverResponse("POINT(123164.386 486614.002)");
@@ -133,12 +140,22 @@ describe("RuimtelijkePlannenSource", () => {
     const src = new RuimtelijkePlannenSource(config);
     await src.search({ gemeente: "Amsterdam", status: "all", rows: 5 });
 
-    const wmsCall = fetchMock.mock.calls.find((c) =>
+    const wmsCalls = fetchMock.mock.calls.filter((c) =>
       String((c as unknown as Array<unknown>)[0]).includes("ruimtelijke-plannen/wms"),
     );
-    expect(wmsCall).toBeDefined();
-    const wmsUrl = String((wmsCall as unknown as Array<unknown>)[0]);
-    expect(wmsUrl).toContain("bbox=118164.386%2C481614.002%2C128164.386%2C491614.002");
+    expect(wmsCalls.length).toBeGreaterThan(0);
+    const firstWmsUrl = String((wmsCalls[0] as unknown as Array<unknown>)[0]);
+    expect(firstWmsUrl).toContain("bbox=121664.386%2C485114.002%2C124664.386%2C488114.002");
+  });
+
+  it("falls back to 3x3 grid when no gemeente is provided (only bbox)", async () => {
+    const fetchMock = vi.fn(async () => fcResponse([makeFeature({})]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const src = new RuimtelijkePlannenSource(config);
+    await src.search({ bbox: "120000,485000,130000,495000", status: "all", rows: 5 });
+
+    expect(fetchMock).toHaveBeenCalledTimes(9);
   });
 
   it("emits a no-results access_note when filters drop everything", async () => {
