@@ -24,7 +24,7 @@ Examples:
 
 `NL-GOV-MCP` actively retrieves and normalizes data across many sources, can combine cross-source results, and returns a consistent MCP response contract ready for assistants and automations.
 
-## Sources (22 connectors, 50 tools)
+## Sources (23 connectors, 51 tools)
 
 | Source | What it covers |
 |---|---|
@@ -45,6 +45,7 @@ Examples:
 | NDW | Traffic discovery/metadata |
 | ORI | Open Raadsinformatie discovery |
 | NGR | National Geo Register (CSW metadata) |
+| Ruimtelijkeplannen.nl (Wro/Bro) | Vigerende, ontwerp en vervallen ruimtelijke plannen via PDOK WMS, met status- en gemeentefilter |
 | RIVM | Public-health discovery |
 | Kadaster BAG (Linked Data) | SPARQL access to building/address linked data |
 | RCE (Linked Data) | SPARQL access to cultural heritage linked data |

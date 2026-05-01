@@ -66,6 +66,11 @@ Captured from operator guidance on 2026-03-02.
   - API key: [request access](https://developer.omgevingswet.overheid.nl/formulieren/api-key-aanvragen-0/)
   - Add once endpoint access model is confirmed per service
 
+- **Ruimtelijkeplannen.nl (Wro/Bro plans)** ✅
+  - Scope: vigerende, vervallen en ontwerp ruimtelijke plannen (bestemmingsplan, structuurvisie, amvb, regeling)
+  - Why: locatiegebonden planologie voor gemeenten/provincies, status- en gemeentefilter
+  - Adapter delivered: `ruimtelijke_plannen_search` (PDOK WMS GetFeatureInfo op `plangebied`-laag, keyless, CC-0)
+
 ## Optional EU bonus
 
 - **Eurostat Statistics API** ✅ (`eurostat_datasets_search`, `eurostat_dataset_preview`)
@@ -98,3 +103,4 @@ Captured from operator guidance on 2026-03-02.
 - [x] Add `rivm_discovery_search` tool
 - [x] Add guarded SPARQL tools for BAG + RCE linked data
 - [x] Add EU bonus helpers (`eurostat_*`, `data_europa_datasets_search`)
+- [x] Add `ruimtelijke_plannen_search` (Wro/Bro plannen via PDOK WMS) met status- en gemeentefilter
