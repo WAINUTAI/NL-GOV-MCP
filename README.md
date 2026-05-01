@@ -24,7 +24,7 @@ Examples:
 
 `NL-GOV-MCP` actively retrieves and normalizes data across many sources, can combine cross-source results, and returns a consistent MCP response contract ready for assistants and automations.
 
-## Sources (22 connectors, 50 tools)
+## Sources (24 connectors, 52 tools)
 
 | Source | What it covers |
 |---|---|
@@ -45,11 +45,13 @@ Examples:
 | NDW | Traffic discovery/metadata |
 | ORI | Open Raadsinformatie discovery |
 | NGR | National Geo Register (CSW metadata) |
+| Ruimtelijkeplannen.nl (Wro/Bro) | Vigerende, ontwerp en vervallen ruimtelijke plannen via PDOK WMS, met status- en gemeentefilter |
 | RIVM | Public-health discovery |
 | Kadaster BAG (Linked Data) | SPARQL access to building/address linked data |
 | RCE (Linked Data) | SPARQL access to cultural heritage linked data |
 | Eurostat | EU statistics search + preview |
 | data.europa.eu | EU open data catalog |
+| DSO Omgevingsdocumenten | Discovery van omgevingsplannen, omgevingsvisies, programma's en omgevingsverordeningen onder de Omgevingswet (read-only metadata, vereist `DSO_API_KEY`) |
 
 ## Key features
 
@@ -137,7 +139,7 @@ npm run test:live    # integration test suite (live API calls)
 
 ### Transport modes
 
-Three transport modes are supported. All expose the same 50 tools.
+Three transport modes are supported. All expose the same 52 tools.
 
 #### stdio (Claude Desktop, Claude Code)
 
@@ -230,7 +232,7 @@ Restart Claude Desktop after saving.
 | `KNMI_API_KEY` | — | Required for KNMI weather tools ([get a free token](https://developer.dataplatform.knmi.nl/open-data-api#token)) |
 | `OVERHEID_API_KEY` | — | Required for API register tool ([request a key](https://apis.developer.overheid.nl/apis/key-aanvragen)) |
 | `BAG_API_KEY` | — | Required for authoritative per-address detail via `bag_address_detail` (Kadaster Individuele Bevragingen REST). Without it the tool returns Locatieserver-only (`data_kwaliteit: "lookup_only"`). ([request access](https://www.kadaster.nl/zakelijk/producten/adressen-en-gebouwen/bag-api-individuele-bevragingen)) |
-| `DSO_API_KEY` | — | Reserved for future Omgevingswet/DSO connector ([request access](https://developer.omgevingswet.overheid.nl/formulieren/api-key-aanvragen-0/)) |
+| `DSO_API_KEY` | — | Required for `dso_omgevingsdocumenten_search` (DSO Omgevingsdocumenten Presenteren API v8). Without it the tool returns `not_configured`. ([request access](https://developer.omgevingswet.overheid.nl/formulieren/api-key-aanvragen-0/)) |
 | `MCP_TRANSPORT` | `stdio` | Transport mode: `stdio`, `sse`, or `streamable-http` (alternative to CLI flags) |
 | `LOG_LEVEL` | `info` | Pino log level (`debug`, `info`, `warn`, `error`, `silent`) |
 

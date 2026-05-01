@@ -23,7 +23,7 @@ Technical overview of how NL-GOV-MCP is structured internally.
                                    │
                      ┌─────────────┴─────────────┐
                      │   tools.ts                 │
-                     │   48 tool handlers         │
+                     │   52 tool handlers         │
                      │   Zod schemas + logic      │
                      └───┬────────┬────────┬─────┘
                          │        │        │
@@ -31,7 +31,7 @@ Technical overview of how NL-GOV-MCP is structured internally.
               ▼                   ▼                    ▼
      ┌────────────────┐  ┌────────────────┐  ┌────────────────┐
      │  sources/*.ts   │  │  utils/*.ts     │  │  types.ts      │
-     │  22 connectors  │  │  shared infra   │  │  contracts     │
+     │  24 connectors  │  │  shared infra   │  │  contracts     │
      └───────┬────────┘  └────────────────┘  └────────────────┘
              │
              ▼
@@ -80,11 +80,11 @@ A single tool call flows through these steps:
 |------|------|
 | `src/index.ts` | Entry point. Reads `--sse` / `--streamable-http` flags or `MCP_TRANSPORT` env, starts the matching transport. |
 | `src/server.ts` | Creates `McpServer`, calls `registerTools()`, sets up Express routes for HTTP transports, adds `/health` and `/health/sources` endpoints. |
-| `src/tools.ts` | All 48 tool registrations. Each tool has a Zod input schema and an async handler that calls a source, transforms results, and returns via `toMcpToolPayload()`. |
+| `src/tools.ts` | All 52 tool registrations. Each tool has a Zod input schema and an async handler that calls a source, transforms results, and returns via `toMcpToolPayload()`. |
 | `src/types.ts` | Shared TypeScript interfaces: `MCPRecord`, `Provenance`, `MCPToolResponse`, `MCPErrorResponse`, `AppConfig`. |
 | `src/config.ts` | Loads `config/default.json`, merges env var overrides. |
 
-### Sources (22 connectors)
+### Sources (24 connectors)
 
 Each source is a class with one or more async methods. All methods return a normalized shape:
 
@@ -122,6 +122,8 @@ The tool handler in `tools.ts` maps `items` to `MCPRecord[]` and wraps provenanc
 | `sparql-linked-data.ts` | SPARQL (read-only) | `bag_linked_data` / `rce_linked_data` |
 | `eurostat.ts` | REST | `eurostat` |
 | `data-europa.ts` | Custom Search API | `data_europa` |
+| `ruimtelijke-plannen.ts` | PDOK WMS GetFeatureInfo + Locatieserver | `ruimtelijke_plannen` |
+| `dso-omgevingsdocumenten.ts` | DSO Presenteren API v8 (REST/HAL+JSON, key required) | `dso_omgevingsdocumenten` |
 
 ### Utilities
 
@@ -170,7 +172,7 @@ Request arrives
 | static | 1 hour | CBS, Rijksbegroting, DUO, Eurostat |
 | semi_live | 10 min | Tweede Kamer, Rechtspraak, Bekendmakingen, Rijksoverheid, data.overheid, PDOK, data.europa |
 | live | 2 min | Luchtmeetnet, NDW, RDW, Rijkswaterstaat, KNMI |
-| discovery | 30 min | NGR, RIVM, ORI, API Register, BAG/RCE Linked Data |
+| discovery | 30 min | NGR, RIVM, ORI, API Register, BAG/RCE Linked Data, Ruimtelijke Plannen, DSO Omgevingsdocumenten |
 
 ## Response contract
 
@@ -215,7 +217,7 @@ The HTTP client, caching, circuit breaker, retry, and concurrency limiting are a
 
 ## Transport modes
 
-All three transports expose the same 48 tools and are created by `server.ts`:
+All three transports expose the same 52 tools and are created by `server.ts`:
 
 | Mode | Protocol | Session model | Use case |
 |------|----------|---------------|----------|
