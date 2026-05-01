@@ -18,6 +18,7 @@ import { RechtspraakSource } from "./sources/rechtspraak.js";
 import { RdwSource } from "./sources/rdw.js";
 import { RijkswaterstaatWaterdataSource } from "./sources/rijkswaterstaat-waterdata.js";
 import { NgrSource } from "./sources/ngr.js";
+import { RuimtelijkePlannenSource } from "./sources/ruimtelijke-plannen.js";
 import { RivmSource } from "./sources/rivm.js";
 import { SparqlLinkedDataSource, SPARQL_LIMIT_CAP } from "./sources/sparql-linked-data.js";
 import { BagDetailSource } from "./sources/bagDetail.js";
@@ -51,6 +52,7 @@ const rechtspraak = new RechtspraakSource(config);
 const rdw = new RdwSource(config);
 const rwsWaterdata = new RijkswaterstaatWaterdataSource(config);
 const ngr = new NgrSource(config);
+const ruimtelijkePlannen = new RuimtelijkePlannenSource(config);
 const rivm = new RivmSource(config);
 const bagLinkedData = new SparqlLinkedDataSource(config, "https://api.labs.kadaster.nl/datasets/bag/lv/services/default/sparql", "Kadaster BAG Linked Data");
 const bagDetail = new BagDetailSource(config);
@@ -947,6 +949,38 @@ export function registerTools(server: McpServer): void {
       }
     },
   );
+
+  server.registerTool("ruimtelijke_plannen_search", {
+    inputSchema: {
+      query: z.string().optional().describe("Optional plan-name keywords (substring match on naam/identificatie/typeplan). Examples: 'centrum', 'bestemmingsplan'. Do NOT pass full questions."),
+      bbox: z.string().optional().describe("Optional RD New (EPSG:28992) bounding box 'minx,miny,maxx,maxy'. If omitted, derived from gemeente or defaults to NL-wide."),
+      gemeente: z.string().optional().describe("Optional gemeente name. Resolved to a 10km bbox via PDOK Locatieserver and used as substring filter on naamoverheid."),
+      status: z.enum(["vigerend", "vervallen", "ontwerp", "vastgesteld", "all"]).optional().default("all").describe("Plan status filter. 'vigerend' matches vastgesteld/geconsolideerd/onherroepelijk; 'all' returns every status."),
+      rows: z.number().int().min(1).max(config.limits.maxRows).optional().default(20),
+    },
+    description: "Search Ruimtelijkeplannen.nl (Wro/Bro plans) via PDOK WMS GetFeatureInfo. Returns plan id, naam, planType, status, gemeente, datum and viewer URL. Discovery-only — no juridische tekst extraction.",
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ query, bbox, gemeente, status, rows }) => {
+    try {
+      const out = await ruimtelijkePlannen.search({ query, bbox, gemeente, status: status ?? "all", rows: rows ?? 20 });
+      const records = out.items.map((x) => record(
+        "ruimtelijke_plannen",
+        x.title,
+        x.viewerUrl,
+        { id: x.id, planType: x.planType, status: x.status, gemeente: x.gemeente, identificatie: x.id, raw: x.raw },
+        `${x.planType} — ${x.status} — ${x.gemeente}`.trim(),
+        x.date,
+      ));
+      return toMcpToolPayload(successResponse({
+        summary: `${records.length} ruimtelijke plannen`,
+        records,
+        provenance: prov("ruimtelijke_plannen_search", out.endpoint, out.params, records.length, out.total),
+        access_note: out.access_note,
+      }));
+    } catch (e) {
+      return toMcpToolPayload(mapSourceError(e, "Ruimtelijke Plannen (PDOK WMS)", "https://www.ruimtelijkeplannen.nl"));
+    }
+  });
 
   server.registerTool("rechtspraak_search_ecli", { inputSchema: { query: z.string().describe("1-3 core legal topic keywords ONLY. Extract the subject from the user's question. Examples: 'waterschade', 'huurrecht ontbinding', 'arbeidsrecht ontslag'. NEVER include question words, verbs, articles, or full sentences. This API is extremely sensitive to extra words."), sort: z.enum(["relevance", "date_newest", "ruling_newest"]).default("relevance").describe("Use 'date_newest' when user asks for recent/latest/newest results (sorted by publication date). Use 'ruling_newest' to sort by ruling date. Use 'relevance' for general searches."), date_filter: z.enum(["week", "month", "year", "last_year"]).optional().describe("Optional publication date filter. Use 'week' for past 7 days, 'month' for past month, 'year' for this year, 'last_year' for previous year. Only set when user explicitly mentions a time period."), rows: z.number().int().min(1).max(config.limits.maxRows).default(20) }, description: "Search Dutch case law (Rechtspraak) for ECLI references. IMPORTANT: Pass only topic keywords in 'query', not full sentences. Use 'sort' and 'date_filter' parameters to control recency and time period — do NOT encode these in the query string.", annotations: TOOL_ANNOTATIONS }, async ({ query, sort, date_filter, rows }) => {
     const rw = rewriteQuery(query, "strict");

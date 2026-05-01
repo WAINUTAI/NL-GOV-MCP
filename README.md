@@ -45,6 +45,7 @@ Examples:
 | NDW | Traffic discovery/metadata |
 | ORI | Open Raadsinformatie discovery |
 | NGR | National Geo Register (CSW metadata) |
+| Ruimtelijkeplannen.nl (Wro/Bro) | Vigerende, ontwerp en vervallen ruimtelijke plannen via PDOK WMS, met status- en gemeentefilter |
 | RIVM | Public-health discovery |
 | Kadaster BAG (Linked Data) | SPARQL access to building/address linked data |
 | RCE (Linked Data) | SPARQL access to cultural heritage linked data |

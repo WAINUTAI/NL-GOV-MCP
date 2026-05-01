@@ -67,6 +67,11 @@ Captured from operator guidance on 2026-03-02.
   - Geometrie-filtering via `_zoek` (Point/Polygon in EPSG:28992) en aanvullende velden (status, regelteksten, annotaties) zijn nog niet opgenomen; volgende iteratie kan `geometrie` body-filter en `geldigOp`/`inWerkingOp` tijdreis-parameters toevoegen.
   - Beheer-/aanbieden-API's (CPA aanbieden, Omgevingsdocument aanbieden, Behandeldienstconfiguratie beheren) blijven uit scope (PKIoverheid-cert vereist).
 
+- **Ruimtelijkeplannen.nl (Wro/Bro plans)** ✅
+  - Scope: vigerende, vervallen en ontwerp ruimtelijke plannen (bestemmingsplan, structuurvisie, amvb, regeling)
+  - Why: locatiegebonden planologie voor gemeenten/provincies, status- en gemeentefilter
+  - Adapter delivered: `ruimtelijke_plannen_search` (PDOK WMS GetFeatureInfo op `plangebied`-laag, keyless, CC-0)
+
 ## Optional EU bonus
 
 - **Eurostat Statistics API** ✅ (`eurostat_datasets_search`, `eurostat_dataset_preview`)
@@ -99,3 +104,4 @@ Captured from operator guidance on 2026-03-02.
 - [x] Add `rivm_discovery_search` tool
 - [x] Add guarded SPARQL tools for BAG + RCE linked data
 - [x] Add EU bonus helpers (`eurostat_*`, `data_europa_datasets_search`)
+- [x] Add `ruimtelijke_plannen_search` (Wro/Bro plannen via PDOK WMS) met status- en gemeentefilter

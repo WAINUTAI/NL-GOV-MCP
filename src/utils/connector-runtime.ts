@@ -42,6 +42,7 @@ const CONNECTOR_CATEGORY: Record<string, ConnectorCategory> = {
   bag_linked_data: "discovery",
   rce_linked_data: "discovery",
   dso_omgevingsdocumenten: "discovery",
+  ruimtelijke_plannen: "discovery",
 };
 
 const FAILURE_THRESHOLD = 3;
@@ -136,6 +137,7 @@ export function inferConnectorName(endpointUrl: string): string {
     if (host.includes("knmi.nl")) return "knmi";
     if (host.includes("pdok.nl") || host.includes("kadaster.nl")) {
       if (host.includes("labs.kadaster.nl")) return "bag_linked_data";
+      if (path.includes("/kadaster/ruimtelijke-plannen/")) return "ruimtelijke_plannen";
       return "pdok_bag";
     }
     if (host.includes("nationaalgeoregister.nl")) return "ngr";

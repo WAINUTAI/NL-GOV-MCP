@@ -1,0 +1,168 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { loadConfig } from "../src/config.js";
+import { RuimtelijkePlannenSource } from "../src/sources/ruimtelijke-plannen.js";
+
+const config = loadConfig();
+
+interface Feature {
+  id?: string;
+  properties: Record<string, unknown>;
+}
+
+function fcResponse(features: Feature[]): Response {
+  return new Response(JSON.stringify({ type: "FeatureCollection", features }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+function locatieserverResponse(centroideRd: string | undefined): Response {
+  return new Response(
+    JSON.stringify({
+      response: {
+        docs: centroideRd ? [{ centroide_rd: centroideRd, weergavenaam: "Gemeente Test" }] : [],
+        numFound: centroideRd ? 1 : 0,
+      },
+    }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
+}
+
+function makeFeature(overrides: Partial<Record<string, unknown>>): Feature {
+  return {
+    id: `plangebied.${overrides.identificatie ?? "x"}`,
+    properties: {
+      identificatie: "NL.IMRO.0363.E2202BPSTD-OW01",
+      naam: "Oud West 2018 3e herziening",
+      typeplan: "bestemmingsplan",
+      planstatus: "ontwerp",
+      naamoverheid: "gemeente Amsterdam",
+      overheidscode: "0363",
+      datum: "2023-12-20",
+      historisch: "0",
+      ...overrides,
+    },
+  };
+}
+
+describe("RuimtelijkePlannenSource", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("normalizes WMS GetFeatureInfo features into discovery records", async () => {
+    const fetchMock = vi.fn(async () => fcResponse([makeFeature({})]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const src = new RuimtelijkePlannenSource(config);
+    const out = await src.search({
+      bbox: "119000,486000,121000,488000",
+      status: "all",
+      rows: 20,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const calledUrl = String((fetchMock.mock.calls[0] as unknown as Array<unknown>)[0]);
+    expect(calledUrl).toContain("kadaster/ruimtelijke-plannen/wms");
+    expect(calledUrl).toContain("query_layers=plangebied");
+    expect(calledUrl).toContain("bbox=119000%2C486000%2C121000%2C488000");
+
+    expect(out.items).toHaveLength(1);
+    const item = out.items[0];
+    expect(item.id).toBe("NL.IMRO.0363.E2202BPSTD-OW01");
+    expect(item.title).toBe("Oud West 2018 3e herziening");
+    expect(item.planType).toBe("bestemmingsplan");
+    expect(item.status).toBe("ontwerp");
+    expect(item.gemeente).toBe("gemeente Amsterdam");
+    expect(item.viewerUrl).toBe(
+      "https://www.ruimtelijkeplannen.nl/viewer/view?planidn=NL.IMRO.0363.E2202BPSTD-OW01",
+    );
+  });
+
+  it("filters on status=vigerend matches vastgesteld and geconsolideerd, drops ontwerp", async () => {
+    const features = [
+      makeFeature({ identificatie: "A", planstatus: "vastgesteld", naam: "Plan A" }),
+      makeFeature({ identificatie: "B", planstatus: "geconsolideerd", naam: "Plan B" }),
+      makeFeature({ identificatie: "C", planstatus: "ontwerp", naam: "Plan C" }),
+    ];
+    vi.stubGlobal("fetch", vi.fn(async () => fcResponse(features)));
+
+    const src = new RuimtelijkePlannenSource(config);
+    const out = await src.search({ bbox: "0,0,1,1", status: "vigerend", rows: 10 });
+
+    expect(out.items.map((i) => i.title).sort()).toEqual(["Plan A", "Plan B"]);
+  });
+
+  it("filters on gemeente substring against naamoverheid", async () => {
+    const features = [
+      makeFeature({ identificatie: "A", naamoverheid: "gemeente Amsterdam", naam: "Plan A" }),
+      makeFeature({ identificatie: "B", naamoverheid: "gemeente Utrecht", naam: "Plan B" }),
+      makeFeature({ identificatie: "C", naamoverheid: "Provincie Noord-Holland", naam: "Plan C" }),
+    ];
+    vi.stubGlobal("fetch", vi.fn(async () => fcResponse(features)));
+
+    const src = new RuimtelijkePlannenSource(config);
+    const out = await src.search({ bbox: "100,200,300,400", gemeente: "Amsterdam", status: "all", rows: 10 });
+
+    expect(out.items.map((i) => i.title)).toEqual(["Plan A"]);
+  });
+
+  it("filters on query as substring against naam and typeplan", async () => {
+    const features = [
+      makeFeature({ identificatie: "A", naam: "Centrum-Oost herziening", typeplan: "bestemmingsplan" }),
+      makeFeature({ identificatie: "B", naam: "Buitengebied 2020", typeplan: "structuurvisie" }),
+    ];
+    vi.stubGlobal("fetch", vi.fn(async () => fcResponse(features)));
+
+    const src = new RuimtelijkePlannenSource(config);
+    const out = await src.search({ bbox: "500,600,700,800", query: "centrum", status: "all", rows: 10 });
+
+    expect(out.items).toHaveLength(1);
+    expect(out.items[0].id).toBe("A");
+  });
+
+  it("resolves gemeente to a bbox via PDOK Locatieserver when no explicit bbox is given", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.includes("locatieserver")) {
+        return locatieserverResponse("POINT(123164.386 486614.002)");
+      }
+      return fcResponse([makeFeature({})]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const src = new RuimtelijkePlannenSource(config);
+    await src.search({ gemeente: "Amsterdam", status: "all", rows: 5 });
+
+    const wmsCall = fetchMock.mock.calls.find((c) =>
+      String((c as unknown as Array<unknown>)[0]).includes("ruimtelijke-plannen/wms"),
+    );
+    expect(wmsCall).toBeDefined();
+    const wmsUrl = String((wmsCall as unknown as Array<unknown>)[0]);
+    expect(wmsUrl).toContain("bbox=118164.386%2C481614.002%2C128164.386%2C491614.002");
+  });
+
+  it("emits a no-results access_note when filters drop everything", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => fcResponse([
+      makeFeature({ identificatie: "A", planstatus: "ontwerp" }),
+    ])));
+
+    const src = new RuimtelijkePlannenSource(config);
+    const out = await src.search({ bbox: "900,910,920,930", status: "vervallen", rows: 5 });
+
+    expect(out.items).toHaveLength(0);
+    expect(out.access_note).toContain("geen plannen gevonden");
+  });
+
+  it("respects rows cap", async () => {
+    const features = Array.from({ length: 30 }, (_, i) =>
+      makeFeature({ identificatie: `P${i}`, naam: `Plan ${i}` }),
+    );
+    vi.stubGlobal("fetch", vi.fn(async () => fcResponse(features)));
+
+    const src = new RuimtelijkePlannenSource(config);
+    const out = await src.search({ bbox: "1000,1010,1020,1030", status: "all", rows: 5 });
+
+    expect(out.items).toHaveLength(5);
+    expect(out.total).toBe(30);
+  });
+});
