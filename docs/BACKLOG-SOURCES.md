@@ -61,10 +61,11 @@ Captured from operator guidance on 2026-03-02.
 
 ## Priority B (open but mixed/conditional)
 
-- **DSO / Omgevingswet APIs**
-  - Availability depends on confidentiality/access profile
-  - API key: [request access](https://developer.omgevingswet.overheid.nl/formulieren/api-key-aanvragen-0/)
-  - Add once endpoint access model is confirmed per service
+- **DSO / Omgevingswet APIs** (partially delivered)
+  - Adapter delivered: `dso_omgevingsdocumenten_search` — discovery-only metadata (titel, type, bevoegd gezag, geldigheidsdatums, viewer-link) via DSO Omgevingsdocumenten Presenteren API v8 (`https://service.omgevingswet.overheid.nl/publiek/omgevingsdocumenten/api/presenteren/v8`). Vereist `DSO_API_KEY` (header `x-api-key`).
+  - PDOK Omgevingswet geometrieën (`api.pdok.nl/kadaster/omgevingswet-geometrieen/ogc/v2`) is vector-tiles only — geen OGC API Features `/items` — en daarom niet bruikbaar als open fallback voor documentmetadata.
+  - Geometrie-filtering via `_zoek` (Point/Polygon in EPSG:28992) en aanvullende velden (status, regelteksten, annotaties) zijn nog niet opgenomen; volgende iteratie kan `geometrie` body-filter en `geldigOp`/`inWerkingOp` tijdreis-parameters toevoegen.
+  - Beheer-/aanbieden-API's (CPA aanbieden, Omgevingsdocument aanbieden, Behandeldienstconfiguratie beheren) blijven uit scope (PKIoverheid-cert vereist).
 
 ## Optional EU bonus
 
