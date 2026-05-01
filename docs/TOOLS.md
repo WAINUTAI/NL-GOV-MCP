@@ -116,6 +116,21 @@
   - CSW discovery via GetRecords (CQL AnyText)
   - retourneert metadatarecords met titel + metadata URL
 
+## Ruimtelijkeplannen.nl (Wro/Bro)
+- `ruimtelijke_plannen_search`
+  - PDOK WMS GetFeatureInfo op de `plangebied`-laag (keyless, CC-0)
+  - sampling-strategie: bij `gemeente` worden alle woonplaats-centroïden uit PDOK Locatieserver bevraagd (1.5 km half-width per cel); bij alleen een `bbox` valt de tool terug op een 3x3 sample-grid
+  - status-filter is een conceptuele alias bovenop de officiële IMRO-planstatussen: `vigerend` matcht `vastgesteld` + `geconsolideerd` + `onherroepelijk`; `vervallen` matcht `vervallen` + `ingetrokken`; `ontwerp` matcht `ontwerp` + `voorontwerp`
+  - input-validatie: bbox wordt vooraf gecontroleerd op formaat (4 numerieke waarden, min<max) en op de EPSG:28992 (RD New) extent voor Nederland; ongeldige bbox of niet-bestaande gemeente geven een duidelijke `access_note` zonder upstream WMS-aanroep en zonder de circuit breaker te belasten
+  - discovery-only: response bevat `id`, `naam`, `planType`, `status`, `gemeente`, `datum` en directe viewer-URL; géén juridische tekst extractie
+
+## DSO Omgevingsdocumenten (key required)
+- `dso_omgevingsdocumenten_search` (`DSO_API_KEY`)
+  - DSO Presenteren API v8 (`/regelingen` of `/regelingen/_zoek`) voor omgevingsplannen, omgevingsvisies, programma's en omgevingsverordeningen onder de Omgevingswet
+  - filters: `query` (vrije tekst, client-side substring op titel/citeertitel/opschrift/bevoegd gezag), `bevoegdGezag` (TOOI-code), `typeBevoegdGezag` (gemeente/provincie/waterschap/ministerie), `documentType`
+  - zonder API-sleutel: typed `not_configured` error met aanvraaglink; PDOK Omgevingswet-tegels zijn geen alternatief (vector tiles bevatten geen documentmetadata)
+  - discovery-only: response bevat metadata + viewer-link naar regels-op-de-kaart; géén regelteksten of annotaties
+
 ## Rechtspraak
 - `rechtspraak_search_ecli`
   - gebruikt Rechtspraak zoekfeed en extraheert ECLI

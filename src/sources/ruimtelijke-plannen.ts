@@ -68,6 +68,20 @@ function bboxFromCenter(center: [number, number], halfWidthMeters: number): stri
   return `${x - halfWidthMeters},${y - halfWidthMeters},${x + halfWidthMeters},${y + halfWidthMeters}`;
 }
 
+function validateBbox(bbox: string): { ok: true } | { ok: false; reason: string } {
+  const parts = bbox.split(",").map((s) => s.trim());
+  if (parts.length !== 4) return { ok: false, reason: "bbox must have 4 comma-separated numbers (minx,miny,maxx,maxy in EPSG:28992)" };
+  const nums = parts.map(Number);
+  if (nums.some((n) => !Number.isFinite(n))) return { ok: false, reason: "bbox contains non-numeric values" };
+  const [minx, miny, maxx, maxy] = nums;
+  if (minx >= maxx || miny >= maxy) return { ok: false, reason: "bbox min must be less than max for both axes" };
+  // RD New (EPSG:28992) usable extent for NL roughly 0..300000 (x) and 300000..650000 (y)
+  if (minx < -10000 || maxx > 310000 || miny < 290000 || maxy > 660000) {
+    return { ok: false, reason: "bbox is outside the EPSG:28992 (RD New) extent for the Netherlands" };
+  }
+  return { ok: true };
+}
+
 async function resolveGemeenteBbox(gemeente: string): Promise<string | undefined> {
   const params = {
     q: `gemeente ${gemeente}`,
@@ -129,12 +143,42 @@ export class RuimtelijkePlannenSource {
     access_note?: string;
   }> {
     let bbox = args.bbox;
+    if (bbox) {
+      const v = validateBbox(bbox);
+      if (!v.ok) {
+        return {
+          items: [],
+          total: 0,
+          endpoint: WMS_ENDPOINT,
+          params: { bbox },
+          access_note: `Ongeldige bbox: ${v.reason}.`,
+        };
+      }
+    }
     let bboxNote: string | undefined;
     let woonplaatsen: Array<[number, number]> = [];
     if (!bbox && args.gemeente) {
       woonplaatsen = await resolveWoonplaatsen(args.gemeente, 12);
       bbox = await resolveGemeenteBbox(args.gemeente);
-      if (!bbox) bboxNote = `Gemeente '${args.gemeente}' niet gevonden via PDOK Locatieserver, val terug op nationale bbox.`;
+      if (!bbox && woonplaatsen.length === 0) {
+        return {
+          items: [],
+          total: 0,
+          endpoint: WMS_ENDPOINT,
+          params: { gemeente: args.gemeente },
+          access_note: `Gemeente '${args.gemeente}' niet gevonden via PDOK Locatieserver. Controleer de schrijfwijze of geef een bbox op.`,
+        };
+      }
+      if (!bbox) bboxNote = `Gemeente '${args.gemeente}' niet gevonden als bbox-bron, gebruikt woonplaats-centroïden.`;
+    }
+    if (!bbox && woonplaatsen.length === 0) {
+      return {
+        items: [],
+        total: 0,
+        endpoint: WMS_ENDPOINT,
+        params: {},
+        access_note: "Geef minimaal een bbox of gemeente op.",
+      };
     }
     if (!bbox) bbox = "13000,306800,279000,620000";
 

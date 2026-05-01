@@ -24,7 +24,7 @@ Examples:
 
 `NL-GOV-MCP` actively retrieves and normalizes data across many sources, can combine cross-source results, and returns a consistent MCP response contract ready for assistants and automations.
 
-## Sources (23 connectors, 51 tools)
+## Sources (24 connectors, 52 tools)
 
 | Source | What it covers |
 |---|---|
@@ -139,7 +139,7 @@ npm run test:live    # integration test suite (live API calls)
 
 ### Transport modes
 
-Three transport modes are supported. All expose the same 51 tools.
+Three transport modes are supported. All expose the same 52 tools.
 
 #### stdio (Claude Desktop, Claude Code)
 

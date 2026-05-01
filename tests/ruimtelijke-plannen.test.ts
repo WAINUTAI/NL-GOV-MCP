@@ -48,6 +48,7 @@ function makeFeature(overrides: Partial<Record<string, unknown>>): Feature {
 describe("RuimtelijkePlannenSource", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("normalizes WMS GetFeatureInfo features into discovery records", async () => {
@@ -95,7 +96,7 @@ describe("RuimtelijkePlannenSource", () => {
     vi.stubGlobal("fetch", vi.fn(async () => fcResponse(features)));
 
     const src = new RuimtelijkePlannenSource(config);
-    const out = await src.search({ bbox: "0,0,1,1", status: "vigerend", rows: 10 });
+    const out = await src.search({ bbox: "130000,485000,131000,486000", status: "vigerend", rows: 10 });
 
     expect(out.items.map((i) => i.title).sort()).toEqual(["Plan A", "Plan B"]);
   });
@@ -109,7 +110,7 @@ describe("RuimtelijkePlannenSource", () => {
     vi.stubGlobal("fetch", vi.fn(async () => fcResponse(features)));
 
     const src = new RuimtelijkePlannenSource(config);
-    const out = await src.search({ bbox: "100,200,300,400", gemeente: "Amsterdam", status: "all", rows: 10 });
+    const out = await src.search({ bbox: "140000,485000,141000,486000", gemeente: "Amsterdam", status: "all", rows: 10 });
 
     expect(out.items.map((i) => i.title)).toEqual(["Plan A"]);
   });
@@ -122,7 +123,7 @@ describe("RuimtelijkePlannenSource", () => {
     vi.stubGlobal("fetch", vi.fn(async () => fcResponse(features)));
 
     const src = new RuimtelijkePlannenSource(config);
-    const out = await src.search({ bbox: "500,600,700,800", query: "centrum", status: "all", rows: 10 });
+    const out = await src.search({ bbox: "150000,485000,151000,486000", query: "centrum", status: "all", rows: 10 });
 
     expect(out.items).toHaveLength(1);
     expect(out.items[0].id).toBe("A");
@@ -164,10 +165,51 @@ describe("RuimtelijkePlannenSource", () => {
     ])));
 
     const src = new RuimtelijkePlannenSource(config);
-    const out = await src.search({ bbox: "900,910,920,930", status: "vervallen", rows: 5 });
+    const out = await src.search({ bbox: "160000,485000,161000,486000", status: "vervallen", rows: 5 });
 
     expect(out.items).toHaveLength(0);
     expect(out.access_note).toContain("geen plannen gevonden");
+  });
+
+  it("rejects malformed bbox without calling WMS", async () => {
+    const fetchMock = vi.fn(async () => fcResponse([]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const src = new RuimtelijkePlannenSource(config);
+    const out = await src.search({ bbox: "not-a-bbox", status: "all", rows: 5 });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(out.items).toHaveLength(0);
+    expect(out.access_note).toContain("Ongeldige bbox");
+  });
+
+  it("rejects bbox with min >= max without calling WMS", async () => {
+    const fetchMock = vi.fn(async () => fcResponse([]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const src = new RuimtelijkePlannenSource(config);
+    const out = await src.search({ bbox: "200000,400000,100000,500000", status: "all", rows: 5 });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(out.access_note).toContain("Ongeldige bbox");
+  });
+
+  it("returns clear not-found when gemeente has no woonplaatsen and no bbox", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.includes("locatieserver")) return locatieserverResponse(undefined);
+      throw new Error("WMS should not be called");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const src = new RuimtelijkePlannenSource(config);
+    const out = await src.search({ gemeente: "Xyzdoesnotexist", status: "all", rows: 5 });
+
+    expect(out.items).toHaveLength(0);
+    expect(out.access_note).toContain("niet gevonden");
+    const wmsCalls = fetchMock.mock.calls.filter((c) =>
+      String((c as unknown as Array<unknown>)[0]).includes("ruimtelijke-plannen/wms"),
+    );
+    expect(wmsCalls).toHaveLength(0);
   });
 
   it("respects rows cap", async () => {
@@ -177,7 +219,7 @@ describe("RuimtelijkePlannenSource", () => {
     vi.stubGlobal("fetch", vi.fn(async () => fcResponse(features)));
 
     const src = new RuimtelijkePlannenSource(config);
-    const out = await src.search({ bbox: "1000,1010,1020,1030", status: "all", rows: 5 });
+    const out = await src.search({ bbox: "170000,485000,171000,486000", status: "all", rows: 5 });
 
     expect(out.items).toHaveLength(5);
     expect(out.total).toBe(30);
