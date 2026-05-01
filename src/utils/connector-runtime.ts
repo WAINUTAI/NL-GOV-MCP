@@ -41,6 +41,7 @@ const CONNECTOR_CATEGORY: Record<string, ConnectorCategory> = {
   api_register: "discovery",
   bag_linked_data: "discovery",
   rce_linked_data: "discovery",
+  dso_omgevingsdocumenten: "discovery",
 };
 
 const FAILURE_THRESHOLD = 3;
@@ -153,6 +154,7 @@ export function inferConnectorName(endpointUrl: string): string {
     if (host.includes("data.overheid.nl") || path.includes("/data/api/3/action")) {
       return "data_overheid";
     }
+    if (host.includes("omgevingswet.overheid.nl")) return "dso_omgevingsdocumenten";
 
     return host || "unknown";
   } catch {

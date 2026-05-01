@@ -893,6 +893,61 @@ export function registerTools(server: McpServer): void {
     }
   });
 
+  server.registerTool(
+    "dso_omgevingsdocumenten_search",
+    {
+      description:
+        "Discovery-only search for DSO Omgevingsdocumenten (omgevingsplannen, omgevingsvisies, programma's, omgevingsverordeningen) onder de Omgevingswet. Returns metadata only (id, titel, type, bevoegd gezag, geldigheidsdatums, viewer-link), geen juridische tekst. Requires DSO_API_KEY.",
+      inputSchema: {
+        query: z.string().optional().describe("Optionele vrije tekst (matched op titel, citeertitel, opschrift, bevoegd gezag). Bijv. 'omgevingsvisie Utrecht'."),
+        bevoegdGezag: z.string().optional().describe("TOOI-code van het bevoegd gezag, bijv. 'gm0344' (Utrecht), 'pv24' (Utrecht provincie). Zie identifier.overheid.nl/tooi."),
+        typeBevoegdGezag: z.enum(["gemeente", "provincie", "waterschap", "ministerie"]).optional().describe("Filter op bestuurslaag."),
+        documentType: z.enum(["omgevingsplan", "omgevingsvisie", "programma", "omgevingsverordening"]).optional().describe("Filter op documenttype (client-side filter op type.waarde)."),
+        rows: z.number().int().min(1).max(config.limits.maxRows).default(20),
+      },
+      annotations: TOOL_ANNOTATIONS,
+    },
+    async ({ query, bevoegdGezag, typeBevoegdGezag, documentType, rows }) => {
+      const apiKey = process.env[ENV_KEYS.DSO_API_KEY];
+      if (!apiKey) {
+        return toMcpToolPayload(
+          errorResponse({
+            error: "not_configured",
+            message: "DSO_API_KEY ontbreekt",
+            suggestion:
+              "Vraag een sleutel aan via https://developer.omgevingswet.overheid.nl/formulieren/api-key-aanvragen-0/ en zet DSO_API_KEY. Lees-only PDOK-tegeldata is geen alternatief; vector tiles bevatten geen documentmetadata.",
+          }),
+        );
+      }
+      try {
+        const { DsoOmgevingsdocumentenSource } = await import("./sources/dso-omgevingsdocumenten.js");
+        const src = new DsoOmgevingsdocumentenSource(config, apiKey);
+        const out = await src.search({ query, bevoegdGezag, typeBevoegdGezag, documentType, rows });
+        const records = out.items.map((x) =>
+          record(
+            "dso_omgevingsdocumenten",
+            x.title,
+            x.viewerUrl,
+            { ...x, raw: undefined },
+            x.documentType,
+            x.beginGeldigheid ?? x.beginInwerking,
+          ),
+        );
+        return toMcpToolPayload(
+          successResponse({
+            summary: `${records.length} DSO omgevingsdocumenten`,
+            records,
+            provenance: prov("dso_omgevingsdocumenten_search", out.endpoint, out.query, records.length, out.total),
+            access_note:
+              "Bron: DSO Omgevingsdocumenten Presenteren API v8 (read-only). Filters op documentType worden client-side toegepast op de eerste pagina; verfijn met bevoegdGezag of typeBevoegdGezag voor scherpere resultaten.",
+          }),
+        );
+      } catch (e) {
+        return toMcpToolPayload(mapSourceError(e, "DSO Omgevingsdocumenten", "https://omgevingswet.overheid.nl/regels-op-de-kaart/viewer"));
+      }
+    },
+  );
+
   server.registerTool("rechtspraak_search_ecli", { inputSchema: { query: z.string().describe("1-3 core legal topic keywords ONLY. Extract the subject from the user's question. Examples: 'waterschade', 'huurrecht ontbinding', 'arbeidsrecht ontslag'. NEVER include question words, verbs, articles, or full sentences. This API is extremely sensitive to extra words."), sort: z.enum(["relevance", "date_newest", "ruling_newest"]).default("relevance").describe("Use 'date_newest' when user asks for recent/latest/newest results (sorted by publication date). Use 'ruling_newest' to sort by ruling date. Use 'relevance' for general searches."), date_filter: z.enum(["week", "month", "year", "last_year"]).optional().describe("Optional publication date filter. Use 'week' for past 7 days, 'month' for past month, 'year' for this year, 'last_year' for previous year. Only set when user explicitly mentions a time period."), rows: z.number().int().min(1).max(config.limits.maxRows).default(20) }, description: "Search Dutch case law (Rechtspraak) for ECLI references. IMPORTANT: Pass only topic keywords in 'query', not full sentences. Use 'sort' and 'date_filter' parameters to control recency and time period — do NOT encode these in the query string.", annotations: TOOL_ANNOTATIONS }, async ({ query, sort, date_filter, rows }) => {
     const rw = rewriteQuery(query, "strict");
     try {
