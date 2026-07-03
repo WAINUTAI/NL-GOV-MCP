@@ -1,6 +1,372 @@
 [
-  { "tool": "nl_gov_ask", "args": { "question": "CBS inflatie 2024", "top": 5 } },
-  { "tool": "data_overheid_datasets_search", "args": { "query": "klimaat", "rows": 5 } },
-  { "tool": "officiele_bekendmakingen_search", "args": { "query": "stikstof", "top": 5 } },
-  { "tool": "tweede_kamer_documents", "args": { "query": "jeugdzorg", "top": 5 } }
+  {
+    "id": "data_overheid_search",
+    "description": "data.overheid dataset search",
+    "tool": "data_overheid_datasets_search",
+    "args": { "query": "bevolking", "rows": 3 },
+    "minRecords": 1,
+    "saveContext": { "dataOverheidDatasetId": "records.0.data.id" }
+  },
+  {
+    "id": "data_overheid_get",
+    "description": "data.overheid dataset details",
+    "tool": "data_overheid_dataset_get",
+    "args": { "id": "{{dataOverheidDatasetId|e2a3a2b7-790f-4e34-bbf9-8897f77e16f0}}" },
+    "minRecords": 1
+  },
+  {
+    "id": "data_overheid_orgs",
+    "description": "data.overheid organizations",
+    "tool": "data_overheid_organizations",
+    "minRecords": 1
+  },
+  {
+    "id": "cbs_search",
+    "description": "CBS table search",
+    "tool": "cbs_tables_search",
+    "args": { "query": "bevolking", "top": 3 },
+    "minRecords": 1,
+    "liveProfile": true
+  },
+  {
+    "id": "cbs_table_info",
+    "description": "CBS table metadata",
+    "tool": "cbs_table_info",
+    "args": { "tableId": "86232NED" },
+    "minRecords": 1,
+    "liveProfile": true
+  },
+  {
+    "id": "cbs_observations",
+    "description": "CBS observations",
+    "tool": "cbs_observations",
+    "args": { "tableId": "86232NED", "top": 3 },
+    "minRecords": 1,
+    "liveProfile": true
+  },
+  {
+    "id": "tk_documents",
+    "description": "Tweede Kamer document search",
+    "tool": "tweede_kamer_documents",
+    "args": { "query": "klimaat", "top": 3 },
+    "minRecords": 1,
+    "saveContext": { "tkDocumentId": "records.0.data.Id" },
+    "liveProfile": true
+  },
+  {
+    "id": "tk_document_get",
+    "description": "Tweede Kamer document get",
+    "tool": "tweede_kamer_document_get",
+    "args": { "id": "{{tkDocumentId|c6b24107-4fff-4753-b3ae-a10bfd08d053}}" },
+    "minRecords": 1,
+    "liveProfile": true
+  },
+  {
+    "id": "tk_votes",
+    "description": "Tweede Kamer votes",
+    "tool": "tweede_kamer_votes",
+    "args": { "top": 3 },
+    "minRecords": 1
+  },
+  {
+    "id": "tk_members",
+    "description": "Tweede Kamer members",
+    "tool": "tweede_kamer_members",
+    "args": { "fractie": "VVD", "top": 3 },
+    "minRecords": 1
+  },
+  {
+    "id": "ob_search",
+    "description": "Officiële Bekendmakingen search",
+    "tool": "officiele_bekendmakingen_search",
+    "args": { "query": "klimaat", "top": 3, "startRecord": 1 },
+    "minRecords": 1,
+    "saveContext": { "obIdentifier": "records.0.data.identifier" },
+    "liveProfile": true
+  },
+  {
+    "id": "ob_get",
+    "description": "Officiële Bekendmakingen record get",
+    "tool": "officiele_bekendmakingen_record_get",
+    "args": { "identifier": "{{obIdentifier|blg-1054762}}" },
+    "minRecords": 1,
+    "liveProfile": true
+  },
+  {
+    "id": "rijk_search",
+    "description": "Rijksoverheid search",
+    "tool": "rijksoverheid_search",
+    "args": { "query": "defensie", "top": 3 },
+    "minRecords": 1,
+    "saveContext": { "rijkDocId": "records.0.data.id" },
+    "liveProfile": true
+  },
+  {
+    "id": "rijk_document",
+    "description": "Rijksoverheid document get",
+    "tool": "rijksoverheid_document",
+    "args": { "id": "{{rijkDocId|876c7ae6-21fe-4b02-91fa-73deb5089a8b}}" },
+    "minRecords": 1,
+    "liveProfile": true
+  },
+  {
+    "id": "rijk_topics",
+    "description": "Rijksoverheid topics",
+    "tool": "rijksoverheid_topics",
+    "minRecords": 1
+  },
+  {
+    "id": "rijk_ministries",
+    "description": "Rijksoverheid ministries",
+    "tool": "rijksoverheid_ministries",
+    "minRecords": 1
+  },
+  {
+    "id": "rijk_schoolholidays",
+    "description": "Rijksoverheid school holidays",
+    "tool": "rijksoverheid_schoolholidays",
+    "args": { "year": 2026, "region": "noord" },
+    "minRecords": 1
+  },
+  {
+    "id": "begroting_search",
+    "description": "Rijksbegroting search",
+    "tool": "rijksbegroting_search",
+    "args": { "query": "defensie", "top": 3 },
+    "minRecords": 1
+  },
+  {
+    "id": "begroting_chapter",
+    "description": "Rijksbegroting chapter helper",
+    "tool": "rijksbegroting_chapter",
+    "args": { "year": 2026, "chapter": "defensie" },
+    "minRecords": 1
+  },
+  {
+    "id": "duo_datasets",
+    "description": "DUO datasets search",
+    "tool": "duo_datasets_search",
+    "args": { "query": "onderwijs", "rows": 3 },
+    "minRecords": 1
+  },
+  {
+    "id": "duo_schools",
+    "description": "DUO schools helper",
+    "tool": "duo_schools",
+    "args": { "municipality": "amsterdam", "top": 3 },
+    "minRecords": 0
+  },
+  {
+    "id": "duo_exam",
+    "description": "DUO exam results helper",
+    "tool": "duo_exam_results",
+    "args": { "year": 2024, "municipality": "utrecht", "top": 3 },
+    "minRecords": 0
+  },
+  {
+    "id": "duo_rio",
+    "description": "DUO RIO adapter",
+    "tool": "duo_rio_search",
+    "args": { "query": "amsterdam", "top": 3 },
+    "minRecords": 1
+  },
+  {
+    "id": "api_register",
+    "description": "API register search",
+    "tool": "overheid_api_register_search",
+    "args": { "query": "kadaster", "top": 3 },
+    "minRecords": 1,
+    "skipErrors": ["circuit_open", "http_error"],
+    "skipMessageIncludes": ["temporarily unavailable", "status 503"],
+    "requireEnv": ["OVERHEID_API_KEY"]
+  },
+  {
+    "id": "knmi_datasets",
+    "description": "KNMI dataset catalog",
+    "tool": "knmi_datasets",
+    "minRecords": 1,
+    "requireEnv": ["KNMI_API_KEY"]
+  },
+  {
+    "id": "knmi_latest_obs",
+    "description": "KNMI latest observations files",
+    "tool": "knmi_latest_observations",
+    "args": { "top": 2 },
+    "minRecords": 1,
+    "allowErrors": ["rate_limited"],
+    "requireEnv": ["KNMI_API_KEY"]
+  },
+  {
+    "id": "knmi_warnings",
+    "description": "KNMI warnings files",
+    "tool": "knmi_warnings",
+    "args": { "top": 2 },
+    "minRecords": 0,
+    "requireEnv": ["KNMI_API_KEY"]
+  },
+  {
+    "id": "knmi_earthquakes",
+    "description": "KNMI earthquakes files",
+    "tool": "knmi_earthquakes",
+    "args": { "top": 2 },
+    "minRecords": 0,
+    "requireEnv": ["KNMI_API_KEY"]
+  },
+  {
+    "id": "pdok_search",
+    "description": "PDOK locatieserver search",
+    "tool": "pdok_search",
+    "args": { "query": "den haag", "rows": 3 },
+    "minRecords": 1,
+    "liveProfile": true
+  },
+  {
+    "id": "bag_lookup",
+    "description": "BAG address lookup",
+    "tool": "bag_lookup_address",
+    "args": { "query": "Damrak 1 Amsterdam", "rows": 2 },
+    "minRecords": 1,
+    "liveProfile": true
+  },
+  {
+    "id": "ori_search",
+    "description": "ORI search",
+    "tool": "ori_search",
+    "args": { "query": "woningbouw", "rows": 2 },
+    "minRecords": 1
+  },
+  {
+    "id": "ndw_search",
+    "description": "NDW search",
+    "tool": "ndw_search",
+    "args": { "query": "verkeer", "rows": 2 },
+    "minRecords": 1
+  },
+  {
+    "id": "luchtmeetnet_latest",
+    "description": "Luchtmeetnet latest measurements",
+    "tool": "luchtmeetnet_latest",
+    "args": { "component": "NO2", "rows": 2 },
+    "minRecords": 1,
+    "liveProfile": true
+  },
+  {
+    "id": "rechtspraak_search_ecli",
+    "description": "Rechtspraak ECLI search",
+    "tool": "rechtspraak_search_ecli",
+    "args": { "query": "ECLI:NL:HR:2024", "rows": 2 },
+    "minRecords": 1,
+    "liveProfile": true
+  },
+  {
+    "id": "rdw_search",
+    "description": "RDW open data search",
+    "tool": "rdw_open_data_search",
+    "args": { "query": "toyota", "rows": 2 },
+    "minRecords": 1
+  },
+  {
+    "id": "rws_waterdata",
+    "description": "RWS waterdata catalog search",
+    "tool": "rijkswaterstaat_waterdata_search",
+    "args": { "query": "water", "rows": 2 },
+    "minRecords": 1
+  },
+  {
+    "id": "ngr_discovery",
+    "description": "NGR metadata discovery",
+    "tool": "ngr_discovery_search",
+    "args": { "query": "bag", "rows": 2 },
+    "minRecords": 1
+  },
+  {
+    "id": "rivm_discovery",
+    "description": "RIVM discovery search",
+    "tool": "rivm_discovery_search",
+    "args": { "query": "lucht", "rows": 2 },
+    "minRecords": 1
+  },
+  {
+    "id": "bag_linked_data_select",
+    "description": "Kadaster BAG linked-data SELECT",
+    "tool": "bag_linked_data_select",
+    "args": { "query": "SELECT * WHERE { ?s ?p ?o } LIMIT 1", "limit": 1 },
+    "minRecords": 1
+  },
+  {
+    "id": "rce_linked_data_select",
+    "description": "RCE linked-data SELECT",
+    "tool": "rce_linked_data_select",
+    "args": { "query": "SELECT * WHERE { ?s ?p ?o } LIMIT 1", "limit": 1 },
+    "minRecords": 1
+  },
+  {
+    "id": "eurostat_search",
+    "description": "Eurostat dataset helper",
+    "tool": "eurostat_datasets_search",
+    "args": { "query": "population", "rows": 2 },
+    "minRecords": 1
+  },
+  {
+    "id": "eurostat_preview",
+    "description": "Eurostat dataset preview",
+    "tool": "eurostat_dataset_preview",
+    "args": { "dataset": "tps00001", "rows": 2 },
+    "minRecords": 1
+  },
+  {
+    "id": "data_europa_search",
+    "description": "data.europa.eu CKAN search",
+    "tool": "data_europa_datasets_search",
+    "args": { "query": "climate", "rows": 2 },
+    "minRecords": 1
+  },
+  {
+    "id": "ask_cbs",
+    "description": "Router question: CBS",
+    "tool": "nl_gov_ask",
+    "args": { "question": "Hoeveel inwoners heeft Nederland", "top": 3 },
+    "minRecords": 1,
+    "liveProfile": true
+  },
+  {
+    "id": "ask_tk",
+    "description": "Router question: Tweede Kamer",
+    "tool": "nl_gov_ask",
+    "args": { "question": "Welke moties zijn ingediend over stikstof", "top": 3 },
+    "minRecords": 1,
+    "liveProfile": true
+  },
+  {
+    "id": "ask_rijk",
+    "description": "Router question: Rijksoverheid",
+    "tool": "nl_gov_ask",
+    "args": { "question": "Wat zijn de schoolvakanties 2026 in regio noord", "top": 3 },
+    "minRecords": 1,
+    "liveProfile": true
+  },
+  {
+    "id": "ask_budget",
+    "description": "Router question: Rijksbegroting",
+    "tool": "nl_gov_ask",
+    "args": { "question": "begroting defensie", "top": 3 },
+    "minRecords": 1
+  },
+  {
+    "id": "ask_api",
+    "description": "Router question: API register",
+    "tool": "nl_gov_ask",
+    "args": { "question": "Welke API heeft kadaster", "top": 3 },
+    "minRecords": 1,
+    "skipErrors": ["circuit_open", "http_error"],
+    "skipMessageIncludes": ["temporarily unavailable", "status 503"],
+    "requireEnv": ["OVERHEID_API_KEY"]
+  },
+  {
+    "id": "ask_education_papendrecht",
+    "description": "Router question: education level Papendrecht",
+    "tool": "nl_gov_ask",
+    "args": { "question": "Wat is het gemiddelde opleidingsniveau in de gemeente Papendrecht", "top": 3 },
+    "minRecords": 1
+  }
 ]

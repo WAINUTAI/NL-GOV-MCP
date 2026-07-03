@@ -1,25 +1,73 @@
-import { execFileSync } from "node:child_process";
+/**
+ * NL-GOV-MCP question / live suite runner (in-process).
+ *
+ * WHY THIS WAS REWRITTEN (2026):
+ *   The previous version shelled out to an external `mcporter` CLI via
+ *   execFileSync("mcporter", ...). That binary is not a devDependency and is not
+ *   installed by `npm ci`, so every case failed with "spawnSync mcporter ENOENT"
+ *   (see the old scripts/live-suite-report.json: 16/16 FAIL). This version drives
+ *   the MCP server IN-PROCESS using the official @modelcontextprotocol/sdk
+ *   InMemoryTransport + Client — the same proven call path as
+ *   tests/acceptance.live.test.ts, but without opening a listening HTTP port.
+ *   The external mcporter dependency is gone entirely.
+ *
+ * DATA SOURCE:
+ *   Cases are loaded from scripts/test-queries.json (data-driven). Previously that
+ *   file was an unused 4-line stub; it is now the single source of truth for the
+ *   suite. Each entry: { id, description, tool, args?, minRecords?, saveContext?,
+ *   requireEnv?, allowErrors?, skipErrors?, skipMessageIncludes?, liveProfile? }.
+ *
+ * PROFILES (CLI flag --profile <full|live>, default full):
+ *   full → runs the complete case suite across every connector; writes
+ *          scripts/question-suite-report.json.
+ *   live → runs only the curated smoke-test subset (cases flagged
+ *          "liveProfile": true) and writes scripts/live-suite-report.json.
+ *
+ *   NOTE ON THE full/live DISTINCTION: every connector targets a real external
+ *   public API and this project ships no offline fixtures, so BOTH profiles make
+ *   real network calls. "full" is the broad end-to-end suite; "live" is a fast,
+ *   curated subset. This mirrors the pre-existing behaviour (the old runner drew
+ *   the identical full/live split via a hard-coded LIVE_CASE_IDS set).
+ *
+ * CONTEXT INTERPOLATION:
+ *   A string arg of the form "{{contextKey|fallback}}" is resolved at runtime from
+ *   context captured by an earlier case's "saveContext" (dot-path into the tool
+ *   payload). If the context key is unset, the fallback literal is used. This
+ *   replaces the function-valued args the old TS runner used, so the whole suite
+ *   can live in JSON.
+ *
+ * The CLI flags (--profile full / --profile live) and the report format/paths are
+ * unchanged, so package.json (test:questions / test:live) needs no edits.
+ */
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { config as dotenvConfig } from "dotenv";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { createServer } from "../src/server.js";
 
 dotenvConfig();
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const SCRIPTS_DIR = __dirname;
+
 type ArgValue = string | number | boolean;
-type ArgMap = Record<string, ArgValue | undefined>;
+type ArgMap = Record<string, ArgValue>;
 type Context = Record<string, unknown>;
 
 interface CaseDef {
   id: string;
   description: string;
   tool: string;
-  args?: ArgMap | ((ctx: Context) => ArgMap);
+  args?: ArgMap;
   minRecords?: number;
   allowErrors?: string[];
   skipErrors?: string[];
   skipMessageIncludes?: string[];
   requireEnv?: string[];
   saveContext?: Record<string, string>;
+  liveProfile?: boolean;
 }
 
 interface CaseResult {
@@ -47,44 +95,25 @@ function getByPath(obj: unknown, dotPath: string): unknown {
   }, obj);
 }
 
-function formatArg(key: string, value: ArgValue): string {
-  if (typeof value === "number" || typeof value === "boolean") {
-    return `${key}:${value}`;
+/** Resolve "{{contextKey|fallback}}" tokens in string args from captured context. */
+function resolveArgs(args: ArgMap, ctx: Context): ArgMap {
+  const resolved: ArgMap = {};
+  for (const [key, value] of Object.entries(args)) {
+    if (typeof value === "string") {
+      const match = /^\{\{(.+?)\|(.*)\}\}$/.exec(value);
+      if (match) {
+        const [, ctxKey, fallback] = match;
+        const fromCtx = ctx[ctxKey];
+        resolved[key] =
+          fromCtx !== undefined && fromCtx !== null && String(fromCtx) !== ""
+            ? String(fromCtx)
+            : fallback;
+        continue;
+      }
+    }
+    resolved[key] = value;
   }
-  return `${key}=${encodeURIComponent(value)}`;
-}
-
-function runTool(tool: string, args: ArgMap): { payload?: Record<string, unknown>; elapsedMs: number; execError?: string } {
-  const argTokens = Object.entries(args)
-    .filter(([, v]) => v !== undefined)
-    .map(([k, v]) => formatArg(k, v as ArgValue));
-
-  const cmd = [
-    "call",
-    "--stdio",
-    "node dist/src/index.js",
-    tool,
-    ...argTokens,
-    "--output",
-    "json",
-  ];
-
-  const started = Date.now();
-  try {
-    const out = execFileSync("mcporter", cmd, {
-      cwd: process.cwd(),
-      env: process.env,
-      encoding: "utf8",
-      timeout: 90_000,
-      maxBuffer: 20 * 1024 * 1024,
-    });
-    const elapsedMs = Date.now() - started;
-    return { payload: JSON.parse(out) as Record<string, unknown>, elapsedMs };
-  } catch (error) {
-    const elapsedMs = Date.now() - started;
-    const msg = error instanceof Error ? error.message : "mcporter call failed";
-    return { elapsedMs, execError: msg };
-  }
+  return resolved;
 }
 
 const requestedProfile = (() => {
@@ -92,493 +121,177 @@ const requestedProfile = (() => {
   return idx >= 0 ? String(process.argv[idx + 1] ?? "full") : "full";
 })();
 
-const LIVE_CASE_IDS = new Set([
-  "cbs_search",
-  "cbs_table_info",
-  "cbs_observations",
-  "tk_documents",
-  "tk_document_get",
-  "ob_search",
-  "ob_get",
-  "rijk_search",
-  "rijk_document",
-  "rechtspraak_search_ecli",
-  "pdok_search",
-  "bag_lookup",
-  "luchtmeetnet_latest",
-  "ask_cbs",
-  "ask_tk",
-  "ask_rijk",
-]);
+function loadCases(): CaseDef[] {
+  const raw = fs.readFileSync(path.join(SCRIPTS_DIR, "test-queries.json"), "utf8");
+  const parsed = JSON.parse(raw) as CaseDef[];
+  if (!Array.isArray(parsed)) {
+    throw new Error("scripts/test-queries.json must be a JSON array of cases");
+  }
+  return parsed;
+}
 
-const cases: CaseDef[] = [
-  {
-    id: "data_overheid_search",
-    description: "data.overheid dataset search",
-    tool: "data_overheid_datasets_search",
-    args: { query: "bevolking", rows: 3 },
-    minRecords: 1,
-    saveContext: { dataOverheidDatasetId: "records.0.data.id" },
-  },
-  {
-    id: "data_overheid_get",
-    description: "data.overheid dataset details",
-    tool: "data_overheid_dataset_get",
-    args: (ctx) => ({
-      id: String(ctx.dataOverheidDatasetId ?? "e2a3a2b7-790f-4e34-bbf9-8897f77e16f0"),
-    }),
-    minRecords: 1,
-  },
-  {
-    id: "data_overheid_orgs",
-    description: "data.overheid organizations",
-    tool: "data_overheid_organizations",
-    minRecords: 1,
-  },
-  {
-    id: "cbs_search",
-    description: "CBS table search",
-    tool: "cbs_tables_search",
-    args: { query: "bevolking", top: 3 },
-    minRecords: 1,
-  },
-  {
-    id: "cbs_table_info",
-    description: "CBS table metadata",
-    tool: "cbs_table_info",
-    args: { tableId: "86232NED" },
-    minRecords: 1,
-  },
-  {
-    id: "cbs_observations",
-    description: "CBS observations",
-    tool: "cbs_observations",
-    args: { tableId: "86232NED", top: 3 },
-    minRecords: 1,
-  },
-  {
-    id: "tk_documents",
-    description: "Tweede Kamer document search",
-    tool: "tweede_kamer_documents",
-    args: { query: "klimaat", top: 3 },
-    minRecords: 1,
-    saveContext: { tkDocumentId: "records.0.data.Id" },
-  },
-  {
-    id: "tk_document_get",
-    description: "Tweede Kamer document get",
-    tool: "tweede_kamer_document_get",
-    args: (ctx) => ({
-      id: String(ctx.tkDocumentId ?? "c6b24107-4fff-4753-b3ae-a10bfd08d053"),
-    }),
-    minRecords: 1,
-  },
-  {
-    id: "tk_votes",
-    description: "Tweede Kamer votes",
-    tool: "tweede_kamer_votes",
-    args: { top: 3 },
-    minRecords: 1,
-  },
-  {
-    id: "tk_members",
-    description: "Tweede Kamer members",
-    tool: "tweede_kamer_members",
-    args: { fractie: "VVD", top: 3 },
-    minRecords: 1,
-  },
-  {
-    id: "ob_search",
-    description: "Officiële Bekendmakingen search",
-    tool: "officiele_bekendmakingen_search",
-    args: { query: "klimaat", top: 3, startRecord: 1 },
-    minRecords: 1,
-    saveContext: { obIdentifier: "records.0.data.identifier" },
-  },
-  {
-    id: "ob_get",
-    description: "Officiële Bekendmakingen record get",
-    tool: "officiele_bekendmakingen_record_get",
-    args: (ctx) => ({ identifier: String(ctx.obIdentifier ?? "blg-1054762") }),
-    minRecords: 1,
-  },
-  {
-    id: "rijk_search",
-    description: "Rijksoverheid search",
-    tool: "rijksoverheid_search",
-    args: { query: "defensie", top: 3 },
-    minRecords: 1,
-    saveContext: { rijkDocId: "records.0.data.id" },
-  },
-  {
-    id: "rijk_document",
-    description: "Rijksoverheid document get",
-    tool: "rijksoverheid_document",
-    args: (ctx) => ({ id: String(ctx.rijkDocId ?? "876c7ae6-21fe-4b02-91fa-73deb5089a8b") }),
-    minRecords: 1,
-  },
-  {
-    id: "rijk_topics",
-    description: "Rijksoverheid topics",
-    tool: "rijksoverheid_topics",
-    minRecords: 1,
-  },
-  {
-    id: "rijk_ministries",
-    description: "Rijksoverheid ministries",
-    tool: "rijksoverheid_ministries",
-    minRecords: 1,
-  },
-  {
-    id: "rijk_schoolholidays",
-    description: "Rijksoverheid school holidays",
-    tool: "rijksoverheid_schoolholidays",
-    args: { year: 2026, region: "noord" },
-    minRecords: 1,
-  },
-  {
-    id: "begroting_search",
-    description: "Rijksbegroting search",
-    tool: "rijksbegroting_search",
-    args: { query: "defensie", top: 3 },
-    minRecords: 1,
-  },
-  {
-    id: "begroting_chapter",
-    description: "Rijksbegroting chapter helper",
-    tool: "rijksbegroting_chapter",
-    args: { year: 2026, chapter: "defensie" },
-    minRecords: 1,
-  },
-  {
-    id: "duo_datasets",
-    description: "DUO datasets search",
-    tool: "duo_datasets_search",
-    args: { query: "onderwijs", rows: 3 },
-    minRecords: 1,
-  },
-  {
-    id: "duo_schools",
-    description: "DUO schools helper",
-    tool: "duo_schools",
-    args: { municipality: "amsterdam", top: 3 },
-    minRecords: 0,
-  },
-  {
-    id: "duo_exam",
-    description: "DUO exam results helper",
-    tool: "duo_exam_results",
-    args: { year: 2024, municipality: "utrecht", top: 3 },
-    minRecords: 0,
-  },
-  {
-    id: "duo_rio",
-    description: "DUO RIO adapter",
-    tool: "duo_rio_search",
-    args: { query: "amsterdam", top: 3 },
-    minRecords: 1,
-  },
-  {
-    id: "api_register",
-    description: "API register search",
-    tool: "overheid_api_register_search",
-    args: { query: "kadaster", top: 3 },
-    minRecords: 1,
-    skipErrors: ["circuit_open", "http_error"],
-    skipMessageIncludes: ["temporarily unavailable", "status 503"],
-    requireEnv: ["OVERHEID_API_KEY"],
-  },
-  {
-    id: "knmi_datasets",
-    description: "KNMI dataset catalog",
-    tool: "knmi_datasets",
-    minRecords: 1,
-    requireEnv: ["KNMI_API_KEY"],
-  },
-  {
-    id: "knmi_latest_obs",
-    description: "KNMI latest observations files",
-    tool: "knmi_latest_observations",
-    args: { top: 2 },
-    minRecords: 1,
-    allowErrors: ["rate_limited"],
-    requireEnv: ["KNMI_API_KEY"],
-  },
-  {
-    id: "knmi_warnings",
-    description: "KNMI warnings files",
-    tool: "knmi_warnings",
-    args: { top: 2 },
-    minRecords: 0,
-    requireEnv: ["KNMI_API_KEY"],
-  },
-  {
-    id: "knmi_earthquakes",
-    description: "KNMI earthquakes files",
-    tool: "knmi_earthquakes",
-    args: { top: 2 },
-    minRecords: 0,
-    requireEnv: ["KNMI_API_KEY"],
-  },
-  {
-    id: "pdok_search",
-    description: "PDOK locatieserver search",
-    tool: "pdok_search",
-    args: { query: "den haag", rows: 3 },
-    minRecords: 1,
-  },
-  {
-    id: "bag_lookup",
-    description: "BAG address lookup",
-    tool: "bag_lookup_address",
-    args: { query: "Damrak 1 Amsterdam", rows: 2 },
-    minRecords: 1,
-  },
-  {
-    id: "ori_search",
-    description: "ORI search",
-    tool: "ori_search",
-    args: { query: "woningbouw", rows: 2 },
-    minRecords: 1,
-  },
-  {
-    id: "ndw_search",
-    description: "NDW search",
-    tool: "ndw_search",
-    args: { query: "verkeer", rows: 2 },
-    minRecords: 1,
-  },
-  {
-    id: "luchtmeetnet_latest",
-    description: "Luchtmeetnet latest measurements",
-    tool: "luchtmeetnet_latest",
-    args: { component: "NO2", rows: 2 },
-    minRecords: 1,
-  },
-  {
-    id: "rechtspraak_search_ecli",
-    description: "Rechtspraak ECLI search",
-    tool: "rechtspraak_search_ecli",
-    args: { query: "ECLI:NL:HR:2024", rows: 2 },
-    minRecords: 1,
-  },
-  {
-    id: "rdw_search",
-    description: "RDW open data search",
-    tool: "rdw_open_data_search",
-    args: { query: "toyota", rows: 2 },
-    minRecords: 1,
-  },
-  {
-    id: "rws_waterdata",
-    description: "RWS waterdata catalog search",
-    tool: "rijkswaterstaat_waterdata_search",
-    args: { query: "water", rows: 2 },
-    minRecords: 1,
-  },
-  {
-    id: "ngr_discovery",
-    description: "NGR metadata discovery",
-    tool: "ngr_discovery_search",
-    args: { query: "bag", rows: 2 },
-    minRecords: 1,
-  },
-  {
-    id: "rivm_discovery",
-    description: "RIVM discovery search",
-    tool: "rivm_discovery_search",
-    args: { query: "lucht", rows: 2 },
-    minRecords: 1,
-  },
-  {
-    id: "bag_linked_data_select",
-    description: "Kadaster BAG linked-data SELECT",
-    tool: "bag_linked_data_select",
-    args: { query: "SELECT * WHERE { ?s ?p ?o } LIMIT 1", limit: 1 },
-    minRecords: 1,
-  },
-  {
-    id: "rce_linked_data_select",
-    description: "RCE linked-data SELECT",
-    tool: "rce_linked_data_select",
-    args: { query: "SELECT * WHERE { ?s ?p ?o } LIMIT 1", limit: 1 },
-    minRecords: 1,
-  },
-  {
-    id: "eurostat_search",
-    description: "Eurostat dataset helper",
-    tool: "eurostat_datasets_search",
-    args: { query: "population", rows: 2 },
-    minRecords: 1,
-  },
-  {
-    id: "eurostat_preview",
-    description: "Eurostat dataset preview",
-    tool: "eurostat_dataset_preview",
-    args: { dataset: "tps00001", rows: 2 },
-    minRecords: 1,
-  },
-  {
-    id: "data_europa_search",
-    description: "data.europa.eu CKAN search",
-    tool: "data_europa_datasets_search",
-    args: { query: "climate", rows: 2 },
-    minRecords: 1,
-  },
-  // nl_gov_ask (question-routing)
-  {
-    id: "ask_cbs",
-    description: "Router question: CBS",
-    tool: "nl_gov_ask",
-    args: { question: "Hoeveel inwoners heeft Nederland", top: 3 },
-    minRecords: 1,
-  },
-  {
-    id: "ask_tk",
-    description: "Router question: Tweede Kamer",
-    tool: "nl_gov_ask",
-    args: { question: "Welke moties zijn ingediend over stikstof", top: 3 },
-    minRecords: 1,
-  },
-  {
-    id: "ask_rijk",
-    description: "Router question: Rijksoverheid",
-    tool: "nl_gov_ask",
-    args: { question: "Wat zijn de schoolvakanties 2026 in regio noord", top: 3 },
-    minRecords: 1,
-  },
-  {
-    id: "ask_budget",
-    description: "Router question: Rijksbegroting",
-    tool: "nl_gov_ask",
-    args: { question: "begroting defensie", top: 3 },
-    minRecords: 1,
-  },
-  {
-    id: "ask_api",
-    description: "Router question: API register",
-    tool: "nl_gov_ask",
-    args: { question: "Welke API heeft kadaster", top: 3 },
-    minRecords: 1,
-    skipErrors: ["circuit_open", "http_error"],
-    skipMessageIncludes: ["temporarily unavailable", "status 503"],
-    requireEnv: ["OVERHEID_API_KEY"],
-  },
-  {
-    id: "ask_education_papendrecht",
-    description: "Router question: education level Papendrecht",
-    tool: "nl_gov_ask",
-    args: { question: "Wat is het gemiddelde opleidingsniveau in de gemeente Papendrecht", top: 3 },
-    minRecords: 1,
-  },
-];
+/**
+ * In-process MCP tool invocation via InMemoryTransport + Client.
+ * Mirrors the parsing done by tests/acceptance.live.test.ts: the tool payload is
+ * the JSON in content[0].text.
+ */
+interface ToolClient {
+  call: (tool: string, args: ArgMap) => Promise<{ payload?: Record<string, unknown>; elapsedMs: number; execError?: string }>;
+  close: () => Promise<void>;
+}
+
+async function createToolClient(): Promise<ToolClient> {
+  const server = createServer();
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "nl-gov-question-suite", version: "1.0.0" });
+
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+  return {
+    async call(tool, args) {
+      const started = Date.now();
+      try {
+        const result = (await client.callTool({ name: tool, arguments: args })) as {
+          content?: Array<{ type: string; text?: string }>;
+          isError?: boolean;
+        };
+        const elapsedMs = Date.now() - started;
+        const text = result.content?.find((c) => c.type === "text")?.text;
+        if (!text) {
+          return { elapsedMs, execError: `No text content returned from ${tool}` };
+        }
+        try {
+          return { payload: JSON.parse(text) as Record<string, unknown>, elapsedMs };
+        } catch {
+          // Tool threw and the SDK wrapped a non-JSON error string in text content.
+          return { elapsedMs, execError: result.isError ? text : `Unparseable payload from ${tool}: ${text.slice(0, 200)}` };
+        }
+      } catch (error) {
+        const elapsedMs = Date.now() - started;
+        const msg = error instanceof Error ? error.message : "tool call failed";
+        return { elapsedMs, execError: msg };
+      }
+    },
+    async close() {
+      await client.close().catch(() => undefined);
+      await server.close().catch(() => undefined);
+    },
+  };
+}
 
 async function main() {
+  const allCases = loadCases();
   const context: Context = {};
   const results: CaseResult[] = [];
+  const toolClient = await createToolClient();
 
-  for (const testCase of cases) {
-    if (requestedProfile === "live" && !LIVE_CASE_IDS.has(testCase.id)) {
-      continue;
-    }
-    const missingEnv = (testCase.requireEnv ?? []).filter((k) => !process.env[k]);
-    if (missingEnv.length) {
-      results.push({
-        id: testCase.id,
-        tool: testCase.tool,
-        description: testCase.description,
-        status: "SKIP",
-        elapsedMs: 0,
-        records: 0,
-        reason: `Missing env: ${missingEnv.join(", ")}`,
-      });
-      continue;
-    }
+  try {
+    for (const testCase of allCases) {
+      if (requestedProfile === "live" && !testCase.liveProfile) {
+        continue;
+      }
 
-    const args = typeof testCase.args === "function" ? testCase.args(context) : (testCase.args ?? {});
-    const maxAttempts = requestedProfile === "live" ? 3 : 2;
-    let finalResult: CaseResult | undefined;
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      const out = runTool(testCase.tool, args);
-
-      if (out.execError) {
-        finalResult = {
+      const missingEnv = (testCase.requireEnv ?? []).filter((k) => !process.env[k]);
+      if (missingEnv.length) {
+        results.push({
           id: testCase.id,
           tool: testCase.tool,
           description: testCase.description,
-          status: "FAIL",
-          elapsedMs: out.elapsedMs,
+          status: "SKIP",
+          elapsedMs: 0,
           records: 0,
-          error: "exec_error",
-          message: out.execError,
-        };
-      } else {
-        const payload = out.payload ?? {};
-        const isError = typeof payload.error === "string";
+          reason: `Missing env: ${missingEnv.join(", ")}`,
+        });
+        continue;
+      }
 
-        if (isError) {
-          const code = String(payload.error);
-          const message = String(payload.message ?? "unknown error");
-          const allowed = (testCase.allowErrors ?? []).includes(code);
-          const shouldSkip =
-            (testCase.skipErrors ?? []).includes(code) &&
-            ((testCase.skipMessageIncludes ?? []).length === 0 ||
-              (testCase.skipMessageIncludes ?? []).some((part) =>
-                message.toLowerCase().includes(part.toLowerCase()),
-              ));
+      const args = resolveArgs(testCase.args ?? {}, context);
+      const maxAttempts = requestedProfile === "live" ? 3 : 2;
+      let finalResult: CaseResult | undefined;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        const out = await toolClient.call(testCase.tool, args);
+
+        if (out.execError) {
           finalResult = {
             id: testCase.id,
             tool: testCase.tool,
             description: testCase.description,
-            status: allowed ? "PASS" : shouldSkip ? "SKIP" : "FAIL",
+            status: "FAIL",
             elapsedMs: out.elapsedMs,
             records: 0,
-            error: code,
-            ...(shouldSkip ? { reason: `${code}: ${message}` } : { message }),
+            error: "exec_error",
+            message: out.execError,
           };
         } else {
-          const records = Array.isArray(payload.records) ? payload.records.length : 0;
-          const minRecords = testCase.minRecords ?? 0;
-          const passed = records >= minRecords;
+          const payload = out.payload ?? {};
+          const isError = typeof payload.error === "string";
 
-          if (passed && testCase.saveContext) {
-            for (const [ctxKey, pathExpr] of Object.entries(testCase.saveContext)) {
-              const value = getByPath(payload, pathExpr);
-              if (value !== undefined && value !== null && String(value) !== "") {
-                context[ctxKey] = value;
+          if (isError) {
+            const code = String(payload.error);
+            const message = String(payload.message ?? "unknown error");
+            const allowed = (testCase.allowErrors ?? []).includes(code);
+            const shouldSkip =
+              (testCase.skipErrors ?? []).includes(code) &&
+              ((testCase.skipMessageIncludes ?? []).length === 0 ||
+                (testCase.skipMessageIncludes ?? []).some((part) =>
+                  message.toLowerCase().includes(part.toLowerCase()),
+                ));
+            finalResult = {
+              id: testCase.id,
+              tool: testCase.tool,
+              description: testCase.description,
+              status: allowed ? "PASS" : shouldSkip ? "SKIP" : "FAIL",
+              elapsedMs: out.elapsedMs,
+              records: 0,
+              error: code,
+              ...(shouldSkip ? { reason: `${code}: ${message}` } : { message }),
+            };
+          } else {
+            const records = Array.isArray(payload.records) ? payload.records.length : 0;
+            const minRecords = testCase.minRecords ?? 0;
+            const passed = records >= minRecords;
+
+            if (passed && testCase.saveContext) {
+              for (const [ctxKey, pathExpr] of Object.entries(testCase.saveContext)) {
+                const value = getByPath(payload, pathExpr);
+                if (value !== undefined && value !== null && String(value) !== "") {
+                  context[ctxKey] = value;
+                }
               }
             }
-          }
 
-          finalResult = {
-            id: testCase.id,
-            tool: testCase.tool,
-            description: testCase.description,
-            status: passed ? "PASS" : "FAIL",
-            elapsedMs: out.elapsedMs,
-            records,
-            summary: String(payload.summary ?? ""),
-            ...(passed
-              ? {}
-              : {
-                  error: "record_count",
-                  message: `Expected >= ${minRecords} records, got ${records}`,
-                }),
-          };
+            finalResult = {
+              id: testCase.id,
+              tool: testCase.tool,
+              description: testCase.description,
+              status: passed ? "PASS" : "FAIL",
+              elapsedMs: out.elapsedMs,
+              records,
+              summary: String(payload.summary ?? ""),
+              ...(passed
+                ? {}
+                : {
+                    error: "record_count",
+                    message: `Expected >= ${minRecords} records, got ${records}`,
+                  }),
+            };
+          }
+        }
+
+        if (finalResult.status === "PASS") {
+          break;
+        }
+
+        if (attempt < maxAttempts) {
+          await new Promise((resolve) => setTimeout(resolve, 750));
         }
       }
 
-      if (finalResult.status === "PASS") {
-        break;
-      }
-
-      if (attempt < maxAttempts) {
-        await new Promise((resolve) => setTimeout(resolve, 750));
-      }
+      results.push(finalResult as CaseResult);
     }
-
-    results.push(finalResult as CaseResult);
+  } finally {
+    await toolClient.close();
   }
 
   const pass = results.filter((r) => r.status === "PASS").length;

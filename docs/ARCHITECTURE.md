@@ -23,7 +23,7 @@ Technical overview of how NL-GOV-MCP is structured internally.
                                    │
                      ┌─────────────┴─────────────┐
                      │   tools.ts                 │
-                     │   52 tool handlers         │
+                     │   67 tool handlers         │
                      │   Zod schemas + logic      │
                      └───┬────────┬────────┬─────┘
                          │        │        │
@@ -31,7 +31,7 @@ Technical overview of how NL-GOV-MCP is structured internally.
               ▼                   ▼                    ▼
      ┌────────────────┐  ┌────────────────┐  ┌────────────────┐
      │  sources/*.ts   │  │  utils/*.ts     │  │  types.ts      │
-     │  24 connectors  │  │  shared infra   │  │  contracts     │
+     │  39 connectors  │  │  shared infra   │  │  contracts     │
      └───────┬────────┘  └────────────────┘  └────────────────┘
              │
              ▼
@@ -80,11 +80,11 @@ A single tool call flows through these steps:
 |------|------|
 | `src/index.ts` | Entry point. Reads `--sse` / `--streamable-http` flags or `MCP_TRANSPORT` env, starts the matching transport. |
 | `src/server.ts` | Creates `McpServer`, calls `registerTools()`, sets up Express routes for HTTP transports, adds `/health` and `/health/sources` endpoints. |
-| `src/tools.ts` | All 52 tool registrations. Each tool has a Zod input schema and an async handler that calls a source, transforms results, and returns via `toMcpToolPayload()`. |
+| `src/tools.ts` | All 67 tool registrations. Each tool has a Zod input schema and an async handler that calls a source, transforms results, and returns via `toMcpToolPayload()`. |
 | `src/types.ts` | Shared TypeScript interfaces: `MCPRecord`, `Provenance`, `MCPToolResponse`, `MCPErrorResponse`, `AppConfig`. |
 | `src/config.ts` | Loads `config/default.json`, merges env var overrides. |
 
-### Sources (24 connectors)
+### Sources (39 connectors)
 
 Each source is a class with one or more async methods. All methods return a normalized shape:
 
@@ -122,6 +122,24 @@ The tool handler in `tools.ts` maps `items` to `MCPRecord[]` and wraps provenanc
 | `sparql-linked-data.ts` | SPARQL (read-only) | `bag_linked_data` / `rce_linked_data` |
 | `eurostat.ts` | REST | `eurostat` |
 | `data-europa.ts` | Custom Search API | `data_europa` |
+| `ruimtelijke-plannen.ts` | PDOK WMS GetFeatureInfo | `ruimtelijke_plannen` |
+| `dso-omgevingsdocumenten.ts` | REST HAL (key required) | `dso_omgevingsdocumenten` |
+| `bagDetail.ts` | Kadaster REST (key required) | `pdok_bag` (bag_address_detail) |
+| `data-politie.ts` | OData v3 (dataderden) | `data_politie` |
+| `cbs-iv3.ts` | OData v3 (dataderden) | `cbs_iv3` |
+| `wetten-bwb.ts` | SRU/XML (KOOP) | `wetten_bwb` |
+| `cvdr.ts` | SRU/XML (KOOP) | `cvdr` |
+| `bestuurlijke-gebieden.ts` | OGC API Features | `bestuurlijke_gebieden` |
+| `brk-kadastrale-kaart.ts` | OGC API Features | `brk_kadastrale_kaart` |
+| `bron-ongevallen.ts` | OGC WFS (GeoJSON) | `bron_ongevallen` |
+| `nza-zorgbeeld.ts` | REST | `nza_zorgbeeld` |
+| `overheidsorganisaties.ts` | REST (ROO) | `overheidsorganisaties` |
+| `ovapi.ts` | REST | `ovapi` |
+| `bro-ondergrond.ts` | REST (XML/JSON) | `bro` |
+| `ned.ts` | REST (key required) | `ned` |
+| `ep-online.ts` | REST (key required) | `ep_online` |
+| `ns-reisinformatie.ts` | REST (key required) | `ns` |
+| `dnb-statistics.ts` | REST (key required) | `dnb` |
 | `ruimtelijke-plannen.ts` | PDOK WMS GetFeatureInfo + Locatieserver | `ruimtelijke_plannen` |
 | `dso-omgevingsdocumenten.ts` | DSO Presenteren API v8 (REST/HAL+JSON, key required) | `dso_omgevingsdocumenten` |
 
@@ -217,7 +235,7 @@ The HTTP client, caching, circuit breaker, retry, and concurrency limiting are a
 
 ## Transport modes
 
-All three transports expose the same 52 tools and are created by `server.ts`:
+All three transports expose the same 67 tools and are created by `server.ts`:
 
 | Mode | Protocol | Session model | Use case |
 |------|----------|---------------|----------|

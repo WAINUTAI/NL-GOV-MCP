@@ -59,6 +59,17 @@ function stripComments(query: string): string {
     .trim();
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Word-boundary regexes voor elk geblokkeerd keyword. \b matcht ook grenzen naar
+// niet-woordtekens zoals '{', '<' en '"', zodat obfuscaties als "{SERVICE<...>}"
+// of '"delete"' alsnog worden herkend (de space-padding-check miste die).
+const BLOCKED_KEYWORD_PATTERNS = BLOCKED_KEYWORDS.map(
+  (word) => ({ word, regex: new RegExp(`\\b${escapeRegExp(word)}\\b`, "i") }),
+);
+
 function validateSelectOnly(query: string): { ok: boolean; reason?: string } {
   const normalized = stripComments(query).replace(/\s+/g, " ").trim();
   const noPrefix = normalized.replace(/^(prefix\s+[^>]+>\s*)+/i, "").trim();
@@ -67,9 +78,8 @@ function validateSelectOnly(query: string): { ok: boolean; reason?: string } {
     return { ok: false, reason: "Alleen SELECT queries zijn toegestaan." };
   }
 
-  const lowered = ` ${noPrefix.toLowerCase()} `;
-  for (const word of BLOCKED_KEYWORDS) {
-    if (lowered.includes(` ${word} `)) {
+  for (const { word, regex } of BLOCKED_KEYWORD_PATTERNS) {
+    if (regex.test(noPrefix)) {
       return { ok: false, reason: `SPARQL keyword niet toegestaan: ${word.toUpperCase()}` };
     }
   }

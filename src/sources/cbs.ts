@@ -117,7 +117,6 @@ export class CbsSource {
         Summary: row.notes,
         Modified: row.metadata_modified,
         Source: "data.overheid.nl (CBS fallback)",
-        Raw: row,
       } as Record<string, unknown>;
     });
 
@@ -260,8 +259,11 @@ export class CbsSource {
     const enrichResults = await Promise.allSettled(
       enrichTargets.map(async (target) => {
         const enrichEndpoint = `${base}/${tableId}/${target}`;
+        // Beperk de dimensie-preview: 4 lijsten van elk max 30 items houdt de
+        // token-payload richting het LLM behapbaar. Volledige lijsten zijn
+        // opvraagbaar via getDimensionValues.
         const { data } = await getJson<Record<string, unknown>>(enrichEndpoint, {
-          query: { $top: 200 },
+          query: { $top: 30 },
         });
         return { target, items: asItems(data) };
       }),

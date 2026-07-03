@@ -26,13 +26,18 @@ npm test        # unit tests
 
 ## Optional API keys
 
-Most tools work without any keys. Two sources require a free API key:
+Most tools work without any keys. The following sources require a free API key:
 
 | Variable | Where to get it |
 |----------|----------------|
 | `KNMI_API_KEY` | [KNMI Developer Portal](https://developer.dataplatform.knmi.nl/open-data-api#token) |
 | `OVERHEID_API_KEY` | [Overheid API Register](https://apis.developer.overheid.nl/apis/key-aanvragen) |
 | `BAG_API_KEY` | [Kadaster BAG API](https://www.kadaster.nl/zakelijk/producten/adressen-en-gebouwen/bag-api-individuele-bevragingen) |
+| `DSO_API_KEY` | [DSO Omgevingsdocumenten Presenteren API](https://developer.omgevingswet.overheid.nl/formulieren/api-key-aanvragen-0/) |
+| `NED_API_KEY` | [Nationaal Energie Dashboard](https://ned.nl/nl/api) |
+| `EP_ONLINE_API_KEY` | [RVO EP-Online](https://www.ep-online.nl/) |
+| `NS_API_KEY` | [NS API Portal](https://apiportal.ns.nl/) |
+| `DNB_API_KEY` | [DNB Developer Portal](https://api.portal.dnb.nl) |
 
 Copy `.env.example` to `.env` and fill in the keys you have:
 

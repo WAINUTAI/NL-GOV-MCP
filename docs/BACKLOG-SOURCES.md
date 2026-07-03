@@ -105,3 +105,34 @@ Captured from operator guidance on 2026-03-02.
 - [x] Add guarded SPARQL tools for BAG + RCE linked data
 - [x] Add EU bonus helpers (`eurostat_*`, `data_europa_datasets_search`)
 - [x] Add `ruimtelijke_plannen_search` (Wro/Bro plannen via PDOK WMS) met status- en gemeentefilter
+
+## Delivered in v0.2 (juli 2026)
+
+Vijftien nieuwe connectors toegevoegd (52 → 67 tools, 24 → 39 connectors), na een geverifieerd bronnenonderzoek (bestaan + gratis toegang + geen overlap, elk los adversarieel gecheckt):
+
+**Keyless (11):**
+- `data_politie_search` — misdaad-/overlastcijfers per gemeente/wijk/buurt (CBS dataderden OData v3)
+- `cbs_iv3_search` — gemeente-/provinciefinanciën, Iv3 (CBS dataderden OData v3)
+- `wetten_bwb_search` — geconsolideerde nationale wetgeving, BWB (KOOP SRU)
+- `cvdr_search` — lokale/decentrale regelgeving, CVDR (KOOP SRU)
+- `bestuurlijke_gebieden_search` — gemeente-/provinciegrenzen + codes (PDOK OGC API Features)
+- `brk_kadastrale_kaart_search` — kadastrale percelen/grenzen (PDOK OGC API Features)
+- `bron_ongevallen_search` — geregistreerde verkeersongevallen (Rijkswaterstaat WFS)
+- `nza_zorgbeeld_search` — actuele wachttijden medisch-specialistische zorg (NZa, keyless read)
+- `overheidsorganisaties_search` — Register van Overheidsorganisaties + TOOI-URI's (KOOP)
+- `ovapi_departures` — realtime OV-vertrektijden per halte + GTFS (OVapi/NDOV)
+- `bro_ondergrond_search` — grondwater/sonderingen/boringen (BRO publieke REST)
+
+**Gratis API-key (4):**
+- `ned_energie_search` — Nationaal Energie Dashboard (`NED_API_KEY`)
+- `ep_online_energielabel` — RVO energielabels per adres (`EP_ONLINE_API_KEY`)
+- `ns_reisinformatie` — NS reisadviezen/vertrektijden/verstoringen (`NS_API_KEY`)
+- `dnb_statistics_search` — DNB Statistics (`DNB_API_KEY`, gratis 'Public'-product)
+
+Alle 11 keyless connectors zijn live geverifieerd tegen de echte endpoints; de OData-connectors gebruiken `trim()`-filtering i.v.m. de vaste-breedte spatie-padding op CBS-dimensiekeys.
+
+### Bewust uitgesloten
+- **KVK Handelsregister-API** — betaald abonnement (niet passend voor een open project). De gratis KVK Open Datasets (HVDS, keyless) bevragen alleen op KVK-nummer, geen naam; overgeslagen in v0.2.
+- **Waarstaatjegemeente OData** — toegang beperkt tot gemeentelijke medewerkers, niet publiek.
+- **WOZ-waardeloket** — werkt maar zit achter een anti-bot/WAF met ongedocumenteerde sessie-flow; te fragiel voor een breed-gedraaide open server.
+- **Eerste Kamer / CPB / Rijksvastgoedbedrijf** — geen machine-leesbare query-API (alleen bestandsdownloads).

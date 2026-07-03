@@ -54,7 +54,6 @@ export class DataEuropaSource {
         metadata_modified: String(x.modified ?? x.issued ?? ""),
         source: "data-europa",
         url: `https://data.europa.eu/data/datasets/${id}`,
-        raw: x,
       };
     });
 

@@ -24,7 +24,7 @@ Examples:
 
 `NL-GOV-MCP` actively retrieves and normalizes data across many sources, can combine cross-source results, and returns a consistent MCP response contract ready for assistants and automations.
 
-## Sources (24 connectors, 52 tools)
+## Sources (39 connectors, 67 tools)
 
 | Source | What it covers |
 |---|---|
@@ -52,6 +52,21 @@ Examples:
 | Eurostat | EU statistics search + preview |
 | data.europa.eu | EU open data catalog |
 | DSO Omgevingsdocumenten | Discovery van omgevingsplannen, omgevingsvisies, programma's en omgevingsverordeningen onder de Omgevingswet (read-only metadata, vereist `DSO_API_KEY`) |
+| data.politie.nl | Registered crime & nuisance figures per municipality/district/neighbourhood (CBS dataderden OData) |
+| CBS Iv3 | Municipal & provincial finances — budgets, annual accounts, task fields (dataderden OData) |
+| PDOK Bestuurlijke Gebieden | Official municipality/province boundaries and codes (OGC API Features) |
+| PDOK Kadastrale Kaart (BRK) | Cadastral parcels, boundaries and designations (OGC API Features) |
+| wetten.overheid.nl (BWB) | Consolidated texts of all national laws, decrees and regulations (KOOP SRU) |
+| CVDR | Local & regional regulations of municipalities, provinces and water authorities (KOOP SRU) |
+| NED | National Energy Dashboard — generation/consumption per source + forecasts (requires `NED_API_KEY`) |
+| EP-Online | Building energy labels per address / BAG id (RVO, requires `EP_ONLINE_API_KEY`) |
+| BRO | Basisregistratie Ondergrond — groundwater, CPT soundings, borings (keyless REST) |
+| NS Reisinformatie | Train travel advice, departures/arrivals and disruptions (requires `NS_API_KEY`) |
+| OVapi / NDOV | Realtime public-transport departures per stop + GTFS |
+| BRON verkeersongevallen | Registered road-traffic accidents with location & severity (Rijkswaterstaat WFS) |
+| DNB Statistics | Interest rates, mortgages, pensions, insurers, balance of payments (requires `DNB_API_KEY`) |
+| NZa Zorgbeeld | Current waiting times for medical-specialist care per institution |
+| Register Overheidsorganisaties | All Dutch government organisations + TOOI identifiers (KOOP) |
 
 ## Key features
 
@@ -139,7 +154,7 @@ npm run test:live    # integration test suite (live API calls)
 
 ### Transport modes
 
-Three transport modes are supported. All expose the same 52 tools.
+Three transport modes are supported. All expose the same 67 tools.
 
 #### stdio (Claude Desktop, Claude Code)
 
@@ -195,6 +210,8 @@ docker build -f docker/Dockerfile -t nl-gov-mcp .
 docker run --rm -p 3333:3333 \
   -e KNMI_API_KEY=your-key \
   -e OVERHEID_API_KEY=your-key \
+  -e BAG_API_KEY=your-key \
+  -e DSO_API_KEY=your-key \
   nl-gov-mcp
 ```
 
@@ -214,6 +231,8 @@ Build the project, then add an entry to your Claude Desktop config.
       "env": {
         "OVERHEID_API_KEY": "...",
         "KNMI_API_KEY": "...",
+        "BAG_API_KEY": "...",
+        "DSO_API_KEY": "...",
         "NL_GOV_TIMEZONE": "Europe/Amsterdam"
       }
     }
@@ -233,6 +252,10 @@ Restart Claude Desktop after saving.
 | `OVERHEID_API_KEY` | — | Required for API register tool ([request a key](https://apis.developer.overheid.nl/apis/key-aanvragen)) |
 | `BAG_API_KEY` | — | Required for authoritative per-address detail via `bag_address_detail` (Kadaster Individuele Bevragingen REST). Without it the tool returns Locatieserver-only (`data_kwaliteit: "lookup_only"`). ([request access](https://www.kadaster.nl/zakelijk/producten/adressen-en-gebouwen/bag-api-individuele-bevragingen)) |
 | `DSO_API_KEY` | — | Required for `dso_omgevingsdocumenten_search` (DSO Omgevingsdocumenten Presenteren API v8). Without it the tool returns `not_configured`. ([request access](https://developer.omgevingswet.overheid.nl/formulieren/api-key-aanvragen-0/)) |
+| `NED_API_KEY` | — | Required for `ned_energie_search` (Nationaal Energie Dashboard). Without it the tool returns `not_configured`. ([request a free key](https://ned.nl/nl/api)) |
+| `EP_ONLINE_API_KEY` | — | Required for `ep_online_energielabel` (RVO EP-Online energielabels). Without it the tool returns `not_configured`. ([request access](https://www.ep-online.nl/)) |
+| `NS_API_KEY` | — | Required for `ns_reisinformatie` (NS Reisinformatie API). Without it the tool returns `not_configured`. ([request a free key](https://apiportal.ns.nl/)) |
+| `DNB_API_KEY` | — | Required for `dnb_statistics_search` (DNB Statistics API, free "Public" product). Without it the tool returns `not_configured`. ([request a free key](https://api.portal.dnb.nl)) |
 | `MCP_TRANSPORT` | `stdio` | Transport mode: `stdio`, `sse`, or `streamable-http` (alternative to CLI flags) |
 | `LOG_LEVEL` | `info` | Pino log level (`debug`, `info`, `warn`, `error`, `silent`) |
 
