@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../src/config.js";
 import { RuimtelijkePlannenSource } from "../src/sources/ruimtelijke-plannen.js";
+import { clearHttpCache } from "../src/utils/connector-runtime.js";
 
 const config = loadConfig();
 
@@ -49,6 +50,54 @@ describe("RuimtelijkePlannenSource", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    clearHttpCache();
+  });
+
+  it("maps WMS features to items for a gemeente-only search (Groningen)", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.includes("locatieserver")) {
+        return locatieserverResponse("POINT(233000 582000)");
+      }
+      return fcResponse([
+        makeFeature({ identificatie: "GRON1", naam: "Groningen Plan", naamoverheid: "gemeente Groningen" }),
+      ]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const src = new RuimtelijkePlannenSource(config);
+    const out = await src.search({ gemeente: "Groningen", status: "all", rows: 3 });
+
+    const wmsCalls = fetchMock.mock.calls.filter((c) =>
+      String((c as unknown as Array<unknown>)[0]).includes("ruimtelijke-plannen/wms"),
+    );
+    expect(wmsCalls.length).toBeGreaterThan(0);
+    expect(out.items.length).toBeGreaterThan(0);
+    expect(out.items[0].title).toBe("Groningen Plan");
+    expect(out.items[0].gemeente).toBe("gemeente Groningen");
+  });
+
+  it("survives a getJson failure on one sample (per-sample try/catch)", async () => {
+    let call = 0;
+    const fetchMock = vi.fn(async () => {
+      call += 1;
+      if (call === 1) {
+        // Valid HTTP 200 but a non-JSON body: getJson throws malformed_response
+        // (not retried), exercising callGfi's per-sample try/catch.
+        return new Response("<<not json>>", {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return fcResponse([makeFeature({ identificatie: "OK1", naam: "Survivor" })]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const src = new RuimtelijkePlannenSource(config);
+    const out = await src.search({ bbox: "180000,485000,181000,486000", status: "all", rows: 5 });
+
+    // One sample failed, but the remaining grid points still returned their plan.
+    expect(out.items.length).toBeGreaterThan(0);
+    expect(out.items[0].title).toBe("Survivor");
   });
 
   it("normalizes WMS GetFeatureInfo features into discovery records", async () => {

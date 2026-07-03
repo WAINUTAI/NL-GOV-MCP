@@ -102,26 +102,6 @@
     "liveProfile": true
   },
   {
-    "id": "rijk_document",
-    "description": "Rijksoverheid document get",
-    "tool": "rijksoverheid_document",
-    "args": { "id": "{{rijkDocId|876c7ae6-21fe-4b02-91fa-73deb5089a8b}}" },
-    "minRecords": 1,
-    "liveProfile": true
-  },
-  {
-    "id": "rijk_topics",
-    "description": "Rijksoverheid topics",
-    "tool": "rijksoverheid_topics",
-    "minRecords": 1
-  },
-  {
-    "id": "rijk_ministries",
-    "description": "Rijksoverheid ministries",
-    "tool": "rijksoverheid_ministries",
-    "minRecords": 1
-  },
-  {
     "id": "rijk_schoolholidays",
     "description": "Rijksoverheid school holidays",
     "tool": "rijksoverheid_schoolholidays",
@@ -368,5 +348,173 @@
     "tool": "nl_gov_ask",
     "args": { "question": "Wat is het gemiddelde opleidingsniveau in de gemeente Papendrecht", "top": 3 },
     "minRecords": 1
+  },
+  {
+    "id": "data_overheid_themes",
+    "description": "data.overheid themes",
+    "tool": "data_overheid_themes",
+    "args": {},
+    "minRecords": 1
+  },
+  {
+    "id": "tweede_kamer_search",
+    "description": "Tweede Kamer combined search",
+    "tool": "tweede_kamer_search",
+    "args": { "query": "klimaat", "top": 3 },
+    "minRecords": 1
+  },
+  {
+    "id": "knmi_search_datasets",
+    "description": "KNMI dataset search",
+    "tool": "knmi_search_datasets",
+    "args": { "query": "observations" },
+    "minRecords": 1,
+    "requireEnv": ["KNMI_API_KEY"]
+  },
+  {
+    "id": "knmi_latest_files",
+    "description": "KNMI latest dataset files",
+    "tool": "knmi_latest_files",
+    "args": { "datasetName": "Actuele10mindataKNMIstations", "top": 2 },
+    "minRecords": 1,
+    "requireEnv": ["KNMI_API_KEY"]
+  },
+  {
+    "id": "rws_measurements",
+    "description": "Rijkswaterstaat waterdata measurements",
+    "tool": "rijkswaterstaat_waterdata_measurements",
+    "args": { "query": "waterstand hoek van holland", "rows": 3 },
+    "minRecords": 1
+  },
+  {
+    "id": "data_politie_search",
+    "description": "Politie open data search",
+    "tool": "data_politie_search",
+    "args": { "regio": "Amsterdam", "top": 3 },
+    "minRecords": 1
+  },
+  {
+    "id": "cbs_iv3_search",
+    "description": "CBS Iv3 municipal finances search",
+    "tool": "cbs_iv3_search",
+    "args": { "gemeente": "Amsterdam", "top": 3 },
+    "minRecords": 1
+  },
+  {
+    "id": "wetten_bwb_search",
+    "description": "Wetten.nl BWB search",
+    "tool": "wetten_bwb_search",
+    "args": { "query": "omgevingswet", "top": 3 },
+    "minRecords": 1
+  },
+  {
+    "id": "cvdr_search",
+    "description": "CVDR decentrale regelgeving search",
+    "tool": "cvdr_search",
+    "args": { "query": "parkeren", "top": 3 },
+    "minRecords": 1
+  },
+  {
+    "id": "bestuurlijke_gebieden_search",
+    "description": "Bestuurlijke gebieden search",
+    "tool": "bestuurlijke_gebieden_search",
+    "args": { "naam": "Utrecht", "niveau": "gemeente", "top": 3 },
+    "minRecords": 1
+  },
+  {
+    "id": "brk_kadastrale_kaart_search",
+    "description": "BRK kadastrale kaart search",
+    "tool": "brk_kadastrale_kaart_search",
+    "args": { "bbox": "121300,487400,121600,487700", "top": 3 },
+    "minRecords": 1
+  },
+  {
+    "id": "bron_ongevallen_search",
+    "description": "BRON verkeersongevallen search",
+    "tool": "bron_ongevallen_search",
+    "args": { "gemeente": "Amsterdam", "jaar": "2023", "top": 3 },
+    "minRecords": 1
+  },
+  {
+    "id": "nza_zorgbeeld_search",
+    "description": "NZa zorgbeeld search",
+    "tool": "nza_zorgbeeld_search",
+    "args": { "top": 3 },
+    "minRecords": 1
+  },
+  {
+    "id": "overheidsorganisaties_search",
+    "description": "Overheidsorganisaties search",
+    "tool": "overheidsorganisaties_search",
+    "args": { "query": "Utrecht", "top": 3 },
+    "minRecords": 1
+  },
+  {
+    "id": "bro_ondergrond_search",
+    "description": "BRO ondergrond search",
+    "tool": "bro_ondergrond_search",
+    "args": { "query": "GMW000000036287", "top": 2 },
+    "minRecords": 1
+  },
+  {
+    "id": "bag_address_detail",
+    "description": "BAG address detail",
+    "tool": "bag_address_detail",
+    "args": { "query": "Damrak 1 Amsterdam" },
+    "minRecords": 1
+  },
+  {
+    "id": "ruimtelijke_plannen_search",
+    "description": "Ruimtelijke plannen search",
+    "tool": "ruimtelijke_plannen_search",
+    "args": { "gemeente": "Groningen", "rows": 3 },
+    "minRecords": 1
+  },
+  {
+    "id": "ovapi_departures",
+    "description": "OVapi realtime departures",
+    "tool": "ovapi_departures",
+    "args": { "timingPointCode": "32002646", "top": 3 },
+    "minRecords": 0
+  },
+  {
+    "id": "dso_omgevingsdocumenten_search",
+    "description": "DSO omgevingsdocumenten search",
+    "tool": "dso_omgevingsdocumenten_search",
+    "args": { "query": "parkeren", "rows": 3 },
+    "minRecords": 0,
+    "requireEnv": ["DSO_API_KEY"]
+  },
+  {
+    "id": "ned_energie_search",
+    "description": "NED energie search",
+    "tool": "ned_energie_search",
+    "args": {},
+    "minRecords": 0,
+    "requireEnv": ["NED_API_KEY"]
+  },
+  {
+    "id": "ep_online_energielabel",
+    "description": "EP-Online energielabel lookup",
+    "tool": "ep_online_energielabel",
+    "args": { "postcode": "1012JS", "huisnummer": 1 },
+    "minRecords": 0,
+    "requireEnv": ["EP_ONLINE_API_KEY"]
+  },
+  {
+    "id": "ns_reisinformatie",
+    "description": "NS reisinformatie disruptions",
+    "tool": "ns_reisinformatie",
+    "args": { "operation": "disruptions" },
+    "minRecords": 0,
+    "requireEnv": ["NS_API_KEY"]
+  },
+  {
+    "id": "dnb_statistics_search",
+    "description": "DNB statistics search",
+    "tool": "dnb_statistics_search",
+    "args": { "dataset": "T1.3" },
+    "minRecords": 0,
+    "requireEnv": ["DNB_API_KEY"]
   }
 ]

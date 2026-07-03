@@ -4,6 +4,9 @@ import { getJson } from "../utils/http.js";
 const OWS_ENDPOINT =
   "https://geo.rijkswaterstaat.nl/services/ogc/gdr/verkeersongevallen_nederland/ows";
 const CONNECTOR = "bron_ongevallen";
+// Keyless PDOK Locatieserver — resolves a gemeente name to an RD centroid so a
+// gemeente-only query can be scoped to a bbox (mirrors ruimtelijke-plannen.ts).
+const LOCATIESERVER_FREE = "https://api.pdok.nl/bzk/locatieserver/search/v3_1/free";
 
 // Beschikbare feature types (WFS 2.0.0) — jaartabellen + gecombineerd + wegvakgeografie.
 const FEATURE_TYPES: Record<string, string> = {
@@ -86,6 +89,32 @@ function validateBbox(bbox: string): { ok: true } | { ok: false; reason: string 
   return { ok: true };
 }
 
+function parseRdPoint(centroideRd?: string): [number, number] | undefined {
+  if (!centroideRd) return undefined;
+  const m = centroideRd.match(/POINT\s*\(\s*([\d.+-]+)\s+([\d.+-]+)\s*\)/i);
+  if (!m) return undefined;
+  return [Number(m[1]), Number(m[2])];
+}
+
+// Resolve a gemeente name to a bbox via the PDOK Locatieserver. A municipality can
+// be large, so use a 12 km half-width (ruimtelijke-plannen uses 5 km for a tighter
+// plan search; accidents need the whole gemeente). validateBbox runs downstream, so
+// return the raw bbox and let existing validation clamp/reject if needed.
+async function resolveGemeenteBbox(gemeente: string): Promise<string | undefined> {
+  const { data } = await getJson<{ response?: { docs?: Array<{ centroide_rd?: string }> } }>(
+    LOCATIESERVER_FREE,
+    {
+      query: { q: `gemeente ${gemeente}`, rows: "1", fq: "type:gemeente", fl: "centroide_rd,weergavenaam" },
+      connector: CONNECTOR,
+    },
+  );
+  const center = parseRdPoint(data.response?.docs?.[0]?.centroide_rd);
+  if (!center) return undefined;
+  const [x, y] = center;
+  const halfWidth = 12000;
+  return `${x - halfWidth},${y - halfWidth},${x + halfWidth},${y + halfWidth}`;
+}
+
 function toRdPoint(coordinates: unknown): [number, number] | null {
   if (!Array.isArray(coordinates) || coordinates.length < 2) return null;
   const x = Number(coordinates[0]);
@@ -131,7 +160,14 @@ export class BronOngevallenSource {
   }> {
     const typeName = FEATURE_TYPES[args.jaar] ?? FEATURE_TYPES["2024"];
 
-    if (!args.bbox) {
+    let bbox = args.bbox;
+    let resolvedFromGemeente = false;
+    if (!bbox && args.gemeente) {
+      bbox = await resolveGemeenteBbox(args.gemeente);
+      resolvedFromGemeente = !!bbox;
+    }
+
+    if (!bbox) {
       return {
         items: [],
         total: 0,
@@ -142,13 +178,13 @@ export class BronOngevallenSource {
       };
     }
 
-    const v = validateBbox(args.bbox);
+    const v = validateBbox(bbox);
     if (!v.ok) {
       return {
         items: [],
         total: 0,
         endpoint: OWS_ENDPOINT,
-        params: { typeNames: typeName, bbox: args.bbox },
+        params: { typeNames: typeName, bbox },
         access_note: `Ongeldige bbox: ${v.reason}.`,
       };
     }
@@ -163,7 +199,7 @@ export class BronOngevallenSource {
       outputFormat: "application/json",
       srsName: "EPSG:28992",
       count: String(fetchCount),
-      bbox: `${args.bbox},EPSG:28992`,
+      bbox: `${bbox},EPSG:28992`,
     };
 
     const { data, meta } = await getJson<FeatureCollection>(OWS_ENDPOINT, {
@@ -227,9 +263,13 @@ export class BronOngevallenSource {
     const matched = Number(data.numberMatched ?? data.totalFeatures);
     const total = Number.isFinite(matched) ? matched : filtered.length;
 
-    const access_note = items.length
+    const noResultsNote = items.length
       ? undefined
       : "Rijkswaterstaat WFS bereikbaar, maar geen ongevallen gevonden voor deze bbox/filters. Probeer een ruimer gebied, een ander jaar of afloop=all.";
+    const gemeenteNote = resolvedFromGemeente
+      ? `Gemeente '${args.gemeente}' omgezet naar bbox via PDOK Locatieserver (±12 km).`
+      : undefined;
+    const access_note = [gemeenteNote, noResultsNote].filter(Boolean).join(" ") || undefined;
 
     return {
       items,

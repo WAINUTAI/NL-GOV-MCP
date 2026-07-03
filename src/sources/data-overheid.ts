@@ -40,6 +40,32 @@ interface CkanListResponse {
   result: string[] | Array<{ name?: string; title?: string }>;
 }
 
+/** One entry of the Overheid.nl beleidsagenda taxonomy waardelijst. */
+interface TaxonomyEntry {
+  labels?: { "nl-NL"?: string; "en-US"?: string };
+  parent?: string;
+}
+
+/** A theme surfaced by `themes()`; keeps `title`/`name` for the tool layer. */
+interface ThemeItem {
+  title: string;
+  name: string;
+  name_en: string;
+  uri: string;
+  parent: string;
+  level: "main" | "sub";
+  // Index signature so the tool layer can treat an item as Record<string, unknown>.
+  [key: string]: unknown;
+}
+
+/**
+ * Canonical, keyless source of data.overheid.nl themes. The CKAN `group_list`
+ * and `theme` facet are both empty, so we read the Overheid.nl taxonomy
+ * beleidsagenda waardelijst instead (a static vocabulary).
+ */
+const TAXONOMY_WAARDELIJST_URL =
+  "https://waardelijsten.dcat-ap-donl.nl/overheid_taxonomiebeleidsagenda.json";
+
 export class DataOverheidSource {
   constructor(private readonly config: AppConfig) {}
 
@@ -118,20 +144,42 @@ export class DataOverheidSource {
     return result;
   }
 
-  async themes(): Promise<{ items: Array<{ name?: string; title?: string }>; endpoint: string }> {
-    const endpoint = `${this.config.endpoints.dataOverheid}/group_list`;
-    const cacheKey = "dataOverheid:themes";
-    const cached = appCache.get<{ items: Array<{ name?: string; title?: string }>; endpoint: string }>(cacheKey);
-    if (cached) return cached;
+  async themes(): Promise<{ items: ThemeItem[]; endpoint: string }> {
+    const { data, meta } = await getJson<Record<string, TaxonomyEntry>>(
+      TAXONOMY_WAARDELIJST_URL,
+      {
+        connector: "data_overheid",
+        // Static vocabulary — cache for a full day.
+        cacheTtlMs: 24 * 60 * 60 * 1000,
+      },
+    );
 
-    const { data, meta } = await getJson<CkanListResponse>(endpoint, {
-      query: { all_fields: true, limit: 5000 },
+    const entries = Object.entries(data ?? {});
+    const labelOf = (uri: string): string => data?.[uri]?.labels?.["nl-NL"] ?? "";
+    const uriLeaf = (uri: string): string => {
+      const parts = uri.split(/[/#]/).filter(Boolean);
+      return parts[parts.length - 1] ?? uri;
+    };
+
+    const items: ThemeItem[] = entries.map(([uri, entry]) => {
+      const nl = entry?.labels?.["nl-NL"];
+      const en = entry?.labels?.["en-US"];
+      return {
+        title: nl ?? uriLeaf(uri),
+        name: nl ?? "",
+        name_en: en ?? "",
+        uri,
+        parent: entry?.parent ? labelOf(entry.parent) : "",
+        level: entry?.parent ? "sub" : "main",
+      };
     });
 
-    const raw = data.result ?? [];
-    const items = raw.map((x) => (typeof x === "string" ? { name: x, title: x } : x));
-    const result = { items, endpoint: meta.url };
-    appCache.set(cacheKey, result, this.config.cacheTtlMs.dataOverheidDatasetList);
-    return result;
+    // Main themes first, then sub-themes; each group alphabetical (nl) by title.
+    items.sort((a, b) => {
+      if (a.level !== b.level) return a.level === "main" ? -1 : 1;
+      return a.title.localeCompare(b.title, "nl");
+    });
+
+    return { items, endpoint: meta.url };
   }
 }

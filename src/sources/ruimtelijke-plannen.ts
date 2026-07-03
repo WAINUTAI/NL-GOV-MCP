@@ -5,6 +5,11 @@ const WMS_ENDPOINT = "https://service.pdok.nl/kadaster/ruimtelijke-plannen/wms/v
 const LOCATIESERVER_FREE = "https://api.pdok.nl/bzk/locatieserver/search/v3_1/free";
 const VIEWER_BASE = "https://www.ruimtelijkeplannen.nl/viewer/view";
 const CONNECTOR = "ruimtelijke_plannen";
+// A PDOK WMS GetFeatureInfo sample returns the FULL plan geometry (province-scale
+// MultiPolygons), so a single response can be tens of MB — well past the global
+// 12 MB body cap in http.ts. The connector only reads f.properties (geometry is
+// discarded), so raise the per-call cap instead of rejecting the whole sample.
+const WMS_MAX_RESPONSE_BYTES = 48 * 1024 * 1024;
 
 export type PlanStatus = "vigerend" | "vervallen" | "ontwerp" | "vastgesteld" | "all";
 
@@ -186,12 +191,20 @@ export class RuimtelijkePlannenSource {
 
     type Sample = { params: Record<string, string>; url?: string; features: Array<{ properties?: FeatureProperties }> };
     const callGfi = async (sampleParams: Record<string, string>): Promise<Sample> => {
-      const { data, meta } = await getJson<WmsFeatureCollection>(WMS_ENDPOINT, {
-        query: sampleParams,
-        connector: CONNECTOR,
-        timeoutMs: 20_000,
-      });
-      return { params: sampleParams, url: meta.url, features: data.features ?? [] };
+      try {
+        const { data, meta } = await getJson<WmsFeatureCollection>(WMS_ENDPOINT, {
+          query: sampleParams,
+          connector: CONNECTOR,
+          timeoutMs: 20_000,
+          maxResponseBytes: WMS_MAX_RESPONSE_BYTES,
+        });
+        return { params: sampleParams, url: meta.url, features: data.features ?? [] };
+      } catch {
+        // A single oversized or failing GetFeatureInfo point must not reject the
+        // whole Promise.all. Treat it as an empty sample so the surviving points
+        // still contribute their plans.
+        return { params: sampleParams, url: WMS_ENDPOINT, features: [] };
+      }
     };
 
     let sampleResults: Sample[];

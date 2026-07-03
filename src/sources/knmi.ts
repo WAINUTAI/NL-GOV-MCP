@@ -43,6 +43,19 @@ const KNMI_KNOWN_DATASETS: Array<Record<string, unknown>> = [
   },
 ];
 
+/**
+ * Resolve the correct dataset version from the known-dataset catalog by a
+ * case-insensitive match on datasetName. Falls back to "1" when the dataset is
+ * not in the catalog (best-effort default for the KNMI Open Data API).
+ */
+function resolveDatasetVersion(datasetName: string): string {
+  const target = datasetName.toLowerCase();
+  const match = KNMI_KNOWN_DATASETS.find(
+    (entry) => String(entry.datasetName ?? "").toLowerCase() === target,
+  );
+  return match ? String(match.version ?? "1") : "1";
+}
+
 export class KnmiSource {
   constructor(private readonly config: AppConfig, private readonly apiKey: string) {}
 
@@ -75,8 +88,9 @@ export class KnmiSource {
     };
   }
 
-  async latestFiles(datasetName: string, datasetVersion: string, top: number) {
-    const endpoint = `${this.config.endpoints.knmi}/datasets/${datasetName}/versions/${datasetVersion}/files`;
+  async latestFiles(datasetName: string, datasetVersion: string | undefined, top: number) {
+    const version = datasetVersion || resolveDatasetVersion(datasetName);
+    const endpoint = `${this.config.endpoints.knmi}/datasets/${datasetName}/versions/${version}/files`;
     const params = { maxKeys: String(top) };
     const { data, meta } = await getJson<Record<string, unknown>>(endpoint, {
       query: params,

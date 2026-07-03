@@ -154,3 +154,15 @@ Rijkswaterstaat heeft de klassieke WaterWebservices (`waterwebservices.rijkswate
 - Coördinaten zijn nu `Lat`/`Lon` (ETRS89, EPSG:4258) i.p.v. RD-`X`/`Y`; kwaliteit/status zijn enkelvoudige velden (`Kwaliteitswaardecode`, `Statuswaarde`) i.p.v. de oude `...Lijst`-arrays.
 - Meetgrootheid-codes gecorrigeerd tegen de nieuwe catalogus: golfhoogte `GOLHTE` → `Hm0`, stroomsnelheid `STRMDg` → `STROOMSHD` (de oude codes bestaan niet meer en gaven stil 0 resultaten). `WATHTE`/`Q`/`T`/`WINDSHD`/`WINDRTG`/`ZICHT` ongewijzigd; `WATDTE` (waterdiepte) en `STROOMRTG` (stroomrichting) toegevoegd.
 - De catalogus (quasi-statisch, ~1,5 MB) krijgt een eigen cache-TTL van 1 uur i.p.v. de 2-minuten "live"-TTL.
+
+### Volledige live health-check + fixes (juli 2026)
+
+Alle 64 tools zijn live tegen hun echte endpoints aangeroepen en geclassificeerd (50 OK / 7 leeg / 3 error / 4 geen-key). De v0.2-connectors die de testsuite niet dekte bleken te werken; de gevonden afwijkingen zijn per stuk live gediagnosticeerd en gefixt:
+
+- **ruimtelijke_plannen_search** — gaf `malformed_response` doordat een PDOK WMS GetFeatureInfo-sample ~14,5 MB volledige plangeometrie teruggeeft en daarmee de globale 12 MB body-cap in `http.ts` overschreed. De connector gebruikt alleen `properties` (geometrie wordt weggegooid), dus de per-call cap is verhoogd (48 MB) en elke sample vangt nu zijn eigen fout op zodat één zware call de hele `Promise.all` niet meer sloopt.
+- **bron_ongevallen_search** — de geadverteerde `gemeente`-parameter werkte niet (alleen `bbox`). Er is nu gemeente→bbox-resolutie via de PDOK Locatieserver (±12 km), net als bij ruimtelijke_plannen, met behoud van de client-side gemeentefilter.
+- **knmi_latest_files** — de schema-default `datasetVersion="1"` gaf 404; de versie wordt nu automatisch uit de KNMI-datasetcatalogus geresolved (bv. `Actuele10mindataKNMIstations` → v2), met fallback `1`.
+- **data_overheid_themes** — gaf altijd 0 (de data.overheid.nl-CKAN heeft geen `groups`). Nu gevoed uit de canonieke, keyless Overheid.nl thema-taxonomie (`waardelijsten.dcat-ap-donl.nl/overheid_taxonomiebeleidsagenda.json`): 17 hoofd- + 93 subthema's, dagcache.
+- **duo_schools / duo_exam_results** — gaven vrijwel altijd 0 doordat de plaatsnaam met de zoekterm werd ge-AND (CKAN-titels bevatten geen gemeentenaam). Nu topic-first zoektermen; de gebruikersterm blijft als soft hint. Deze tools leveren dataset-catalogustreffers (landelijke DUO-datasets), niet per-school-records.
+
+De question-suite (`scripts/test-queries.json`) is opgeschoond (3 dode cases voor verwijderde rijksoverheid-tools weg) en uitgebreid met 23 cases zodat alle v0.2-bronnen + measurements gedekt zijn (69 cases; `requireEnv` op de key-tools). Niet-bugs die bewust ongemoeid bleven: DSO (werkt; discovery geeft vaak 0), bro_ondergrond (werkt met een BRO-id, by-design), en de 4 gratis-key-tools (ned/ep_online/ns/dnb — draaien zodra de key is gezet).

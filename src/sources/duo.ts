@@ -59,16 +59,29 @@ export class DuoSource {
     type?: string;
     top: number;
   }) {
-    const base = [args.name, args.municipality, args.type].filter(Boolean).join(" ").trim();
+    // Topic-only candidates that are PROVEN to match DUO CKAN dataset titles.
+    // DUO datasets are national; ANDing a municipality/name into the CKAN query
+    // zeroes the result, so we never do that.
     const candidates = [
-      `${base} schoolvestigingen`,
-      `${base} schoollocaties`,
-      `${base} onderwijsinstellingen`,
-      `${base} brin`,
-      `${base} vo mbo hbo`,
-      `${base} school`,
+      "schooladressen",
+      "vestigingen",
+      "adressen",
+      "instellingen",
+      "leerlingen",
+      "onderwijsinstellingen",
     ];
-    return this.searchCandidates(candidates, args.top);
+    // Soft, lowest-priority hint: a lucky title match still helps, but it runs
+    // AFTER the topic terms and never replaces them.
+    const hint = [args.name, args.municipality, args.type].filter(Boolean).join(" ").trim();
+    if (hint) candidates.push(hint);
+
+    const out = await this.searchCandidates(candidates, args.top);
+    return {
+      ...out,
+      params: { ...out.params, hint },
+      access_note:
+        "DUO dataset-catalogus resultaten (landelijke datasets). Filter/download de bijbehorende CSV voor een specifieke gemeente, plaats of school.",
+    };
   }
 
   async getExamResults(args: {
@@ -77,23 +90,32 @@ export class DuoSource {
     municipality?: string;
     top: number;
   }) {
-    const base = [
+    // Topic-only candidates (see getSchools) — no municipality/year ANDing.
+    const candidates = [
+      "examen",
+      "geslaagd",
+      "eindexamen",
+      "diploma",
+      "examenresultaten",
+      "slagingspercentage",
+    ];
+    const hint = [
       args.year ? String(args.year) : "",
       args.school ?? "",
       args.municipality ?? "",
     ]
+      .filter(Boolean)
       .join(" ")
       .trim();
+    if (hint) candidates.push(hint);
 
-    const candidates = [
-      `examens voortgezet onderwijs ${base}`,
-      `slagingspercentages ${base}`,
-      `examenresultaten vo ${base}`,
-      `centrale examens ${base}`,
-      `diplomaresultaten ${base}`,
-    ];
-
-    return this.searchCandidates(candidates, args.top);
+    const out = await this.searchCandidates(candidates, args.top);
+    return {
+      ...out,
+      params: { ...out.params, hint },
+      access_note:
+        "DUO dataset-catalogus resultaten (landelijke examendatasets). Filter/download de bijbehorende CSV voor een specifiek jaar, school of gemeente.",
+    };
   }
 
   async rioSearch(query: string, top: number) {

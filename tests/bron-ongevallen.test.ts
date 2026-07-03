@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../src/config.js";
 import { BronOngevallenSource } from "../src/sources/bron-ongevallen.js";
+import { clearHttpCache } from "../src/utils/connector-runtime.js";
 
 const config = loadConfig();
 
@@ -49,6 +50,41 @@ describe("BronOngevallenSource", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    clearHttpCache();
+  });
+
+  it("resolves a gemeente to a bbox via PDOK Locatieserver when no bbox is given", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.includes("locatieserver")) {
+        return new Response(
+          JSON.stringify({ response: { docs: [{ centroide_rd: "POINT(121000 487000)" }] } }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return fcResponse([
+        makeFeature({ gemeente: "Amsterdam", woonplaats: "Amsterdam", straatnaam: "Damrak" }),
+      ]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const src = new BronOngevallenSource(config);
+    const out = await src.search({ gemeente: "Amsterdam", jaar: "2024", afloop: "all", rows: 3 });
+
+    const urls = fetchMock.mock.calls.map((c) => String((c as unknown as Array<unknown>)[0]));
+    const locatieserverCall = urls.find((u) => u.includes("locatieserver"));
+    const wfsCall = urls.find((u) => u.includes("verkeersongevallen_nederland/ows"));
+
+    expect(locatieserverCall).toBeDefined();
+    expect(locatieserverCall).toContain("q=gemeente+Amsterdam");
+    expect(locatieserverCall).toContain("fq=type%3Agemeente");
+    expect(wfsCall).toBeDefined();
+    // bbox derived from centroid (121000,487000) with a 12 km half-width.
+    expect(wfsCall).toContain("bbox=109000%2C475000%2C133000%2C499000%2CEPSG%3A28992");
+    expect(wfsCall).toContain("typeNames=ongevallen_2024");
+
+    expect(out.items).toHaveLength(1);
+    expect(out.items[0].gemeente).toBe("Amsterdam");
+    expect(out.access_note).toContain("omgezet naar bbox");
   });
 
   it("normalizes WFS GeoJSON features and builds a GetFeature request", async () => {
