@@ -145,6 +145,18 @@ describe("NedSource", () => {
     expect(decoded).toContain("validfrom[before]=2024-06-02");
   });
 
+  it("adds a default validfrom window when the caller omits the date range (NED requires it)", async () => {
+    const fetchMock = mockFetchOnce(sampleHydra);
+    const src = new NedSource(config, "k");
+    await src.search({ type: "zon", rows: 5 });
+
+    const [url] = fetchMock.mock.calls[0] as unknown as [string];
+    const decoded = decodeURIComponent(url);
+    // Without an explicit range, both bounds must still be present (else NED 400s).
+    expect(decoded).toMatch(/validfrom\[after\]=\d{4}-\d{2}-\d{2}/);
+    expect(decoded).toMatch(/validfrom\[before\]=\d{4}-\d{2}-\d{2}/);
+  });
+
   it("respects the requested row cap when slicing members", async () => {
     mockFetchOnce(sampleHydra);
     const src = new NedSource(config, "k");

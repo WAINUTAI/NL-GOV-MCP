@@ -219,6 +219,16 @@ export class NedSource {
     const classification = resolveCode(args.classification, CLASSIFICATION_CODES, "2");
     const timezone = resolveCode(args.timezone, { utc: "0", cet: "1" }, "1");
 
+    // NED's /utilizations REQUIRES a validfrom date range — without it the API
+    // returns HTTP 400. Default to the last 7 days (up to tomorrow) when the
+    // caller omits the range, so a bare call still returns recent data.
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const toDate = (d: Date) =>
+      `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    const now = new Date();
+    const defaultAfter = toDate(new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000));
+    const defaultBefore = toDate(new Date(now.getTime() + 24 * 60 * 60 * 1000));
+
     const query: Record<string, string> = {
       point,
       type,
@@ -226,11 +236,11 @@ export class NedSource {
       granularitytimezone: timezone,
       activity,
       classification,
+      "validfrom[after]": args.validFrom ?? defaultAfter,
+      "validfrom[before]": args.validTo ?? defaultBefore,
       itemsPerPage: perPage,
       page: "1",
     };
-    if (args.validFrom) query["validfrom[after]"] = args.validFrom;
-    if (args.validTo) query["validfrom[before]"] = args.validTo;
 
     const url = `${NED_BASE}/utilizations`;
     const { data, meta } = await getJson<HydraResponse>(url, {
@@ -253,7 +263,7 @@ export class NedSource {
       endpoint: meta.url,
       params: query,
       access_note:
-        "Bron: NED.nl (Nationaal Energie Dashboard). Waarden: capaciteit in kW, volume in kWh, emissie in kg CO2. Vereist een persoonlijke API-sleutel (X-AUTH-TOKEN).",
+        `Bron: NED.nl (Nationaal Energie Dashboard). Waarden: capaciteit in kW, volume in kWh, emissie in kg CO2. Vereist een persoonlijke API-sleutel (X-AUTH-TOKEN). NED vereist een validfrom-datumbereik; zonder validFrom/validTo wordt standaard de periode ${query["validfrom[after]"]} t/m ${query["validfrom[before]"]} gebruikt.`,
     };
   }
 }
