@@ -382,6 +382,17 @@ export function setHttpCache<T>(
   enforceCacheCap();
 }
 
+/**
+ * Drop every cached HTTP response. Intended for test isolation: the response
+ * cache is a module-level singleton keyed by connector+method+url+body, so a
+ * test whose fetch mock returns one payload can otherwise be served a *previous*
+ * test's payload (and skip the mocked fetch entirely) when both issue the same
+ * request. Call this in beforeEach to guarantee each test starts from cold.
+ */
+export function clearHttpCache(): void {
+  responseCache.clear();
+}
+
 export function getConnectorHealth(connector: string): ConnectorHealthSnapshot {
   const state = getState(connector);
   const avg = state.measuredCalls

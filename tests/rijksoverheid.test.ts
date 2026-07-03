@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RijksoverheidSource } from "../src/sources/rijksoverheid.js";
+import { clearHttpCache } from "../src/utils/connector-runtime.js";
 import type { AppConfig } from "../src/types.js";
 
 const config: AppConfig = {
@@ -173,5 +174,128 @@ describe("RijksoverheidSource.search", () => {
 
     expect(out.items).toHaveLength(1);
     expect(out.items[0].id).toBe("doc-solo");
+  });
+});
+
+/** Stub fetch with a JSON (200, application/json) body the test controls. */
+function mockJsonOnce(body: unknown) {
+  const fetchMock = vi.fn(async () => {
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+// No-year shape: a JSON ARRAY of yearly documents (each has its own canonical).
+const NO_YEAR_TWO_DOCS = [
+  {
+    id: "doc-2024",
+    type: "schoolholidays",
+    canonical: "c1",
+    content: [
+      {
+        title: "Schoolvakanties 2024-2025",
+        schoolyear: "2024-2025",
+        vacations: [
+          {
+            type: "Zomervakantie",
+            compulsorydates: "19 juli 2025 t/m 31 augustus 2025",
+            regions: [
+              { region: "Noord", startdate: "2025-07-05", enddate: "2025-08-17" },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+  {
+    id: "doc-2025",
+    type: "schoolholidays",
+    canonical: "c2",
+    content: [
+      {
+        title: "Schoolvakanties 2025-2026",
+        schoolyear: "2025-2026",
+        vacations: [
+          {
+            type: "Zomervakantie",
+            compulsorydates: "18 juli 2026 t/m 30 augustus 2026",
+            regions: [
+              { region: "Zuid", startdate: "2026-07-11", enddate: "2026-08-23" },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+];
+
+// Single-year shape: ONE document object (not an array).
+const SINGLE_YEAR_DOC = {
+  id: "doc-2026",
+  type: "schoolholidays",
+  canonical: "c",
+  content: [
+    {
+      title: "Schoolvakanties 2026-2027",
+      schoolyear: "2026-2027",
+      vacations: [
+        {
+          type: "Herfstvakantie",
+          compulsorydates: "",
+          regions: [
+            { region: "Zuid", startdate: "2026-10-17", enddate: "2026-10-25" },
+          ],
+        },
+      ],
+    },
+  ],
+};
+
+describe("RijksoverheidSource.schoolholidays", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    clearHttpCache();
+  });
+
+  it("flattens the no-year JSON array across multiple school years", async () => {
+    mockJsonOnce(NO_YEAR_TWO_DOCS);
+    const src = new RijksoverheidSource(config);
+    const out = await src.schoolholidays({});
+
+    expect(out.items).toHaveLength(2);
+    const years = out.items.map((i) => i.schoolyear);
+    expect(years).toContain("2024-2025");
+    expect(years).toContain("2025-2026");
+    expect(out.items.every((i) => String(i.region ?? "").length > 0)).toBe(true);
+
+    const noord = out.items.find((i) => i.region === "Noord");
+    expect(noord?.canonical).toBe("c1");
+    const zuid = out.items.find((i) => i.region === "Zuid");
+    expect(zuid?.canonical).toBe("c2");
+  });
+
+  it("still handles the single-year JSON object", async () => {
+    const fetchMock = mockJsonOnce(SINGLE_YEAR_DOC);
+    const src = new RijksoverheidSource(config);
+    const out = await src.schoolholidays({ year: 2026 });
+
+    const [url] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toContain("/schoolyear/2026-2027");
+    expect(out.items).toHaveLength(1);
+    expect(out.items[0].region).toBe("Zuid");
+  });
+
+  it("narrows the no-year list with the region filter", async () => {
+    mockJsonOnce(NO_YEAR_TWO_DOCS);
+    const src = new RijksoverheidSource(config);
+    const out = await src.schoolholidays({ region: "noord" });
+
+    expect(out.items).toHaveLength(1);
+    expect(out.items[0].region).toBe("Noord");
   });
 });

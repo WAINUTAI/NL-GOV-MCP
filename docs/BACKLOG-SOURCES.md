@@ -142,5 +142,15 @@ Alle 11 keyless connectors zijn live geverifieerd tegen de echte endpoints; de O
 Rijksoverheid.nl migreerde op 2 juni 2026 naar een nieuw platform; de oude open-data-API (`opendata.rijksoverheid.nl/v1/documents`, `/infotypes/subject`, `/infotypes/ministry`) is opgeheven (HTTP 404). Alleen `/infotypes/schoolholidays` leeft nog.
 
 - `rijksoverheid_search` is herbouwd op het nieuwe keyless RSS-platform `https://www.rijksoverheid.nl/api/rss?query=<JSON>` — met **server-side** keyword-zoek (`resultSearchTerm`) en een `content_type`-filter (`type: news|all`). Dit is functioneel beter dan de oude API, die alleen client-side kon filteren.
-- `rijksoverheid_schoolholidays` blijft ongewijzigd (oude host nog actief).
+- `rijksoverheid_schoolholidays` blijft ongewijzigd van host, maar de **no-year-aanroep is gefixt**: `/infotypes/schoolholidays` (zonder schooljaar) geeft een JSON-*array* van schooljaar-documenten terug i.p.v. één object; de connector normaliseert nu `data` naar een lijst en itereert per document over `content`. Zonder jaar-argument komen nu alle beschikbare schooljaren terug (live: 66 items over 6 schooljaren) i.p.v. 0.
 - `rijksoverheid_document`, `rijksoverheid_topics` en `rijksoverheid_ministries` zijn verwijderd (onderliggende endpoints opgeheven, geen schoon equivalent op het nieuwe platform). Netto: 67 → 64 tools.
+
+### Rijkswaterstaat WaterWebservices-migratie (juli 2026)
+
+Rijkswaterstaat heeft de klassieke WaterWebservices (`waterwebservices.rijkswaterstaat.nl`) uitgefaseerd (301 → HTML-foutpagina → `malformed_response`) en vervangen door het nieuwe WADAR-platform (go-live 5 dec 2025, oude omgeving uit eind april 2026). Beide RWS-tools zijn hierop herbouwd en live geverifieerd:
+
+- Nieuwe host `https://ddapi20-waterwebservices.rijkswaterstaat.nl`; paden `/METADATASERVICES/OphalenCatalogus` en `/ONLINEWAARNEMINGENSERVICES/OphalenLaatsteWaarnemingen` (zonder de oude `_DBO`-suffix).
+- `OphalenLaatsteWaarnemingen` vereist nu een expliciete `LocatieLijst`; het "alle stations in één keer"-model bestaat niet meer. `rijkswaterstaat_waterdata_measurements` resolvet de gevraagde meetgrootheid + locatie(s) tegen de catalogus (via `AquoMetadataLocatieLijst`), en valt zonder locatie terug op een lijst met referentiestations (Hoek van Holland, IJmuiden, Vlissingen, Lobith, …).
+- Coördinaten zijn nu `Lat`/`Lon` (ETRS89, EPSG:4258) i.p.v. RD-`X`/`Y`; kwaliteit/status zijn enkelvoudige velden (`Kwaliteitswaardecode`, `Statuswaarde`) i.p.v. de oude `...Lijst`-arrays.
+- Meetgrootheid-codes gecorrigeerd tegen de nieuwe catalogus: golfhoogte `GOLHTE` → `Hm0`, stroomsnelheid `STRMDg` → `STROOMSHD` (de oude codes bestaan niet meer en gaven stil 0 resultaten). `WATHTE`/`Q`/`T`/`WINDSHD`/`WINDRTG`/`ZICHT` ongewijzigd; `WATDTE` (waterdiepte) en `STROOMRTG` (stroomrichting) toegevoegd.
+- De catalogus (quasi-statisch, ~1,5 MB) krijgt een eigen cache-TTL van 1 uur i.p.v. de 2-minuten "live"-TTL.

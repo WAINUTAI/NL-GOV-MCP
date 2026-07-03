@@ -141,36 +141,44 @@ export class RijksoverheidSource {
       query: params,
     });
 
-    const content = Array.isArray(data.content)
-      ? (data.content as Array<Record<string, unknown>>)
-      : [];
+    // The no-year endpoint returns a JSON ARRAY of yearly documents; the
+    // single-year endpoint returns ONE such document. Normalize to a list.
+    const documents: Array<Record<string, unknown>> = Array.isArray(data)
+      ? (data as unknown as Array<Record<string, unknown>>)
+      : [data];
 
     const items: Array<Record<string, unknown>> = [];
-    for (const block of content) {
-      const title = String(block.title ?? "Schoolvakanties");
-      const schoolyear = String(block.schoolyear ?? schoolYear ?? "").trim();
-      const vacations = Array.isArray(block.vacations)
-        ? (block.vacations as Array<Record<string, unknown>>)
+    for (const doc of documents) {
+      const content = Array.isArray(doc.content)
+        ? (doc.content as Array<Record<string, unknown>>)
         : [];
 
-      for (const vacation of vacations) {
-        const vacationType = String(vacation.type ?? "").trim();
-        const compulsory = String(vacation.compulsorydates ?? "").trim();
-        const regions = Array.isArray(vacation.regions)
-          ? (vacation.regions as Array<Record<string, unknown>>)
+      for (const block of content) {
+        const title = String(block.title ?? "Schoolvakanties");
+        const schoolyear = String(block.schoolyear ?? schoolYear ?? "").trim();
+        const vacations = Array.isArray(block.vacations)
+          ? (block.vacations as Array<Record<string, unknown>>)
           : [];
 
-        for (const r of regions) {
-          items.push({
-            title,
-            schoolyear,
-            vacation_type: vacationType,
-            compulsory,
-            region: String(r.region ?? "").trim(),
-            startdate: r.startdate,
-            enddate: r.enddate,
-            canonical: data.canonical,
-          });
+        for (const vacation of vacations) {
+          const vacationType = String(vacation.type ?? "").trim();
+          const compulsory = String(vacation.compulsorydates ?? "").trim();
+          const regions = Array.isArray(vacation.regions)
+            ? (vacation.regions as Array<Record<string, unknown>>)
+            : [];
+
+          for (const r of regions) {
+            items.push({
+              title,
+              schoolyear,
+              vacation_type: vacationType,
+              compulsory,
+              region: String(r.region ?? "").trim(),
+              startdate: r.startdate,
+              enddate: r.enddate,
+              canonical: doc.canonical,
+            });
+          }
         }
       }
     }
