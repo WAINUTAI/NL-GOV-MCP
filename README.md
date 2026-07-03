@@ -254,8 +254,8 @@ Restart Claude Desktop after saving.
 | `DSO_API_KEY` | — | Required for `dso_omgevingsdocumenten_search` (DSO Omgevingsdocumenten Presenteren API v8). Without it the tool returns `not_configured`. ([request access](https://developer.omgevingswet.overheid.nl/formulieren/api-key-aanvragen-0/)) |
 | `NED_API_KEY` | — | Required for `ned_energie_search` (Nationaal Energie Dashboard). Without it the tool returns `not_configured`. ([request a free key](https://ned.nl/nl/api)) |
 | `EP_ONLINE_API_KEY` | — | Required for `ep_online_energielabel` (RVO EP-Online energielabels). Without it the tool returns `not_configured`. ([request access](https://www.ep-online.nl/)) |
-| `NS_API_KEY` | — | Required for `ns_reisinformatie` (NS Reisinformatie API). Without it the tool returns `not_configured`. ([request a free key](https://apiportal.ns.nl/)) |
-| `DNB_API_KEY` | — | Required for `dnb_statistics_search` (DNB Statistics API, free "Public" product). Without it the tool returns `not_configured`. ([request a free key](https://api.portal.dnb.nl)) |
+| `NS_API_KEY` | — | Required for `ns_reisinformatie` (NS Reisinformatie API). Subscribe to the **"Ns-App"** product (free external tier ~300 req/5 min) — NOT the deprecated "Public-Travel-Information" product. Without it the tool returns `not_configured`. ([get a free key](https://apiportal.ns.nl/)) |
+| `DNB_API_KEY` | — | Required for `dnb_statistics_search` (DNB Statistics API, gateway `api.dnb.nl`). Subscribe to the free **"Public"** product on the portal and generate the key (self-service). Without it the tool returns `not_configured`. ([get a free key](https://api.portal.dnb.nl)) |
 | `MCP_TRANSPORT` | `stdio` | Transport mode: `stdio`, `sse`, or `streamable-http` (alternative to CLI flags) |
 | `LOG_LEVEL` | `info` | Pino log level (`debug`, `info`, `warn`, `error`, `silent`) |
 

@@ -60,7 +60,7 @@ describe("DnbStatisticsSource", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-    expect(url).toContain("api.portal.dnb.nl/interest-rates");
+    expect(url).toContain("api.dnb.nl/interest-rates");
     const headers = init.headers as Record<string, string>;
     expect(headers["Ocp-Apim-Subscription-Key"]).toBe("test-key");
 

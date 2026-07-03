@@ -155,6 +155,7 @@
 - Base: `https://gateway.apiportal.ns.nl/reisinformatie-api/api`
 - Endpoints per operatie (versies verschillen): `v3/disruptions` (verstoringen + werkzaamheden), `v2/departures` (vertrektijden per station), `v2/arrivals` (aankomsttijden), `v3/trips` (reisadvies from/to)
 - Auth: `NS_API_KEY` via header `Ocp-Apim-Subscription-Key` (Azure API Management gateway); zonder sleutel geeft de tool een typed `not_configured` error met aanvraaglink (https://apiportal.ns.nl/)
+- **Belangrijk — juiste product**: registreer op https://apiportal.ns.nl/ en abonneer op het **"Ns-App"**-product; dat bevat de Reisinformatie API (gratis externe tier ~300 requests/5 min). NIET het "Public-Travel-Information"-product: dat bevat alleen de verouderde Price API en NS keurt daar geen nieuwe abonnementen meer op goed. De primary key staat daarna op je NS-portal Profiel-pagina.
 - Realtime data (categorie `live`, cache-TTL 2 min). Tijden zijn ISO-8601 in Europe/Amsterdam.
 - Records zijn lean: id, title, url (publieke NS-deeplink), type, date + domeinvelden (direction/track/operator voor departures, phase/cause/type voor disruptions, transfers/duration voor trips).
 
@@ -162,7 +163,7 @@
 
 - **Connector**: `dnb` (category `static`)
 - **Tool**: `dnb_statistics_search`
-- **Endpoint**: `https://api.portal.dnb.nl` (Azure API Management developer portal; per-dataset REST endpoints)
-- **Auth**: KEY-VEREIST. Subscription key via HTTP-header `Ocp-Apim-Subscription-Key`. Gratis: maak een My DNB-account, abonneer op het product 'Public', kopieer de subscription key naar `DNB_API_KEY`. Starters Guide: https://api.portal.dnb.nl/startersguide
-- **Data**: 11+ Engelstalige datasets (gefaseerd uitgerold in 2024) o.a. rente, wisselkoersen, hypotheken, balansen pensioenfondsen/verzekeraars, betalingsbalans. Retourneert datapunten (periode, waarde, eenheid).
-- **Let op**: exacte dataset-paden staan achter de My DNB-login en zijn gefaseerd. Geef `dataset` daarom als code, pad of volledige endpoint-URL. De datapunt-parser is defensief (accepteert observations/data/value/results-containers en period/value/unit in diverse casings).
+- **Gateway (API-calls)**: `https://api.dnb.nl` — bijv. `GET https://api.dnb.nl/statisticsdata/<versie>/<dataset-slug>`. LET OP: `api.portal.dnb.nl` is alleen de developer-portal-website (accounts + subscriptions); data-calls dáárheen geven 404 HTML.
+- **Auth**: KEY-VEREIST. Subscription key via HTTP-header `Ocp-Apim-Subscription-Key`. Gratis: maak een My DNB-account op https://api.portal.dnb.nl/, abonneer op het product **'Public'** en genereer de key op de productpagina (self-service, geen goedkeuring; rate limit 30 calls/min). Kopieer de primary key naar `DNB_API_KEY`.
+- **Data**: Engelstalige datasets o.a. rente, wisselkoersen, hypotheken, balansen pensioenfondsen/verzekeraars, betalingsbalans. Respons is `{ records: [...], lastReleaseDate, _metadata }`; per datapunt periode/waarde (+ dataset-specifieke velden zoals currency/typeOfRate).
+- **dataset-argument**: geef het pad `statisticsdata/<versie>/<dataset-slug>` (bijv. `statisticsdata/v2026061000/exchange-rates-of-the-euro-and-gold-price-day`) of een volledige URL. De dataset-slugs staan in de API-docs op het portaal (APIs → DNB Statistics API). De datapunt-parser is defensief (accepteert records/observations/data/value/results-containers en period/value/unit in diverse casings).

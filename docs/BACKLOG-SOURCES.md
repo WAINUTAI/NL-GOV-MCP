@@ -165,4 +165,15 @@ Alle 64 tools zijn live tegen hun echte endpoints aangeroepen en geclassificeerd
 - **data_overheid_themes** — gaf altijd 0 (de data.overheid.nl-CKAN heeft geen `groups`). Nu gevoed uit de canonieke, keyless Overheid.nl thema-taxonomie (`waardelijsten.dcat-ap-donl.nl/overheid_taxonomiebeleidsagenda.json`): 17 hoofd- + 93 subthema's, dagcache.
 - **duo_schools / duo_exam_results** — gaven vrijwel altijd 0 doordat de plaatsnaam met de zoekterm werd ge-AND (CKAN-titels bevatten geen gemeentenaam). Nu topic-first zoektermen; de gebruikersterm blijft als soft hint. Deze tools leveren dataset-catalogustreffers (landelijke DUO-datasets), niet per-school-records.
 
-De question-suite (`scripts/test-queries.json`) is opgeschoond (3 dode cases voor verwijderde rijksoverheid-tools weg) en uitgebreid met 23 cases zodat alle v0.2-bronnen + measurements gedekt zijn (69 cases; `requireEnv` op de key-tools). Niet-bugs die bewust ongemoeid bleven: DSO (werkt; discovery geeft vaak 0), bro_ondergrond (werkt met een BRO-id, by-design), en de 4 gratis-key-tools (ned/ep_online/ns/dnb — draaien zodra de key is gezet).
+De question-suite (`scripts/test-queries.json`) is opgeschoond (3 dode cases voor verwijderde rijksoverheid-tools weg) en uitgebreid met 23 cases zodat alle v0.2-bronnen + measurements gedekt zijn (69 cases; `requireEnv` op de key-tools). Niet-bugs die bewust ongemoeid bleven: DSO (werkt; discovery geeft vaak 0) en bro_ondergrond (werkt met een BRO-id, by-design).
+
+### Gratis-key-bronnen geconfigureerd + twee latente bugs opgelost (juli 2026)
+
+Nadat de gratis API-keys waren aangevraagd, zijn de vier key-tools live geverifieerd. EP-Online en NS werkten meteen; twee connectors bleken latente bugs te hebben die pas met een echte key zichtbaar werden:
+
+- **ned_energie_search** — NED's `/v1/utilizations` vereist een `validfrom`-datumbereik; zonder gaf het HTTP 400. De connector voegde dat bereik alleen toe bij expliciete `validFrom`/`validTo`, dus elke standaardaanroep faalde. Nu wordt zonder opgave standaard de laatste 7 dagen (t/m morgen) gebruikt. Live: een kale aanroep geeft nu ~20 datapunten.
+- **dnb_statistics_search** — de connector gebruikte `api.portal.dnb.nl` als base-URL, maar dat is de **developer-portal-website** (data-calls → 404 HTML → `malformed_response`). De echte **gateway is `api.dnb.nl`** (`GET https://api.dnb.nl/statisticsdata/<versie>/<dataset-slug>` met `Ocp-Apim-Subscription-Key`). Base-URL gecorrigeerd; live geverifieerd met een echt dataset-pad.
+
+Key-product-vereisten (gedocumenteerd in `.env.example`, README en SOURCES.md):
+- **NS**: abonneer op het **"Ns-App"**-product (bevat de Reisinformatie API, gratis externe tier ~300 req/5 min). Het "Public-Travel-Information"-product is verouderd en NS keurt daar geen nieuwe abonnementen meer op goed.
+- **DNB**: abonneer op het **"Public"**-product en genereer de key op de productpagina (self-service, geen goedkeuring; 30 calls/min).

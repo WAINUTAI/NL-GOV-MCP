@@ -15,7 +15,11 @@ import { getJson } from "../utils/http.js";
  *  - de datapunt-parser accepteert meerdere container- en veldnaamvarianten
  *    (observations/data/value/results, period/value/unit in diverse casings).
  */
-const DNB_STATISTICS_BASE = "https://api.portal.dnb.nl";
+// The API gateway is api.dnb.nl (api.portal.dnb.nl is only the developer portal
+// website — calling data paths there returns 404 HTML). Verified live:
+// GET https://api.dnb.nl/statisticsdata/<version>/<dataset-slug> with the
+// Ocp-Apim-Subscription-Key header returns the data.
+const DNB_STATISTICS_BASE = "https://api.dnb.nl";
 
 /** DNB-datazoekpagina — canonieke landingsplek voor een menselijke lezer. */
 const DNB_DATA_SEARCH = "https://www.dnb.nl/en/statistics/data-search/";
@@ -187,7 +191,7 @@ export class DnbStatisticsSource {
         ...(args.query ? { q: args.query } : {}),
       },
       access_note:
-        "Bron: DNB Statistics API (api.portal.dnb.nl, Azure APIM). Subscription key via header Ocp-Apim-Subscription-Key. Exacte dataset-paden staan achter My DNB-login en zijn gefaseerd uitgerold; geef 'dataset' als code, pad of volledige endpoint-URL. Datapunt-parsing is defensief (meerdere veldnaamvarianten).",
+        "Bron: DNB Statistics API (gateway api.dnb.nl, Azure APIM). Subscription key via header Ocp-Apim-Subscription-Key (gratis 'Public'-product op api.portal.dnb.nl). Geef 'dataset' als pad 'statisticsdata/<versie>/<dataset-slug>' (bijv. 'statisticsdata/v2026061000/exchange-rates-of-the-euro-and-gold-price-day') of als volledige URL. De dataset-slugs staan in de API-docs achter een My DNB-login.",
     };
   }
 }

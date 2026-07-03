@@ -2464,9 +2464,9 @@ server.registerTool(
     "dnb_statistics_search",
     {
       description:
-        "Fetch datapoints from the DNB Statistics API (De Nederlandsche Bank): interest rates, exchange rates, mortgages, pension fund and insurer balance sheets, balance of payments. Returns period, value and unit per observation. Requires DNB_API_KEY. Dataset paths are phased/behind My DNB login, so pass 'dataset' as a code, path, or full endpoint URL.",
+        "Fetch datapoints from the DNB Statistics API (De Nederlandsche Bank, gateway api.dnb.nl): interest rates, exchange rates, mortgages, pension fund and insurer balance sheets, balance of payments. Returns period, value and unit per observation. Requires DNB_API_KEY (free 'Public' product). Pass 'dataset' as the path 'statisticsdata/<version>/<dataset-slug>' or a full endpoint URL.",
       inputSchema: {
-        dataset: z.string().describe("DNB dataset code, path or full endpoint URL. Examples: 'interest-rates', 'statistics/v1/exchange-rates', or a full https URL from the DNB Statistics API docs (api.portal.dnb.nl -> APIs -> DNB Statistics API)."),
+        dataset: z.string().describe("DNB dataset path 'statisticsdata/<version>/<dataset-slug>' or a full https endpoint URL. Example: 'statisticsdata/v2026061000/exchange-rates-of-the-euro-and-gold-price-day'. Find dataset slugs in the DNB Statistics API docs (api.portal.dnb.nl -> APIs -> DNB Statistics API)."),
         query: z.string().optional().describe("Optional free-text filter, applied client-side to period/label/unit/value."),
         startPeriod: z.string().optional().describe("Optional start period (SDMX-style), e.g. '2020' or '2020-01'."),
         endPeriod: z.string().optional().describe("Optional end period, e.g. '2024-12'."),
