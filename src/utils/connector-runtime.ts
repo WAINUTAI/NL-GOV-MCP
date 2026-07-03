@@ -43,6 +43,21 @@ const CONNECTOR_CATEGORY: Record<string, ConnectorCategory> = {
   rce_linked_data: "discovery",
   dso_omgevingsdocumenten: "discovery",
   ruimtelijke_plannen: "discovery",
+  data_politie: "static",
+  cbs_iv3: "static",
+  wetten_bwb: "static",
+  cvdr: "static",
+  bestuurlijke_gebieden: "static",
+  brk_kadastrale_kaart: "semi_live",
+  bron_ongevallen: "static",
+  nza_zorgbeeld: "live",
+  overheidsorganisaties: "static",
+  ovapi: "live",
+  bro: "semi_live",
+  ned: "live",
+  ep_online: "semi_live",
+  ns: "live",
+  dnb: "static",
 };
 
 const FAILURE_THRESHOLD = 3;
@@ -65,6 +80,7 @@ interface RuntimeState {
   totalFailures: number;
   totalResponseTimeMs: number;
   measuredCalls: number;
+  cacheHits: number;
 
   circuitOpenUntil?: number;
   probeInFlight: boolean;
@@ -85,6 +101,7 @@ export interface ConnectorHealthSnapshot {
   consecutive_failures: number;
   total_calls: number;
   total_failures: number;
+  cache_hits: number;
   avg_response_time_ms: number;
   circuit_open: boolean;
   circuit_retry_after_s: number;
@@ -109,6 +126,7 @@ function getState(connector: string): RuntimeState {
     totalFailures: 0,
     totalResponseTimeMs: 0,
     measuredCalls: 0,
+    cacheHits: 0,
     probeInFlight: false,
     inFlight: 0,
     queue: [],
@@ -185,6 +203,17 @@ export function markConnectorSuccess(connector: string, responseTimeMs: number):
   state.probeInFlight = false;
   state.totalResponseTimeMs += Math.max(0, responseTimeMs);
   state.measuredCalls += 1;
+}
+
+/**
+ * A cache hit served data without touching the upstream. It must NOT reset the
+ * circuit breaker (a hit is no evidence upstream recovered) and must NOT pollute
+ * the average response time (0ms cache reads would flatter the latency metric).
+ * It only records that a cached response was served.
+ */
+export function markConnectorCacheHit(connector: string): void {
+  const state = getState(connector);
+  state.cacheHits += 1;
 }
 
 export function markConnectorFailure(
@@ -274,7 +303,19 @@ export async function acquireConnectorSlot(
   });
 }
 
-function evictExpiredCacheEntries(): void {
+const CACHE_SWEEP_INTERVAL = 64;
+let cacheOpsSinceSweep = 0;
+
+/**
+ * Amortized full sweep of expired entries. Per-key TTL is already enforced in
+ * getHttpCache, so this only needs to run occasionally to reclaim keys that are
+ * never looked up again — running a full O(n) scan on every get/set is wasteful.
+ */
+function evictExpiredCacheEntries(force = false): void {
+  cacheOpsSinceSweep += 1;
+  if (!force && cacheOpsSinceSweep < CACHE_SWEEP_INTERVAL) return;
+  cacheOpsSinceSweep = 0;
+
   const now = Date.now();
   for (const [key, entry] of responseCache.entries()) {
     if (now > entry.expiresAt) responseCache.delete(key);
@@ -356,6 +397,7 @@ export function getConnectorHealth(connector: string): ConnectorHealthSnapshot {
     consecutive_failures: state.consecutiveFailures,
     total_calls: state.totalCalls,
     total_failures: state.totalFailures,
+    cache_hits: state.cacheHits,
     avg_response_time_ms: avg,
     circuit_open: circuitRetryAfterS > 0,
     circuit_retry_after_s: circuitRetryAfterS,

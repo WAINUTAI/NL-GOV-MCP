@@ -33,11 +33,22 @@ function flattenRecord(record: MCPRecord): Record<string, string> {
   return out;
 }
 
-function escapeCsv(value: string): string {
-  if (/[",\n]/.test(value)) {
-    return `"${value.replace(/"/g, '""')}"`;
+// Neutraliseer CSV/formula-injectie: cellen die met een formule-trigger beginnen
+// (= + - @ TAB CR) worden geprefixt met een apostrof zodat spreadsheets ze als
+// tekst behandelen i.p.v. als formule.
+function neutralizeCsvFormula(value: string): string {
+  if (/^[=+\-@\t\r]/.test(value)) {
+    return `'${value}`;
   }
   return value;
+}
+
+function escapeCsv(value: string): string {
+  const safe = neutralizeCsvFormula(value);
+  if (/[",\n\r]/.test(safe)) {
+    return `"${safe.replace(/"/g, '""')}"`;
+  }
+  return safe;
 }
 
 function recordsToCsv(records: MCPRecord[]): string {
@@ -81,7 +92,20 @@ function recordsToMarkdownTable(records: MCPRecord[]): string {
   return lines.join("\n");
 }
 
-function findGeometry(record: MCPRecord): Record<string, unknown> | undefined {
+type GeometryResult =
+  | { kind: "geometry"; geometry: Record<string, unknown> }
+  | { kind: "invalid" }
+  | { kind: "none" };
+
+function isValidLat(lat: number): boolean {
+  return Number.isFinite(lat) && lat >= -90 && lat <= 90;
+}
+
+function isValidLon(lon: number): boolean {
+  return Number.isFinite(lon) && lon >= -180 && lon <= 180;
+}
+
+function findGeometry(record: MCPRecord): GeometryResult {
   const data = (record.data ?? {}) as Record<string, unknown>;
 
   const geometry = data.geometry;
@@ -91,7 +115,11 @@ function findGeometry(record: MCPRecord): Record<string, unknown> | undefined {
     typeof (geometry as Record<string, unknown>).type === "string" &&
     (geometry as Record<string, unknown>).coordinates !== undefined
   ) {
-    return geometry as Record<string, unknown>;
+    // Minimale validatie: coordinates moet een array zijn, anders is de feature ongeldig.
+    if (!Array.isArray((geometry as Record<string, unknown>).coordinates)) {
+      return { kind: "invalid" };
+    }
+    return { kind: "geometry", geometry: geometry as Record<string, unknown> };
   }
 
   const lat =
@@ -106,28 +134,42 @@ function findGeometry(record: MCPRecord): Record<string, unknown> | undefined {
     asNumber(data.x) ??
     asNumber(data.lengtegraad);
 
-  if (lat !== undefined && lon !== undefined) {
-    return {
-      type: "Point",
-      coordinates: [lon, lat],
-    };
+  // Geen enkel coördinaatveld aanwezig: dit record heeft simpelweg geen locatie.
+  if (lat === undefined && lon === undefined) {
+    return { kind: "none" };
   }
 
-  return undefined;
+  // Deels of geheel aanwezig maar niet-numeriek of buiten bereik: ongeldig, niet emitteren.
+  if (lat === undefined || lon === undefined || !isValidLat(lat) || !isValidLon(lon)) {
+    return { kind: "invalid" };
+  }
+
+  return {
+    kind: "geometry",
+    geometry: {
+      type: "Point",
+      coordinates: [lon, lat],
+    },
+  };
 }
 
 function recordsToGeoJson(records: MCPRecord[]):
-  | { ok: true; value: Record<string, unknown> }
+  | { ok: true; value: Record<string, unknown>; skipped: number }
   | { ok: false } {
   const features: Array<Record<string, unknown>> = [];
+  let skipped = 0;
 
   for (const rec of records) {
-    const geometry = findGeometry(rec);
-    if (!geometry) continue;
+    const result = findGeometry(rec);
+    if (result.kind === "invalid") {
+      skipped++;
+      continue;
+    }
+    if (result.kind === "none") continue;
 
     features.push({
       type: "Feature",
-      geometry,
+      geometry: result.geometry,
       properties: {
         source_name: rec.source_name,
         title: rec.title,
@@ -143,6 +185,7 @@ function recordsToGeoJson(records: MCPRecord[]):
 
   return {
     ok: true,
+    skipped,
     value: {
       type: "FeatureCollection",
       features,
@@ -183,6 +226,11 @@ export function applyOutputFormat(args: {
     return {
       output_format: "geojson",
       formatted_output: geo.value,
+      ...(geo.skipped
+        ? {
+            access_note: `${geo.skipped} record(s) overgeslagen wegens ontbrekende, niet-numerieke of buiten-bereik coördinaten (lat -90..90, lon -180..180).`,
+          }
+        : {}),
     };
   }
 

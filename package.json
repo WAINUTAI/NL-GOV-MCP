@@ -4,8 +4,8 @@
   "description": "Unified MCP server for Dutch government open data sources",
   "main": "dist/src/index.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "prepare": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "tsc -p tsconfig.build.json",
     "dev": "tsx src/index.ts",
     "dev:sse": "tsx src/index.ts --sse",
     "dev:streamable-http": "tsx src/index.ts --streamable-http",
@@ -14,6 +14,7 @@
     "start:streamable-http": "node dist/src/index.js --streamable-http",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:acceptance": "vitest run tests/acceptance.live.test.ts",
     "test:questions": "tsx scripts/run-question-suite.ts --profile full",
     "test:live": "tsx scripts/run-question-suite.ts --profile live",
     "check": "tsc -p tsconfig.json --noEmit"

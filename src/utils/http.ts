@@ -6,6 +6,7 @@ import {
   getHttpCache,
   inferConnectorName,
   makeHttpCacheKey,
+  markConnectorCacheHit,
   markConnectorCall,
   markConnectorFailure,
   markConnectorSuccess,
@@ -49,6 +50,8 @@ export interface RequestOptions {
   connector?: string;
   cacheTtlMs?: number;
   disableCache?: boolean;
+  /** Cap on the decoded response body in bytes. Defaults to MAX_RESPONSE_BYTES. */
+  maxResponseBytes?: number;
 }
 
 export interface HttpMeta {
@@ -65,6 +68,24 @@ export interface HttpMeta {
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_RETRIES = 2;
 const DEFAULT_QUEUE_TIMEOUT_MS = 30_000;
+/** Hard cap on a single decoded response body. Guards against upstream OOM. */
+const MAX_RESPONSE_BYTES = 12 * 1024 * 1024;
+/** Never honor a Retry-After longer than this (seconds) — a slot must not be held indefinitely. */
+const MAX_RETRY_AFTER_S = 30;
+
+/** Query keys that must be masked before a URL is logged. */
+const SENSITIVE_QUERY_KEYS = new Set([
+  "api_key",
+  "apikey",
+  "key",
+  "token",
+  "access_token",
+  "subscription-key",
+  "ocp-apim-subscription-key",
+  "x-api-key",
+  "app_key",
+  "app_id",
+]);
 
 function withQuery(url: string, query?: RequestOptions["query"]): string {
   if (!query) return url;
@@ -74,6 +95,23 @@ function withQuery(url: string, query?: RequestOptions["query"]): string {
     u.searchParams.set(key, String(value));
   }
   return u.toString();
+}
+
+/** Mask sensitive query parameters (API keys/tokens) so they never reach the logs. */
+function redactUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    let changed = false;
+    for (const key of [...u.searchParams.keys()]) {
+      if (SENSITIVE_QUERY_KEYS.has(key.toLowerCase())) {
+        u.searchParams.set(key, "***");
+        changed = true;
+      }
+    }
+    return changed ? u.toString() : url;
+  } catch {
+    return url;
+  }
 }
 
 function parseRetryAfter(headerValue: string | null): number | undefined {
@@ -102,15 +140,109 @@ async function fetchWithTimeout(
   }
 }
 
+/**
+ * Read a response body fully, but bounded by BOTH a timeout and a byte cap.
+ *
+ * The header-phase timeout (fetchWithTimeout) is already cleared once the
+ * response headers arrive, so without this the body read is unbounded: a source
+ * that streams the body slowly (or never finishes) would hang the caller and
+ * hold the connector slot. The byte cap guards against a huge payload OOM'ing
+ * the process (and, downstream, the in-memory cache).
+ */
+async function readBodyCapped(
+  response: Response,
+  timeoutMs: number,
+  maxBytes: number,
+  endpoint: string,
+): Promise<string> {
+  const body = response.body;
+  if (!body) {
+    // No readable stream (rare) — guard response.text() with a deadline.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () =>
+          reject(
+            new SourceRequestError({
+              message: `Timed out reading response body after ${timeoutMs}ms`,
+              endpoint,
+              code: "timeout",
+            }),
+          ),
+        timeoutMs,
+      );
+    });
+    try {
+      return await Promise.race([response.text(), deadline]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    void reader.cancel().catch(() => {});
+  }, timeoutMs);
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        received += value.byteLength;
+        if (received > maxBytes) {
+          void reader.cancel().catch(() => {});
+          throw new SourceRequestError({
+            message: `Response body exceeded ${maxBytes} bytes`,
+            endpoint,
+            code: "malformed_response",
+          });
+        }
+        chunks.push(value);
+      }
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (timedOut) {
+    throw new SourceRequestError({
+      message: `Timed out reading response body after ${timeoutMs}ms`,
+      endpoint,
+      code: "timeout",
+    });
+  }
+
+  const merged = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder("utf-8").decode(merged);
+}
+
 interface CachedHttpPayload {
   status: number;
   headers: Array<[string, string]>;
   body: string;
 }
 
+interface RequestOutcome {
+  bodyText: string;
+  status: number;
+  headers: Headers;
+  meta: HttpMeta;
+}
+
 function countsTowardCircuit(error: SourceRequestError): boolean {
   if (error.code === "timeout") return true;
   if (error.code === "rate_limited") return true;
+  if (error.code === "network_error") return true;
   if (error.code === "http_error" && (error.status ?? 0) >= 500) return true;
   return false;
 }
@@ -120,10 +252,12 @@ async function request(
   url: string,
   options: RequestOptions = {},
   body?: unknown,
-): Promise<{ response: Response; meta: HttpMeta }> {
+): Promise<RequestOutcome> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const retries = options.retries ?? DEFAULT_RETRIES;
+  const maxBytes = options.maxResponseBytes ?? MAX_RESPONSE_BYTES;
   const fullUrl = withQuery(url, options.query);
+  const safeUrl = redactUrl(fullUrl);
   const connector = options.connector ?? inferConnectorName(fullUrl);
 
   const cacheEnabled =
@@ -138,12 +272,7 @@ async function request(
   if (cacheEnabled && cacheKey) {
     const cached = getHttpCache<CachedHttpPayload>(cacheKey);
     if (cached) {
-      markConnectorSuccess(connector, 0);
-      const response = new Response(cached.value.body, {
-        status: cached.value.status,
-        headers: new Headers(cached.value.headers),
-      });
-
+      markConnectorCacheHit(connector);
       const meta: HttpMeta = {
         url: fullUrl,
         status: cached.value.status,
@@ -158,7 +287,7 @@ async function request(
       logger.info(
         {
           method,
-          url: fullUrl,
+          url: safeUrl,
           connector,
           status: cached.value.status,
           elapsedMs: 0,
@@ -168,7 +297,12 @@ async function request(
         "source_request_cache_hit",
       );
 
-      return { response, meta };
+      return {
+        bodyText: cached.value.body,
+        status: cached.value.status,
+        headers: new Headers(cached.value.headers),
+        meta,
+      };
     }
   }
 
@@ -232,7 +366,7 @@ async function request(
         logger.info(
           {
             method,
-            url: fullUrl,
+            url: safeUrl,
             connector,
             status: response.status,
             attempt,
@@ -246,13 +380,13 @@ async function request(
         if (response.status === 429) {
           const retryAfter = parseRetryAfter(response.headers.get("retry-after"));
           if (attempt <= retries) {
-            const waitMs = (retryAfter ?? Math.pow(2, attempt)) * 1000;
-            await sleep(waitMs);
+            const waitS = Math.min(retryAfter ?? Math.pow(2, attempt), MAX_RETRY_AFTER_S);
+            await sleep(waitS * 1000);
             continue;
           }
 
           const error = new SourceRequestError({
-            message: `Rate limited by source (${fullUrl})`,
+            message: `Rate limited by source (${safeUrl})`,
             endpoint: fullUrl,
             code: "rate_limited",
             status: 429,
@@ -298,9 +432,10 @@ async function request(
           throw error;
         }
 
+        // Read the body under a bounded timeout + byte cap (see readBodyCapped).
+        const bodyText = await readBodyCapped(response, timeoutMs, maxBytes, fullUrl);
+
         if (cacheEnabled && cacheKey && cacheTtlMs > 0) {
-          const clone = response.clone();
-          const bodyText = await clone.text();
           const headerPairs: Array<[string, string]> = [];
           response.headers.forEach((value, key) => {
             headerPairs.push([key, value]);
@@ -321,7 +456,9 @@ async function request(
         markConnectorSuccess(connector, totalElapsedMs);
 
         return {
-          response,
+          bodyText,
+          status: response.status,
+          headers: response.headers,
           meta: {
             url: fullUrl,
             status: response.status,
@@ -336,7 +473,8 @@ async function request(
         lastError = error;
 
         if (error instanceof SourceRequestError) {
-          // Mark failures for final SourceRequestErrors not already marked above.
+          // Mark failures for final SourceRequestErrors not already marked above
+          // (body-read timeout/size errors and the pre-marked ones fall here).
           if (
             error.code === "timeout" ||
             error.code === "network_error" ||
@@ -382,7 +520,7 @@ async function request(
           code: "network_error",
         });
         markConnectorFailure(connector, {
-          countTowardCircuit: false,
+          countTowardCircuit: true,
           responseTimeMs: Date.now() - queueStart,
         });
         throw networkError;
@@ -399,7 +537,7 @@ async function request(
     code: "network_error",
   });
   markConnectorFailure(connector, {
-    countTowardCircuit: false,
+    countTowardCircuit: true,
     responseTimeMs: Date.now() - queueStart,
   });
   throw fallbackError;
@@ -409,9 +547,9 @@ export async function getJson<T>(
   url: string,
   options: RequestOptions = {},
 ): Promise<{ data: T; meta: HttpMeta }> {
-  const { response, meta } = await request("GET", url, options);
+  const { bodyText, meta } = await request("GET", url, options);
   try {
-    const data = (await response.json()) as T;
+    const data = JSON.parse(bodyText) as T;
     return { data, meta };
   } catch (error) {
     markConnectorFailure(meta.connector, {
@@ -432,9 +570,8 @@ export async function getText(
   url: string,
   options: RequestOptions = {},
 ): Promise<{ data: string; meta: HttpMeta }> {
-  const { response, meta } = await request("GET", url, options);
-  const data = await response.text();
-  return { data, meta };
+  const { bodyText, meta } = await request("GET", url, options);
+  return { data: bodyText, meta };
 }
 
 export async function postJson<T>(
@@ -442,9 +579,9 @@ export async function postJson<T>(
   body: unknown,
   options: RequestOptions = {},
 ): Promise<{ data: T; meta: HttpMeta }> {
-  const { response, meta } = await request("POST", url, options, body);
+  const { bodyText, meta } = await request("POST", url, options, body);
   try {
-    const data = (await response.json()) as T;
+    const data = JSON.parse(bodyText) as T;
     return { data, meta };
   } catch (error) {
     markConnectorFailure(meta.connector, {

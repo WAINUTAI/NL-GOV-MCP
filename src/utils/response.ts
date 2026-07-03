@@ -124,7 +124,7 @@ export function toMcpToolPayload(result: ToolResult): {
   structuredContent: Record<string, unknown>;
 } {
   return {
-    content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+    content: [{ type: "text", text: JSON.stringify(result) }],
     structuredContent: result as unknown as Record<string, unknown>,
   };
 }

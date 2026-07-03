@@ -156,13 +156,13 @@ export class BekendmakingenSource {
     const items = records.map((r) => {
       const m = extractMeta(r);
       return {
-        ...r,
         identifier: m.identifier,
         title: m.title,
         date: m.date,
         authority: m.authority,
         canonical_url: m.canonical,
         publication_type: m.type,
+        product_area: m.productArea,
       } as Record<string, unknown>;
     });
 
@@ -194,7 +194,6 @@ export class BekendmakingenSource {
 
     return {
       item: {
-        ...first,
         identifier: m.identifier ?? identifier,
         title: m.title,
         date: m.date,

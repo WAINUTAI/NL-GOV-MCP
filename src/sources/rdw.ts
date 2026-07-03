@@ -21,14 +21,17 @@ function normalizeKenteken(input: string): string | undefined {
 }
 
 function toRdwItem(x: RdwRecord, fallbackId: string) {
+  const datumTenaamstelling = (x as { datum_tenaamstelling?: unknown }).datum_tenaamstelling;
   return {
     id: `${x.kenteken ?? fallbackId}`,
     title: `${x.merk ?? "Onbekend merk"} ${x.handelsbenaming ?? ""}`.trim(),
     url: "https://opendata.rdw.nl/",
-    updated_at: String(
-      (x as { datum_tenaamstelling?: unknown }).datum_tenaamstelling ?? "",
-    ),
-    ...x,
+    updated_at: String(datumTenaamstelling ?? ""),
+    kenteken: x.kenteken,
+    merk: x.merk,
+    handelsbenaming: x.handelsbenaming,
+    voertuigsoort: x.voertuigsoort,
+    datum_tenaamstelling: datumTenaamstelling,
   };
 }
 

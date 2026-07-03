@@ -43,12 +43,37 @@ export class NgrSource {
       const mdCitation = citation?.CI_Citation as Record<string, unknown> | undefined;
       const titleNode = mdCitation?.title as Record<string, unknown> | undefined;
       const title = String(titleNode?.CharacterString ?? id ?? "NGR metadata");
+
+      const abstractNode = mdData?.abstract as Record<string, unknown> | undefined;
+      const abstract =
+        typeof abstractNode?.CharacterString === "string"
+          ? abstractNode.CharacterString
+          : undefined;
+
+      const keywordNodes = asArray(
+        mdData?.descriptiveKeywords as Record<string, unknown> | Record<string, unknown>[] | undefined,
+      );
+      const keywords = keywordNodes
+        .flatMap((dk) => {
+          const mdKeywords = (dk.MD_Keywords as Record<string, unknown> | undefined)?.keyword;
+          return asArray(mdKeywords as Record<string, unknown> | Record<string, unknown>[] | undefined);
+        })
+        .map((kw) => (typeof kw?.CharacterString === "string" ? kw.CharacterString : undefined))
+        .filter((kw): kw is string => Boolean(kw));
+
+      const dateStamp = x.dateStamp as Record<string, unknown> | undefined;
+      const date =
+        (typeof dateStamp?.Date === "string" ? dateStamp.Date : undefined) ??
+        (typeof dateStamp?.DateTime === "string" ? dateStamp.DateTime : undefined);
+
       return {
         id,
         title,
+        ...(abstract ? { abstract } : {}),
+        ...(keywords.length ? { keywords } : {}),
+        ...(date ? { date } : {}),
         url: id.startsWith("http") ? id : `https://www.nationaalgeoregister.nl/geonetwork/srv/dut/catalog.search#/metadata/${id}`,
         source: "ngr-csw",
-        raw: x,
       };
     });
 

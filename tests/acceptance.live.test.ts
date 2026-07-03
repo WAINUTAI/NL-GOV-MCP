@@ -10,12 +10,13 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import http from "node:http";
-import { startStreamableHttpServer } from "../src/server.js";
+import { startStreamableHttpServer, type ServerHandle } from "../src/server.js";
 
 const HAS_KNMI_KEY = !!process.env.KNMI_API_KEY;
 const HAS_OVERHEID_KEY = !!process.env.OVERHEID_API_KEY;
 
 let sessionId: string;
+let handle: ServerHandle | undefined;
 
 function post(path: string, body: unknown, sid?: string): Promise<{ status: number; sessionId?: string; data: unknown }> {
   return new Promise((resolve, reject) => {
@@ -89,7 +90,7 @@ function expectRecords(res: ToolResponse, min = 1): asserts res is ToolResult {
 }
 
 beforeAll(async () => {
-  await startStreamableHttpServer();
+  handle = await startStreamableHttpServer();
   const init = await post("/mcp", {
     jsonrpc: "2.0", id: 0, method: "initialize",
     params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "acceptance-test", version: "1.0" } },
@@ -104,6 +105,8 @@ afterAll(async () => {
       (res) => { res.on("data", () => {}); res.on("end", () => resolve()); });
     req.end();
   });
+  await handle?.closeConnections();
+  handle?.httpServer?.close();
 });
 
 /* ================================================================== */

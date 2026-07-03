@@ -98,10 +98,12 @@ export class RijkswaterstaatWaterdataSource {
         id: String(x.AquoMetadata_MessageID ?? ""),
         title: String(x.Parameter_Wat_Omschrijving ?? "RWS parameter"),
         unit: x.Eenheid?.Code,
+        unit_description: x.Eenheid?.Omschrijving,
         category: x.Grootheid?.Omschrijving,
+        grootheid_code: x.Grootheid?.Code,
         quality: x.Hoedanigheid?.Omschrijving,
+        quality_code: x.Hoedanigheid?.Code,
         url: "https://waterinfo.rws.nl",
-        ...x,
       }));
 
     return {

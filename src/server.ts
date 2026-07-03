@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { Server as HttpServer } from "node:http";
 import express from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -23,6 +24,55 @@ function printBanner(): void {
   process.stderr.write(BANNER + "\n");
 }
 
+/* ------------------------------------------------------------------ */
+/*  Shutdown registry                                                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Handle returned by the start* functions so that index.ts can perform a
+ * graceful shutdown: stop accepting new HTTP connections and close any
+ * active MCP transports/servers.
+ */
+export interface ServerHandle {
+  /** Underlying HTTP server (only for the SSE/streamable-http transports). */
+  httpServer?: HttpServer;
+  /** Close all active MCP transports and McpServers. Idempotent-safe. */
+  closeConnections: () => Promise<void>;
+}
+
+interface Closeable {
+  close: () => unknown | Promise<unknown>;
+}
+
+// Live transports and McpServers, tracked so a signal handler can drain them.
+const activeTransports = new Set<Closeable>();
+const activeMcpServers = new Set<McpServer>();
+
+async function closeConnections(): Promise<void> {
+  const pending: Promise<unknown>[] = [];
+  for (const transport of activeTransports) {
+    pending.push(Promise.resolve(transport.close()).catch(() => undefined));
+  }
+  for (const server of activeMcpServers) {
+    pending.push(server.close().catch(() => undefined));
+  }
+  activeTransports.clear();
+  activeMcpServers.clear();
+  await Promise.all(pending);
+}
+
+/** Log a clear message on EADDRINUSE (and other listen errors) and exit. */
+function attachServerErrorHandler(httpServer: HttpServer, port: number): void {
+  httpServer.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EADDRINUSE") {
+      logger.error({ port }, `Port ${port} is already in use (EADDRINUSE); cannot start HTTP server`);
+    } else {
+      logger.error({ err }, "HTTP server error");
+    }
+    process.exit(1);
+  });
+}
+
 export function createServer(): McpServer {
   const config = loadConfig();
   const server = new McpServer({
@@ -37,19 +87,21 @@ export function createServer(): McpServer {
 /*  stdio                                                              */
 /* ------------------------------------------------------------------ */
 
-export async function startStdioServer(): Promise<void> {
+export async function startStdioServer(): Promise<ServerHandle> {
   printBanner();
   const server = createServer();
   const transport = new StdioServerTransport();
+  activeMcpServers.add(server);
   await server.connect(transport);
   logger.info("MCP stdio server started");
+  return { closeConnections };
 }
 
 /* ------------------------------------------------------------------ */
 /*  SSE (legacy)                                                       */
 /* ------------------------------------------------------------------ */
 
-export async function startSseServer(): Promise<void> {
+export async function startSseServer(): Promise<ServerHandle> {
   printBanner();
   const config = loadConfig();
   const app = express();
@@ -61,8 +113,12 @@ export async function startSseServer(): Promise<void> {
     const server = createServer();
     const transport = new SSEServerTransport("/messages", res);
     transports[transport.sessionId] = transport;
+    activeTransports.add(transport);
+    activeMcpServers.add(server);
     transport.onclose = () => {
       delete transports[transport.sessionId];
+      activeTransports.delete(transport);
+      activeMcpServers.delete(server);
       server.close().catch(() => undefined);
     };
     await server.connect(transport);
@@ -84,16 +140,18 @@ export async function startSseServer(): Promise<void> {
 
   addHealthRoutes(app, config);
 
-  app.listen(config.server.httpPort, () => {
+  const httpServer = app.listen(config.server.httpPort, () => {
     logger.info({ port: config.server.httpPort }, "MCP SSE server started");
   });
+  attachServerErrorHandler(httpServer, config.server.httpPort);
+  return { httpServer, closeConnections };
 }
 
 /* ------------------------------------------------------------------ */
 /*  Streamable HTTP (MCP spec 2025-03-26)                              */
 /* ------------------------------------------------------------------ */
 
-export async function startStreamableHttpServer(): Promise<void> {
+export async function startStreamableHttpServer(): Promise<ServerHandle> {
   printBanner();
   const config = loadConfig();
   const app = express();
@@ -143,9 +201,13 @@ export async function startStreamableHttpServer(): Promise<void> {
       sessionIdGenerator: () => randomUUID(),
     });
 
+    activeTransports.add(transport);
+    activeMcpServers.add(server);
     transport.onclose = () => {
       const sid = transport.sessionId;
       if (sid) sessions.delete(sid);
+      activeTransports.delete(transport);
+      activeMcpServers.delete(server);
       server.close().catch(() => undefined);
     };
 
@@ -161,9 +223,11 @@ export async function startStreamableHttpServer(): Promise<void> {
 
   addHealthRoutes(app, config);
 
-  app.listen(config.server.httpPort, () => {
+  const httpServer = app.listen(config.server.httpPort, () => {
     logger.info({ port: config.server.httpPort }, "MCP Streamable HTTP server started");
   });
+  attachServerErrorHandler(httpServer, config.server.httpPort);
+  return { httpServer, closeConnections };
 }
 
 /* ------------------------------------------------------------------ */
