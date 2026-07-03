@@ -24,14 +24,14 @@ Examples:
 
 `NL-GOV-MCP` actively retrieves and normalizes data across many sources, can combine cross-source results, and returns a consistent MCP response contract ready for assistants and automations.
 
-## Sources (39 connectors, 67 tools)
+## Sources (39 connectors, 64 tools)
 
 | Source | What it covers |
 |---|---|
 | CBS | Statistics Netherlands (demographics, economy, housing, labour; v4/v3 + fallback) |
 | Tweede Kamer | Parliamentary documents, search, voting records, member info; single-document retrieval can optionally resolve resource URLs and include capped text previews for text-like formats |
 | Officiële Bekendmakingen | Official publications (SRU/XML search + lookup) |
-| Rijksoverheid | National government search, docs, topics, ministries, school holidays |
+| Rijksoverheid | National government news/document search via the Rijksoverheid.nl RSS platform (server-side keyword) + school holidays |
 | Rijksbegroting | National budget data + chapter helper |
 | DUO | Education datasets + school/exam helpers + RIO adapter |
 | data.overheid.nl | National open data catalog (CKAN) |
@@ -154,7 +154,7 @@ npm run test:live    # integration test suite (live API calls)
 
 ### Transport modes
 
-Three transport modes are supported. All expose the same 67 tools.
+Three transport modes are supported. All expose the same 64 tools.
 
 #### stdio (Claude Desktop, Claude Code)
 

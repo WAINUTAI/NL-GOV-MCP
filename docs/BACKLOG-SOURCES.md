@@ -108,7 +108,7 @@ Captured from operator guidance on 2026-03-02.
 
 ## Delivered in v0.2 (juli 2026)
 
-Vijftien nieuwe connectors toegevoegd (52 → 67 tools, 24 → 39 connectors), na een geverifieerd bronnenonderzoek (bestaan + gratis toegang + geen overlap, elk los adversarieel gecheckt):
+Vijftien nieuwe connectors toegevoegd (24 → 39 connectors; tools 52 → 64: +15 nieuw, −3 opgeschoond, zie Rijksoverheid hieronder), na een geverifieerd bronnenonderzoek (bestaan + gratis toegang + geen overlap, elk los adversarieel gecheckt):
 
 **Keyless (11):**
 - `data_politie_search` — misdaad-/overlastcijfers per gemeente/wijk/buurt (CBS dataderden OData v3)
@@ -136,3 +136,11 @@ Alle 11 keyless connectors zijn live geverifieerd tegen de echte endpoints; de O
 - **Waarstaatjegemeente OData** — toegang beperkt tot gemeentelijke medewerkers, niet publiek.
 - **WOZ-waardeloket** — werkt maar zit achter een anti-bot/WAF met ongedocumenteerde sessie-flow; te fragiel voor een breed-gedraaide open server.
 - **Eerste Kamer / CPB / Rijksvastgoedbedrijf** — geen machine-leesbare query-API (alleen bestandsdownloads).
+
+### Rijksoverheid RSS-migratie (juli 2026)
+
+Rijksoverheid.nl migreerde op 2 juni 2026 naar een nieuw platform; de oude open-data-API (`opendata.rijksoverheid.nl/v1/documents`, `/infotypes/subject`, `/infotypes/ministry`) is opgeheven (HTTP 404). Alleen `/infotypes/schoolholidays` leeft nog.
+
+- `rijksoverheid_search` is herbouwd op het nieuwe keyless RSS-platform `https://www.rijksoverheid.nl/api/rss?query=<JSON>` — met **server-side** keyword-zoek (`resultSearchTerm`) en een `content_type`-filter (`type: news|all`). Dit is functioneel beter dan de oude API, die alleen client-side kon filteren.
+- `rijksoverheid_schoolholidays` blijft ongewijzigd (oude host nog actief).
+- `rijksoverheid_document`, `rijksoverheid_topics` en `rijksoverheid_ministries` zijn verwijderd (onderliggende endpoints opgeheven, geen schoon equivalent op het nieuwe platform). Netto: 67 → 64 tools.

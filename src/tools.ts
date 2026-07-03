@@ -596,7 +596,7 @@ export function registerTools(server: McpServer): void {
     }
   });
 
-  server.registerTool("rijksoverheid_search", { description: "Search Rijksoverheid.nl content (news, policy documents, publications). Use topic keywords. Optionally filter by ministry, topic, and date range.", inputSchema: { query: z.string().describe("Government topic keywords. Examples: 'energietransitie', 'pensioenwet', 'toeslagen'. Do NOT pass full questions."), top: z.number().int().min(1).max(config.limits.maxRows).default(20), ministry: z.string().optional(), topic: z.string().optional(), date_from: z.string().optional(), date_to: z.string().optional(), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) }, annotations: TOOL_ANNOTATIONS }, async ({ query, top, ministry, topic, date_from, date_to, offset, limit, outputFormat, verbose, dryRun }) => {
+  server.registerTool("rijksoverheid_search", { description: "Search Rijksoverheid.nl content via the government's RSS search platform. Server-side keyword search returns up to ~20 results per query (no pagination). Use topic keywords. type='news' returns news only; type='all' returns news + documents + press releases.", inputSchema: { query: z.string().describe("Government topic keywords. Examples: 'energietransitie', 'pensioenwet', 'toeslagen'. Do NOT pass full questions."), top: z.number().int().min(1).max(config.limits.maxRows).default(20), type: z.enum(["news", "all"]).optional().default("news").describe("'news' = only news documents; 'all' = news + policy documents + press releases. The platform returns at most ~20 items per query."), date_from: z.string().optional(), date_to: z.string().optional(), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) }, annotations: TOOL_ANNOTATIONS }, async ({ query, top, type, date_from, date_to, offset, limit, outputFormat, verbose, dryRun }) => {
     const rw = rewriteQuery(query, "moderate");
     try {
       const effectiveLimit = limit ?? top;
@@ -606,15 +606,15 @@ export function registerTools(server: McpServer): void {
         return dryRunPayload({
           connector: "rijksoverheid",
           url: config.endpoints.rijksoverheid,
-          params: { query: rw.rewritten, top: fetchRows, ministry, topic, date_from, date_to },
+          params: { query: rw.rewritten, top: fetchRows, type, date_from, date_to },
         });
       }
 
       const started = Date.now();
-      const out = await rijksoverheid.search({ query: rw.rewritten, top: fetchRows, ministry, topic, date_from, date_to });
+      const out = await rijksoverheid.search({ query: rw.rewritten, top: fetchRows, type, date_from, date_to });
       const responseTimeMs = Date.now() - started;
 
-      const records = out.items.map((x)=>record("rijksoverheid", String(x.title ?? x.titel ?? x.id ?? "Rijksoverheid item"), String(x.canonical ?? x.url ?? "https://www.rijksoverheid.nl"), x));
+      const records = out.items.map((x)=>record("rijksoverheid", String(x.title ?? x.id ?? "Rijksoverheid item"), String(x.url ?? "https://www.rijksoverheid.nl"), x, String(x.snippet ?? ""), String(x.date ?? "")));
       const response = buildFormattedResponse({
         summary: `${records.length} resultaten`,
         records,
@@ -633,18 +633,6 @@ export function registerTools(server: McpServer): void {
       });
       return toMcpToolPayload(response);
     } catch(e){ return toMcpToolPayload(mapSourceError(e, "Rijksoverheid", "https://www.rijksoverheid.nl")); }
-  });
-
-  server.registerTool("rijksoverheid_document", { description: "Get a specific Rijksoverheid.nl document by ID.", inputSchema: { id: z.string() }, annotations: TOOL_ANNOTATIONS }, async ({ id }) => {
-    try { const out = await rijksoverheid.document(id); const r = out.item; const records = [record("rijksoverheid", String(r.title ?? r.titel ?? r.id ?? id), String(r.canonical ?? r.url ?? "https://www.rijksoverheid.nl"), r, String(r.introduction ?? ""), String(r.frontenddate ?? ""))]; return toMcpToolPayload(successResponse({ summary: `Rijksoverheid document ${id}`, records, provenance: prov("rijksoverheid_document", out.endpoint, out.params, 1, 1) })); } catch(e){ return toMcpToolPayload(mapSourceError(e, "Rijksoverheid", "https://www.rijksoverheid.nl")); }
-  });
-
-  server.registerTool("rijksoverheid_topics", { description: "List all policy topics on Rijksoverheid.nl.", annotations: TOOL_ANNOTATIONS }, async () => {
-    try { const out = await rijksoverheid.topics(); const records = out.items.map((x)=>record("rijksoverheid", String(x.name ?? x.title ?? x.id ?? "Topic"), String(x.url ?? "https://www.rijksoverheid.nl"), x)); return toMcpToolPayload(successResponse({ summary: `${records.length} onderwerpen`, records, provenance: prov("rijksoverheid_topics", out.endpoint, out.params, records.length, records.length) })); } catch(e){ return toMcpToolPayload(mapSourceError(e, "Rijksoverheid", "https://www.rijksoverheid.nl")); }
-  });
-
-  server.registerTool("rijksoverheid_ministries", { description: "List all Dutch government ministries.", annotations: TOOL_ANNOTATIONS }, async () => {
-    try { const out = await rijksoverheid.ministries(); const records = out.items.map((x)=>record("rijksoverheid", String(x.name ?? x.title ?? x.id ?? "Ministerie"), String(x.url ?? "https://www.rijksoverheid.nl"), x)); return toMcpToolPayload(successResponse({ summary: `${records.length} ministeries`, records, provenance: prov("rijksoverheid_ministries", out.endpoint, out.params, records.length, records.length) })); } catch(e){ return toMcpToolPayload(mapSourceError(e, "Rijksoverheid", "https://www.rijksoverheid.nl")); }
   });
 
   server.registerTool("rijksoverheid_schoolholidays", { description: "Get Dutch school holiday dates. Optionally filter by year and region (noord, midden, zuid).", inputSchema: { year: z.number().int().min(2000).max(2100).optional(), region: z.string().optional() }, annotations: TOOL_ANNOTATIONS }, async ({ year, region }) => {

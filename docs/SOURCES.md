@@ -18,8 +18,8 @@
 - connection: `officielepublicaties`
 
 ## Rijksoverheid
-- Base configured as `https://opendata.rijksoverheid.nl/v1`
-- adapters target `/search` and `/dossiers`
+- News/document search: `https://www.rijksoverheid.nl/api/rss?query=<JSON>` — the RSS platform that replaced the retired `opendata.rijksoverheid.nl/v1/documents` API (migration 2 June 2026). `query` carries `filters` (content_type) + `resultSearchTerm` (server-side keyword). Keyless, returns RSS 2.0 XML.
+- School holidays: `https://opendata.rijksoverheid.nl/v1/infotypes/schoolholidays` — still live on the old host; queried per schoolyear.
 
 ## Rijksbegroting
 - CKAN-compatible search adapter at `/api/3/action/package_search`

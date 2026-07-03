@@ -186,18 +186,13 @@ describe("Officiële Bekendmakingen", () => {
 /*  5. RIJKSOVERHEID                                                   */
 /* ================================================================== */
 describe("Rijksoverheid", () => {
-  it("search: finds documents", async () => {
-    const res = await callTool("rijksoverheid_search", { query: "klimaat", rows: 3 });
+  it("search: finds news via the RSS platform", async () => {
+    const res = await callTool("rijksoverheid_search", { query: "klimaat", top: 3 });
     expectRecords(res);
   }, 30_000);
 
-  it("topics: returns list", async () => {
-    const res = await callTool("rijksoverheid_topics", {});
-    expectRecords(res);
-  }, 30_000);
-
-  it("ministries: returns list", async () => {
-    const res = await callTool("rijksoverheid_ministries", {});
+  it("search: type=all returns news + documents", async () => {
+    const res = await callTool("rijksoverheid_search", { query: "stikstof", top: 3, type: "all" });
     expectRecords(res);
   }, 30_000);
 });

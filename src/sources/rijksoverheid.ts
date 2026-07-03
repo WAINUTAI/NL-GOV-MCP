@@ -1,32 +1,36 @@
 import type { AppConfig } from "../types.js";
-import { getJson } from "../utils/http.js";
+import { getJson, getText } from "../utils/http.js";
+import { parseXml } from "../utils/xml-parser.js";
 
-function normalizeText(value: unknown): string {
-  return typeof value === "string" ? value.toLowerCase() : "";
-}
+/**
+ * Nieuw keyless zoek-/nieuws-endpoint van het Rijksoverheid.nl-platform (RSS 2.0).
+ * De oude opendata.rijksoverheid.nl `/documents`-API is per 2 juni 2026 opgeheven (404);
+ * alleen `/infotypes/schoolholidays` leeft daar nog (zie schoolholidays()).
+ */
+const RIJKSOVERHEID_RSS_BASE = "https://www.rijksoverheid.nl/api/rss";
 
-function matchesQuery(item: Record<string, unknown>, query: string): boolean {
-  if (!query.trim()) return true;
-  const qTerms = query
-    .toLowerCase()
-    .split(/\s+/)
-    .filter(Boolean);
-
-  const haystack = [
-    normalizeText(item.title),
-    normalizeText(item.introduction),
-    normalizeText(item.content),
-    normalizeText(item.canonical),
-    normalizeText(item.type),
-    normalizeText(item.organisationalunit),
-    normalizeText(item.subject),
-  ].join(" \n ");
-
-  return qTerms.every((term) => haystack.includes(term));
-}
-
+/** Normaliseer een fast-xml-parser waarde naar een array (één item wordt geen array). */
 function asArray(data: unknown): Array<Record<string, unknown>> {
-  return Array.isArray(data) ? (data as Array<Record<string, unknown>>) : [];
+  if (data === undefined || data === null) return [];
+  return Array.isArray(data)
+    ? (data as Array<Record<string, unknown>>)
+    : [data as Record<string, unknown>];
+}
+
+/** RFC-822 pubDate → ISO 8601; laat de ruwe waarde staan als parsing faalt. */
+function toIsoDate(raw: string): string {
+  const ts = Date.parse(raw);
+  return Number.isNaN(ts) ? raw : new Date(ts).toISOString();
+}
+
+/** Haal de tekst uit een RSS-veld dat een string óf een { "#text", ...attrs }-object kan zijn. */
+function nodeText(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "object") {
+    const text = (value as Record<string, unknown>)["#text"];
+    return text === undefined ? "" : String(text);
+  }
+  return String(value);
 }
 
 export class RijksoverheidSource {
@@ -35,42 +39,72 @@ export class RijksoverheidSource {
   async search(args: {
     query: string;
     top: number;
-    ministry?: string;
-    topic?: string;
+    type?: "news" | "all";
     date_from?: string;
     date_to?: string;
   }) {
-    const endpoint = `${this.config.endpoints.rijksoverheid}/documents`;
-    const fetchRows = Math.min(200, Math.max(args.top * 20, 50));
+    const type = args.type ?? "news";
+    const filters =
+      type === "all"
+        ? []
+        : [{ field: "content_type", values: ["pro:newsDocument"], type: "all" }];
+    const queryObj = {
+      filters,
+      resultSearchTerm: args.query,
+      pageTitle: type === "all" ? "Zoeken" : "Nieuws",
+    };
+    const url = `${RIJKSOVERHEID_RSS_BASE}?query=${encodeURIComponent(JSON.stringify(queryObj))}`;
+
+    const { data, meta } = await getText(url, { connector: "rijksoverheid" });
+    const parsed = parseXml(data) as Record<string, unknown> | undefined;
+    const rss = (parsed?.rss ?? {}) as Record<string, unknown>;
+    const channel = (rss.channel ?? {}) as Record<string, unknown>;
+    const rawItems = asArray(channel.item);
+
+    let items = rawItems.map((item) => {
+      const link = nodeText(item.link);
+      const guid = nodeText(item.guid);
+      const pubDate = nodeText(item.pubDate);
+      return {
+        id: guid || link,
+        title: nodeText(item.title),
+        url: link,
+        snippet: nodeText(item.description),
+        date: pubDate ? toIsoDate(pubDate) : "",
+        type,
+      };
+    });
+
+    // Client-side date-filter op pubDate (het RSS-platform kent geen date-parameters).
+    if (args.date_from?.trim()) {
+      const from = Date.parse(`${args.date_from.trim()}T00:00:00Z`);
+      if (!Number.isNaN(from)) {
+        items = items.filter((item) => {
+          const ts = Date.parse(String(item.date));
+          return Number.isNaN(ts) ? true : ts >= from;
+        });
+      }
+    }
+    if (args.date_to?.trim()) {
+      const until = Date.parse(`${args.date_to.trim()}T23:59:59Z`);
+      if (!Number.isNaN(until)) {
+        items = items.filter((item) => {
+          const ts = Date.parse(String(item.date));
+          return Number.isNaN(ts) ? true : ts <= until;
+        });
+      }
+    }
+
+    const total = items.length;
+    const sliced = items.slice(0, args.top);
 
     const params: Record<string, string> = {
-      rows: String(fetchRows),
-      output: "json",
+      query: args.query,
+      type,
+      top: String(args.top),
     };
-    if (args.ministry?.trim()) {
-      params.organisationalunit = args.ministry.trim();
-    }
-    if (args.topic?.trim()) {
-      params.subject = args.topic.trim();
-    }
-    if (args.date_from?.trim()) {
-      params.lastmodifiedsince = args.date_from.trim().replace(/-/g, "");
-    }
-
-    const { data, meta } = await getJson<unknown>(endpoint, { query: params });
-    let items = asArray(data);
-
-    if (args.date_to?.trim()) {
-      const until = new Date(`${args.date_to.trim()}T23:59:59Z`).getTime();
-      items = items.filter((item) => {
-        const raw = String(item.lastmodified ?? item.frontenddate ?? "");
-        const ts = Date.parse(raw);
-        return Number.isNaN(ts) ? true : ts <= until;
-      });
-    }
-
-    const filtered = items.filter((item) => matchesQuery(item, args.query));
-    const sliced = filtered.slice(0, args.top);
+    if (args.date_from?.trim()) params.date_from = args.date_from.trim();
+    if (args.date_to?.trim()) params.date_to = args.date_to.trim();
 
     const result: {
       items: Array<Record<string, unknown>>;
@@ -80,47 +114,17 @@ export class RijksoverheidSource {
       access_note?: string;
     } = {
       items: sliced,
-      total: filtered.length,
+      total,
       endpoint: meta.url,
       params,
     };
 
-    if (args.query.trim().length > 0 && items.length > 0 && filtered.length === 0) {
-      result.access_note =
-        `Rijksoverheid API ondersteunt geen native q=-parameter; ${items.length} recente documenten opgehaald en client-side gefilterd op trefwoord. Niche-queries leveren vaak 0 op. Probeer bredere keywords, of gebruik de topic/ministry/date_from-parameters voor gerichter filteren.`;
-    }
+    result.access_note =
+      total === 0
+        ? `Geen resultaten via het Rijksoverheid RSS-zoekplatform voor "${args.query}" (type=${type}). Server-side keyword-zoek levert max ~20 resultaten per query; probeer bredere trefwoorden of type=all (nieuws + documenten + persberichten).`
+        : `Server-side keyword-zoek (resultSearchTerm) via het nieuwe Rijksoverheid RSS-platform. Max ~20 resultaten per query en geen paginatie, dus een 'top' boven ~20 levert niet meer op. type=news = alleen nieuws; type=all = nieuws + documenten + persberichten.`;
 
     return result;
-  }
-
-  async document(id: string) {
-    const endpoint = `${this.config.endpoints.rijksoverheid}/documents/${id}`;
-    const params = { output: "json" };
-    const { data, meta } = await getJson<Record<string, unknown>>(endpoint, {
-      query: params,
-    });
-
-    return {
-      item: data,
-      endpoint: meta.url,
-      params,
-    };
-  }
-
-  async topics() {
-    const endpoint = `${this.config.endpoints.rijksoverheid}/infotypes/subject`;
-    const params = { rows: "200", output: "json" };
-    const { data, meta } = await getJson<unknown>(endpoint, { query: params });
-    const items = asArray(data);
-    return { items, endpoint: meta.url, params };
-  }
-
-  async ministries() {
-    const endpoint = `${this.config.endpoints.rijksoverheid}/infotypes/ministry`;
-    const params = { rows: "100", output: "json" };
-    const { data, meta } = await getJson<unknown>(endpoint, { query: params });
-    const items = asArray(data);
-    return { items, endpoint: meta.url, params };
   }
 
   async schoolholidays(args: { year?: number; region?: string }) {

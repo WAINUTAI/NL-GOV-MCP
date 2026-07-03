@@ -23,7 +23,7 @@ Technical overview of how NL-GOV-MCP is structured internally.
                                    │
                      ┌─────────────┴─────────────┐
                      │   tools.ts                 │
-                     │   67 tool handlers         │
+                     │   64 tool handlers         │
                      │   Zod schemas + logic      │
                      └───┬────────┬────────┬─────┘
                          │        │        │
@@ -80,7 +80,7 @@ A single tool call flows through these steps:
 |------|------|
 | `src/index.ts` | Entry point. Reads `--sse` / `--streamable-http` flags or `MCP_TRANSPORT` env, starts the matching transport. |
 | `src/server.ts` | Creates `McpServer`, calls `registerTools()`, sets up Express routes for HTTP transports, adds `/health` and `/health/sources` endpoints. |
-| `src/tools.ts` | All 67 tool registrations. Each tool has a Zod input schema and an async handler that calls a source, transforms results, and returns via `toMcpToolPayload()`. |
+| `src/tools.ts` | All 64 tool registrations. Each tool has a Zod input schema and an async handler that calls a source, transforms results, and returns via `toMcpToolPayload()`. |
 | `src/types.ts` | Shared TypeScript interfaces: `MCPRecord`, `Provenance`, `MCPToolResponse`, `MCPErrorResponse`, `AppConfig`. |
 | `src/config.ts` | Loads `config/default.json`, merges env var overrides. |
 
@@ -235,7 +235,7 @@ The HTTP client, caching, circuit breaker, retry, and concurrency limiting are a
 
 ## Transport modes
 
-All three transports expose the same 67 tools and are created by `server.ts`:
+All three transports expose the same 64 tools and are created by `server.ts`:
 
 | Mode | Protocol | Session model | Use case |
 |------|----------|---------------|----------|

@@ -37,12 +37,13 @@
 
 ## Rijksoverheid
 - `rijksoverheid_search`
-  - Rijksoverheid opendata API ondersteunt geen native `q=`; tool haalt tot 200 recentste items en filtert client-side op trefwoord
-  - niche-queries geven vaak 0; in dat geval: expliciete `access_note` die dit uitlegt en `topic/ministry/date_from` als alternatieven aanbeveelt
-- `rijksoverheid_document`
-- `rijksoverheid_topics`
-- `rijksoverheid_ministries`
+  - Zoekt nieuws/documenten via het Rijksoverheid.nl RSS-platform (`https://www.rijksoverheid.nl/api/rss`), met **server-side** keyword-zoek (`resultSearchTerm`)
+  - `type`: `news` (default, alleen nieuwsberichten) of `all` (alle content: nieuws + documenten + persberichten); `date_from`/`date_to` filteren client-side op publicatiedatum
+  - Levert ~20 resultaten per query (het RSS-platform biedt geen eenvoudige paginatie); records bevatten titel, canonieke URL, samenvatting en datum
 - `rijksoverheid_schoolholidays`
+  - Schoolvakanties per schooljaar/regio via de nog actieve `opendata.rijksoverheid.nl`-dataset
+
+> De oude `rijksoverheid_document`, `rijksoverheid_topics` en `rijksoverheid_ministries` zijn verwijderd: hun onderliggende `opendata.rijksoverheid.nl/v1`-endpoints zijn opgeheven na de platformmigratie (2 juni 2026).
 
 ## Rijksbegroting
 - `rijksbegroting_search`
