@@ -14,7 +14,7 @@
     "start:streamable-http": "node dist/src/index.js --streamable-http",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:acceptance": "vitest run tests/acceptance.live.test.ts",
+    "test:acceptance": "vitest run -c vitest.acceptance.config.ts",
     "test:questions": "tsx scripts/run-question-suite.ts --profile full",
     "test:live": "tsx scripts/run-question-suite.ts --profile live",
     "check": "tsc -p tsconfig.json --noEmit"
