@@ -186,3 +186,103 @@ Error responses return:
 - `error`
 - `message`
 - optional `suggestion`, `retry_after`, `details`
+
+
+## Nieuwe tools (v0.2)
+
+### `data_politie_search`
+
+Search Dutch registered crime statistics (data.politie.nl / CBS dataderden). Filters: `regio` (RegioS code of naam), `soortMisdrijf` (code of naam), `periode` (kaal jaartal of exacte key), `tableId` (default 47013NED). Zet `dimension` op RegioS/SoortMisdrijf/Perioden om geldige filterwaarden te verkennen. Ondersteunt paginatie (`top`/`offset`/`limit`), `outputFormat`, `verbose` en `dryRun`.
+
+### `cbs_iv3_search`
+
+Search CBS Iv3 municipal/provincial finance statistics. Filters: `gemeente` (Gemeenten code of naam), `taakveldBalanspost`, `categorie`, `verslagsoort` (code of naam, bv. begroting/jaarrekening), `tableId` (default 45071NED). Zet `dimension` op Gemeenten/TaakveldBalanspost/Categorie/Verslagsoort om geldige filterwaarden te verkennen. Ondersteunt paginatie (`top`/`offset`/`limit`), `outputFormat`, `verbose` en `dryRun`.
+
+## wetten_bwb_search
+
+Search consolidated Dutch national legislation (BWB) via the KOOP SRU service. Keywords match the title index `overheidbwb.titel` (title search, not full text). Full-pattern tool: supports `offset`/`limit`/`top`, `outputFormat`, `verbose` and `dryRun`. Returns BWBR id, title, competent authority, date and a wetten.overheid.nl link.
+
+## cvdr_search
+
+Search Dutch decentralised/local regulations (CVDR) via the KOOP SRU service. Keywords match the `keyword` index. Full-pattern tool: supports `offset`/`limit`/`top`, `outputFormat`, `verbose` and `dryRun`. Returns CVDR id, title, issuing municipality/authority, date and a lokaleregelgeving.overheid.nl link.
+
+## bestuurlijke_gebieden_search
+
+Search Dutch administrative areas (gemeente/provincie/land) via PDOK Bestuurlijke Gebieden OGC API Features. Filter by exact `naam`, `code`, or an RD New (EPSG:28992) `bbox`. Read-only, keyless. Returns naam, code, identificatie, parent province/country, bbox/centroid and optional GeoJSON geometry (set `includeGeometry=true` for `outputFormat=geojson`). Supports pagination, outputFormat (json/csv/geojson/markdown_table), verbose and dryRun.
+
+## brk_kadastrale_kaart_search
+
+Search Dutch cadastral parcels and map objects (BRK Kadastrale Kaart) via PDOK OGC API Features. bbox-driven (RD New / EPSG:28992). Read-only, keyless. Collections: perceel, kadastralegrens, openbareruimtenaam, bebouwing, nummeraanduidingreeks. Returns kadastrale aanduiding (gemeente/sectie/perceelnummer), grootte (m2), bbox/centroid and optional GeoJSON geometry (set `includeGeometry=true` for `outputFormat=geojson`). Supports pagination, outputFormat (json/csv/geojson/markdown_table), verbose and dryRun. A `bbox` is required.
+
+## bron_ongevallen_search
+
+Zoekt Nederlandse verkeersongevallen (Rijkswaterstaat BRON) via WFS 2.0.0 GetFeature binnen een EPSG:28992 (RD New) bounding box.
+
+**Input:** `bbox` (verplicht, `minx,miny,maxx,maxy` in RD New), `jaar` (`2022`|`2023`|`2024`|`2022_2024`, default `2024`), `afloop` (`letsel`|`dodelijk`|`ums`|`all`, default `all`), `gemeente` (substring-filter), `query` (substring op straat/plaats/gemeente), plus `top`/`offset`/`limit`/`outputFormat` (incl. `geojson`)/`verbose`/`dryRun`.
+
+**Output:** per ongeval id, titel (aard — straat, plaats), jaar, afloop, aard, aantal partijen, vervoerswijzen, locatievelden, maximumsnelheid, RD-coördinaten en een canonieke WFS GetFeature-URL. `total` = `numberMatched` binnen de bbox.
+
+**Voorbeeld:** `bbox='190000,442000,195000,445000', jaar='2023', afloop='dodelijk'`.
+
+## nza_zorgbeeld_search
+
+Search current NZa Zorgbeeld waiting times for Dutch hospital / medical-specialist (MSZ) care.
+
+- **Bron:** NZa Zorgbeeld (`https://zorgbeeld.nza.nl/openapi/WaitingTimeMSZ`), keyless, live (cache-TTL 2 min).
+- **Input:** `query` (optioneel, keywords op zorgaanbieder/locatie/specialisme/behandeling/plaats), `kvk` (optioneel, KVK-nummer voor server-side beperking), `treatmentType` (`Behandeling` | `Polikliniekbezoek` | `Diagnostiek`), plus `top`, `offset`/`limit`, `outputFormat`, `verbose`, `dryRun` (vol patroon).
+- **Output:** zorgaanbieder, locatie, specialisme, behandeling, behandeltype, wachttijd in dagen (`waitingTimeDays`, `null` bij te weinig observaties), peildatum, adres, KVK-/AGB-code.
+- **Let op:** zonder `kvk` wordt de complete dataset opgehaald en client-side gefilterd; `total` reflecteert treffers in de opgehaalde snapshot, geen server-side telling.
+
+## overheidsorganisaties_search
+
+Zoek in het Register van Overheidsorganisaties (ROO/TOOI) op naam.
+
+**Parameters:** `query` (naam-substring), `type` (optionele TOOI type-URI, bv. `https://identifier.overheid.nl/tooi/def/ont/Gemeente`), `enrich` (default true; verrijk met contact/adres, auto-uit boven 15 treffers), plus standaard `top`, `offset`, `limit`, `outputFormat`, `verbose`, `dryRun`.
+
+**Levert per organisatie:** `title` (label), `organisatietype` (afgeleid uit type-URI), `tooi_uri` / `type_uri`, `website`, `telefoon`, `bezoekadres`, canonieke `url` (website indien verrijkt, anders de TOOI-URI). Records zijn lean.
+
+**Voorbeeld:** `query="Amsterdam"` -> gemeente Amsterdam met TOOI-URI `.../gemeente/gm0363`, website amsterdam.nl, telefoon 14 020, bezoekadres Amstel 1.
+
+## ovapi_departures
+
+Realtime vertrektijden van het Nederlandse openbaar vervoer voor één halte (OVapi / KV78Turbo).
+
+- **Input:** `timingPointCode` (verplicht, bv. `32002646`), `line` (optioneel lijnnummerfilter), `top`, `offset`/`limit`, `outputFormat`, `verbose`, `dryRun`.
+- **Output:** per vertrek `line`, `lineName`, `destination`, `transportType`, `operator`, `targetDepartureTime`, `expectedDepartureTime`, `delayMinutes`, `tripStopStatus`, `stopName`, `town`.
+- **Let op:** vereist een haltecode (geen haltenaam). Codes zijn op te zoeken via 9292 of de OVapi/GTFS-index (`https://gtfs.ovapi.nl/nl/`). Bron is keyless en live (cache 2 min).
+
+## bro_ondergrond_search
+
+Bevraagt de BRO (Basisregistratie Ondergrond) publieke REST-services op `publiek.broservices.nl` (keyless).
+
+- **Input:** `query` (verplicht) — óf een BRO-object-id (GMW/GLD/GMN/CPT/BHR + cijfers, bv. `GMW000000036287`) voor een directe object-lookup, óf een trefwoord om de BRO refcode-domeinen te filteren. Plus `top`, `offset`/`limit` (paginatie), `outputFormat` (json/csv/geojson/markdown_table), `verbose`, `dryRun`.
+- **Output:** genormaliseerde records met `broId`, `object_type`, `quality_regime`, `registration_status`, `latitude`/`longitude` (WGS84), `rd_coordinates` (RD/EPSG:28992), `well_code` en canonical object-URL. Bij refcode-zoek: `name`, `uri`, `description` per domein.
+- **Read-only, openWorldHint.** Geen API-key nodig.
+
+## ned_energie_search
+
+Search NED.nl (Nationaal Energie Dashboard) opwek/verbruik per energiebron via `/v1/utilizations`. **Key-required** (`NED_API_KEY`, header `X-AUTH-TOKEN`); zonder sleutel volgt een `not_configured`-fout.
+
+- **Inputs:** `type` (alias zon/wind/wind_offshore/gas/kern/verbruik of NED-code), `point` (0=NL, 1-12=provincies, 14=offshore), `granularity` (10min/15min/hour/day/month/year), `activity` (providing/consuming/import/export), `classification` (forecast/current), `timezone` (utc/cet), `validFrom`/`validTo` (tijdvenster op validfrom), `rows`.
+- **Output:** per datapunt id, titel (bron · tijdstip), canonical url (`https://api.ned.nl/v1/utilizations/{id}`), energiebron + label, capaciteit (kW), volume (kWh), benuttingsgraad (%), CO2-emissie (kg), emissiefactor, validfrom/validto, lastupdate.
+- **Categorie:** live (cache-TTL 2 min).
+
+## `ep_online_energielabel`
+
+Look up the registered energy label (energielabel) for a Dutch address from EP-Online (RVO). Query by `postcode` + `huisnummer` (optioneel `huisletter`, `huisnummertoevoeging`, `detailaanduiding`) of by `bagId` (BAG verblijfsobject-id). Returns energieklasse, registratiedatum, opnamedatum, geldigTot, gebouwtype/-klasse, BAG-ids, EnergieIndex, energiebehoefte, primaireFossieleEnergie, aandeelHernieuwbareEnergie, berekendEnergieverbruik, bouwjaar, certificaathouder. Requires `EP_ONLINE_API_KEY` (Authorization-header, kale key).
+
+## NS Reisinformatie (key required)
+- `ns_reisinformatie` (`NS_API_KEY`)
+  - NS (Nederlandse Spoorwegen) Reisinformatie API met één `operation`-parameter: `disruptions` (v3, verstoringen/werkzaamheden), `departures` (v2, vertrektijden per station), `arrivals` (v2, aankomsttijden), `trips` (v3, reisadvies)
+  - params: `operation`, `station` (vereist voor departures/arrivals), `fromStation`+`toStation` (vereist voor trips), `dateTime` (optioneel ISO-8601), `isActive` (disruptions-filter), `rows` (→ maxJourneys)
+  - zonder API-sleutel: typed `not_configured` error met aanvraaglink naar apiportal.ns.nl
+  - realtime (`live`): returns lean records met NS-deeplink als canonical url
+
+## dnb_statistics_search
+
+Haalt datapunten op uit de DNB Statistics API (De Nederlandsche Bank).
+
+- **Input**: `dataset` (verplicht: code, pad of volledige endpoint-URL), `query` (optioneel vrije-tekstfilter, client-side), `startPeriod`, `endPeriod` (optionele SDMX-periodes), `rows`.
+- **Output**: records met `period`, `value`, `unit`, `label`, `frequency` per datapunt.
+- **Auth**: `DNB_API_KEY` vereist (header `Ocp-Apim-Subscription-Key`); zonder key `not_configured`.
+- **Voorbeeld**: `{ "dataset": "interest-rates", "startPeriod": "2023", "rows": 24 }`.

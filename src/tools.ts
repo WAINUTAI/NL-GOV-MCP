@@ -24,6 +24,21 @@ import { SparqlLinkedDataSource, SPARQL_LIMIT_CAP } from "./sources/sparql-linke
 import { BagDetailSource } from "./sources/bagDetail.js";
 import { EurostatSource } from "./sources/eurostat.js";
 import { DataEuropaSource } from "./sources/data-europa.js";
+import { DataPolitieSource } from "./sources/data-politie.js";
+import { CbsIv3Source } from "./sources/cbs-iv3.js";
+import { WettenBwbSource } from "./sources/wetten-bwb.js";
+import { CvdrSource } from "./sources/cvdr.js";
+import { BestuurlijkeGebiedenSource } from "./sources/bestuurlijke-gebieden.js";
+import { BrkKadastraleKaartSource } from "./sources/brk-kadastrale-kaart.js";
+import { BronOngevallenSource } from "./sources/bron-ongevallen.js";
+import { NzaZorgbeeldSource } from "./sources/nza-zorgbeeld.js";
+import { OverheidsorganisatiesSource } from "./sources/overheidsorganisaties.js";
+import { OvapiSource } from "./sources/ovapi.js";
+import { BroOndergrondSource } from "./sources/bro-ondergrond.js";
+import { NedSource } from "./sources/ned.js";
+import { EpOnlineSource } from "./sources/ep-online.js";
+import { NsReisinformatieSource } from "./sources/ns-reisinformatie.js";
+import { DnbStatisticsSource } from "./sources/dnb-statistics.js";
 import { mapSourceError, nowIso, successResponse, toMcpToolPayload, errorResponse } from "./utils/response.js";
 import { parseTemporalRange } from "./utils/temporal.js";
 import { applyOutputFormat } from "./utils/output-format.js";
@@ -59,6 +74,17 @@ const bagDetail = new BagDetailSource(config);
 const rceLinkedData = new SparqlLinkedDataSource(config, "https://api.linkeddata.cultureelerfgoed.nl/datasets/rce/cho/services/cho/sparql", "RCE Linked Data");
 const eurostat = new EurostatSource(config);
 const dataEuropa = new DataEuropaSource(config);
+const dataPolitie = new DataPolitieSource(config);
+const cbsIv3 = new CbsIv3Source(config);
+const wettenBwb = new WettenBwbSource(config);
+const cvdr = new CvdrSource(config);
+const bestuurlijkeGebieden = new BestuurlijkeGebiedenSource(config);
+const brkKadastraleKaart = new BrkKadastraleKaartSource(config);
+const bronOngevallen = new BronOngevallenSource(config);
+const nzaZorgbeeld = new NzaZorgbeeldSource(config);
+const overheidsorganisaties = new OverheidsorganisatiesSource(config);
+const ovapi = new OvapiSource(config);
+const broOndergrond = new BroOndergrondSource(config);
 
 function record(source: string, title: string, canonical_url: string, data: Record<string, unknown>, snippet?: string, date?: string): MCPRecord {
   return { source_name: source, title, canonical_url, data, snippet, date };
@@ -236,16 +262,22 @@ export function registerTools(server: McpServer): void {
   server.registerTool("data_overheid_organizations", { description: "List all publishing organizations on data.overheid.nl.", annotations: TOOL_ANNOTATIONS }, async () => {
     try {
       const out = await dataOverheid.organizations();
-      const records = out.items.map((x) => record("data.overheid.nl", String(x.title ?? x.name ?? "organisatie"), `https://data.overheid.nl`, x as Record<string, unknown>));
-      return toMcpToolPayload(successResponse({ summary: `${records.length} organisaties`, records, provenance: prov("data_overheid_organizations", out.endpoint, {}, records.length, records.length) }));
+      const total = out.items.length;
+      const capped = out.items.slice(0, config.limits.maxRows);
+      const records = capped.map((x) => record("data.overheid.nl", String(x.title ?? x.name ?? "organisatie"), `https://data.overheid.nl`, x as Record<string, unknown>));
+      const access_note = total > records.length ? `Resultaat afgekapt op ${records.length} van ${total} organisaties om de payload te beperken.` : undefined;
+      return toMcpToolPayload(successResponse({ summary: `${records.length} organisaties`, records, provenance: prov("data_overheid_organizations", out.endpoint, {}, records.length, total), access_note }));
     } catch (e) { return toMcpToolPayload(mapSourceError(e, "data.overheid.nl")); }
   });
 
   server.registerTool("data_overheid_themes", { description: "List all dataset themes/categories on data.overheid.nl.", annotations: TOOL_ANNOTATIONS }, async () => {
     try {
       const out = await dataOverheid.themes();
-      const records = out.items.map((x) => record("data.overheid.nl", String(x.title ?? x.name ?? "thema"), `https://data.overheid.nl`, x as Record<string, unknown>));
-      return toMcpToolPayload(successResponse({ summary: `${records.length} thema's`, records, provenance: prov("data_overheid_themes", out.endpoint, {}, records.length, records.length) }));
+      const total = out.items.length;
+      const capped = out.items.slice(0, config.limits.maxRows);
+      const records = capped.map((x) => record("data.overheid.nl", String(x.title ?? x.name ?? "thema"), `https://data.overheid.nl`, x as Record<string, unknown>));
+      const access_note = total > records.length ? `Resultaat afgekapt op ${records.length} van ${total} thema's om de payload te beperken.` : undefined;
+      return toMcpToolPayload(successResponse({ summary: `${records.length} thema's`, records, provenance: prov("data_overheid_themes", out.endpoint, {}, records.length, total), access_note }));
     } catch (e) { return toMcpToolPayload(mapSourceError(e, "data.overheid.nl")); }
   });
 
@@ -275,7 +307,9 @@ export function registerTools(server: McpServer): void {
         outputFormat,
         offset,
         limit: effectiveLimit,
-        total: records.length,
+        // Upstream (CBS v4 / data.overheid fallback) levert geen betrouwbare totaal-count;
+        // null laat has_more terugvallen op de records-heuristiek i.p.v. onterecht false.
+        total: null,
         access_note: out.access_note,
         verbose: singleConnectorVerbose({
           enabled: verbose,
@@ -323,7 +357,9 @@ export function registerTools(server: McpServer): void {
         outputFormat,
         offset,
         limit: effectiveLimit,
-        total: records.length,
+        // CBS OData levert hier geen totaal-count; null i.p.v. records.length zodat
+        // has_more op de records-heuristiek valt.
+        total: null,
         verbose: singleConnectorVerbose({
           enabled: verbose,
           connector: "cbs",
@@ -361,7 +397,9 @@ export function registerTools(server: McpServer): void {
         outputFormat,
         offset,
         limit: effectiveLimit,
-        total: records.length,
+        // Tweede Kamer OData search levert geen totaal-count; null i.p.v.
+        // records.length zodat has_more op de records-heuristiek valt.
+        total: null,
         verbose: singleConnectorVerbose({
           enabled: verbose,
           connector: "tweede_kamer",
@@ -735,7 +773,9 @@ export function registerTools(server: McpServer): void {
         outputFormat,
         offset,
         limit: effectiveLimit,
-        total: records.length,
+        // API-register (JSON of HTML-scrape fallback) levert geen totaal-count;
+        // null i.p.v. records.length zodat has_more op de records-heuristiek valt.
+        total: null,
         access_note: "Requires OVERHEID_API_KEY",
         verbose: singleConnectorVerbose({
           enabled: verbose,
@@ -1110,7 +1150,17 @@ export function registerTools(server: McpServer): void {
     const temporal = parseTemporalRange(decodedQuestion, { now: reference_now, timeZone: timezone ?? config.temporal.defaultTimeZone });
     const questionForSearch = temporal?.cleanedQuery?.trim() ? temporal.cleanedQuery : decodedQuestion;
     const q = questionForSearch.toLowerCase();
-    const has = (terms: string[]) => terms.some((t) => q.includes(t));
+    const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // Match intent terms op woordgrenzen i.p.v. naïeve substring-includes, zodat
+    // korte tokens (bv. "mp") niet binnen andere woorden matchen ("temperatuur",
+    // "lamp", "pomp"). Werkt met meerwoords-termen ("tweede kamer", "raad van
+    // state") en koppeltekens ("defensie-uitgaven").
+    const matchesTerm = (haystack: string, term: string): boolean => {
+      const t = term.trim();
+      if (!t) return false;
+      return new RegExp(`\\b${escapeRegExp(t)}\\b`).test(haystack);
+    };
+    const has = (terms: string[]) => terms.some((t) => matchesTerm(q, t));
 
     const makeKeywordQuery = (input: string, _maxTerms = 6): string =>
       rewriteQuery(input, "moderate").rewritten;
@@ -1195,7 +1245,7 @@ export function registerTools(server: McpServer): void {
       );
 
     const cbsTerms = ["cbs", "statistiek", "statistics", "bevolking", "population", "inwoners", "inflatie", "werkloos", "woning", "inkomen", "economie", "bbp", "gdp", "import", "export", "geboorte", "sterfte", "opleidingsniveau", "opleiding", "onderwijsniveau", "emissie", "emissies"];
-    const tkTerms = ["tweede kamer", "parlement", "motie", "moties", "amendement", "kamerstuk", "kamervraag", "debat", "stemming", "fractie", "commissie", "wetsvoorstel", "kamerlid", "mp"];
+    const tkTerms = ["tweede kamer", "parlement", "motie", "moties", "amendement", "kamerstuk", "kamervraag", "debat", "stemming", "fractie", "commissie", "wetsvoorstel", "kamerlid", "minister-president", "premier"];
     const obTerms = ["staatsblad", "staatscourant", "tractatenblad", "gemeenteblad", "bekendmaking", "verordening", "regeling", "officieel besluit", "stcrt", "gmb"];
     const rijkTerms = ["rijksoverheid", "kabinet", "minister", "ministerie", "beleid", "toespraak", "schoolvakantie", "schoolvakanties", "school holiday", "school holidays", "vakantie regio"];
     const budgetTerms = ["begroting", "budget", "uitgaven", "spending", "rijksfinanci", "begrotingsartikel", "defensie-uitgaven"];
@@ -1584,7 +1634,10 @@ export function registerTools(server: McpServer): void {
           }
 
           const records = sorted.slice(0, top).map((x) => record("cbs", String(x.Title ?? x.Identifier ?? "CBS"), "https://www.cbs.nl", x));
-          return askSuccess({ summary: `Router: CBS (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, items.length), total: items.length });
+          // items.length is de gefetchte buffer, niet de echte upstream-total, en kan
+          // groter zijn dan de teruggegeven records (sorted.slice(0, top)); null zodat
+          // has_more niet onterecht true wordt buiten de beschikbare records.
+          return askSuccess({ summary: `Router: CBS (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, items.length), total: null });
         }
       }
 
@@ -1761,4 +1814,716 @@ export function registerTools(server: McpServer): void {
       return toMcpToolPayload(mapSourceError(e, "nl_gov_ask"));
     }
   });
+
+  server.registerTool("data_politie_search", {
+    description: "Search Dutch registered crime statistics (data.politie.nl / CBS dataderden OData). Filter by region (RegioS gemeente/wijk/buurt code or name), crime type (SoortMisdrijf code or name) and period. Set 'dimension' to explore valid filter values.",
+    inputSchema: {
+      query: z.string().optional().describe("Free-text filter, used only in dimension-explore mode (matches dimension title/key)."),
+      tableId: z.string().default("47013NED").describe("CBS dataderden table id. Examples: 47013NED (registered crimes), 47018NED (monthly wijk/buurt), 84468NED."),
+      regio: z.string().optional().describe("RegioS code (e.g. GM0363, NL01, WK036300) or name (e.g. Amsterdam). Names are resolved to a code via the RegioS dimension."),
+      soortMisdrijf: z.string().optional().describe("SoortMisdrijf code (e.g. 0.0.0, 1.1.1) or name (e.g. diefstal). Names are resolved via the SoortMisdrijf dimension."),
+      periode: z.string().optional().describe("Period: bare year (e.g. 2023 = all months/year-totals of that year) or exact key (e.g. 2023MM01, 2023JJ00)."),
+      dimension: z.enum(["RegioS", "SoortMisdrijf", "Perioden"]).optional().describe("Explore the values of a dimension instead of fetching data rows."),
+      top: z.number().int().min(1).max(config.limits.maxRows).default(20),
+      ...paginationInputSchema,
+      outputFormat: outputFormatSchema,
+      verbose: z.boolean().default(false),
+      dryRun: z.boolean().default(false),
+    },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ query, tableId, regio, soortMisdrijf, periode, dimension, top, offset, limit, outputFormat, verbose, dryRun }) => {
+    try {
+      const effectiveLimit = limit ?? top;
+      const fetchRows = Math.min(config.limits.maxRows, Math.max(top, offset + effectiveLimit));
+
+      if (dryRun) {
+        return dryRunPayload({
+          connector: "data_politie",
+          url: `https://dataderden.cbs.nl/ODataApi/OData/${tableId}/${dimension ?? "TypedDataSet"}`,
+          params: { query, regio, soortMisdrijf, periode, dimension, top: fetchRows },
+        });
+      }
+
+      const started = Date.now();
+      const out = await dataPolitie.search({ query, tableId, regio, soortMisdrijf, periode, dimension, rows: fetchRows });
+      const responseTimeMs = Date.now() - started;
+
+      const records = out.items.map((x) => record("data.politie.nl", String(x.title ?? x.id ?? "misdrijfcijfer"), String(x.url ?? "https://data.politie.nl"), x as Record<string, unknown>));
+      const response = buildFormattedResponse({
+        summary: `${records.length} ${dimension ? "dimensiewaarden" : "misdaadcijfers"}`,
+        records,
+        provenance: prov("data_politie_search", out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), out.total),
+        outputFormat,
+        offset,
+        limit: effectiveLimit,
+        // dataderden OData levert hier geen betrouwbare totaal-count; null laat has_more op de records-heuristiek vallen.
+        total: null,
+        access_note: out.access_note,
+        verbose: singleConnectorVerbose({ enabled: verbose, connector: "data_politie", endpoint: out.endpoint, responseTimeMs }),
+      });
+      return toMcpToolPayload(response);
+    } catch (e) { return toMcpToolPayload(mapSourceError(e, "data.politie.nl", "https://data.politie.nl")); }
+  });
+
+  server.registerTool("cbs_iv3_search", {
+    description: "Search CBS Iv3 municipal/provincial finance statistics (CBS dataderden OData). Filter by municipality (Gemeenten code or name), task field / balance post (TaakveldBalanspost), category (Categorie) and report type (Verslagsoort; e.g. budget vs. annual accounts). Set 'dimension' to explore valid filter values.",
+    inputSchema: {
+      query: z.string().optional().describe("Free-text filter, used only in dimension-explore mode (matches dimension title/key)."),
+      tableId: z.string().default("45071NED").describe("CBS dataderden table id. Default 45071NED (gemeentefinanciën)."),
+      gemeente: z.string().optional().describe("Gemeenten code (e.g. GM1680) or name (e.g. Rotterdam). Names are resolved via the Gemeenten dimension."),
+      taakveldBalanspost: z.string().optional().describe("TaakveldBalanspost code (e.g. 0.1) or name."),
+      categorie: z.string().optional().describe("Categorie code (e.g. L1.1) or name."),
+      verslagsoort: z.string().optional().describe("Verslagsoort code (e.g. 2025X000) or name (e.g. begroting, jaarrekening). Names are resolved via the Verslagsoort dimension."),
+      dimension: z.enum(["Gemeenten", "TaakveldBalanspost", "Categorie", "Verslagsoort"]).optional().describe("Explore the values of a dimension instead of fetching data rows."),
+      top: z.number().int().min(1).max(config.limits.maxRows).default(20),
+      ...paginationInputSchema,
+      outputFormat: outputFormatSchema,
+      verbose: z.boolean().default(false),
+      dryRun: z.boolean().default(false),
+    },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ query, tableId, gemeente, taakveldBalanspost, categorie, verslagsoort, dimension, top, offset, limit, outputFormat, verbose, dryRun }) => {
+    try {
+      const effectiveLimit = limit ?? top;
+      const fetchRows = Math.min(config.limits.maxRows, Math.max(top, offset + effectiveLimit));
+
+      if (dryRun) {
+        return dryRunPayload({
+          connector: "cbs_iv3",
+          url: `https://dataderden.cbs.nl/ODataApi/OData/${tableId}/${dimension ?? "TypedDataSet"}`,
+          params: { query, gemeente, taakveldBalanspost, categorie, verslagsoort, dimension, top: fetchRows },
+        });
+      }
+
+      const started = Date.now();
+      const out = await cbsIv3.search({ query, tableId, gemeente, taakveldBalanspost, categorie, verslagsoort, dimension, rows: fetchRows });
+      const responseTimeMs = Date.now() - started;
+
+      const records = out.items.map((x) => record("cbs.iv3", String(x.title ?? x.id ?? "gemeentefinancien"), String(x.url ?? "https://opendata.cbs.nl"), x as Record<string, unknown>));
+      const response = buildFormattedResponse({
+        summary: `${records.length} ${dimension ? "dimensiewaarden" : "financiele posten"}`,
+        records,
+        provenance: prov("cbs_iv3_search", out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), out.total),
+        outputFormat,
+        offset,
+        limit: effectiveLimit,
+        // dataderden OData levert hier geen betrouwbare totaal-count; null laat has_more op de records-heuristiek vallen.
+        total: null,
+        access_note: out.access_note,
+        verbose: singleConnectorVerbose({ enabled: verbose, connector: "cbs_iv3", endpoint: out.endpoint, responseTimeMs }),
+      });
+      return toMcpToolPayload(response);
+    } catch (e) { return toMcpToolPayload(mapSourceError(e, "CBS Iv3", "https://opendata.cbs.nl")); }
+  });
+
+  server.registerTool("wetten_bwb_search", {
+    description: "Search Dutch consolidated national legislation (BWB, wetten.overheid.nl) via KOOP SRU. Keywords are matched against the law title index (overheidbwb.titel). Returns BWBR id, title, competent authority, date and a wetten.overheid.nl link. Pass title keywords only, not full sentences.",
+    inputSchema: { query: z.string().describe("Law/regulation title keywords, e.g. 'arbeid vreemdelingen', 'wegenverkeerswet', 'omgevingswet'. Matched against the BWB title index (overheidbwb.titel), not full text."), top: z.number().int().min(1).max(config.limits.maxRows).default(20), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ query, top, offset, limit, outputFormat, verbose, dryRun }) => {
+    try {
+      const effectiveLimit = limit ?? top;
+      const fetchRows = Math.min(config.limits.maxRows, Math.max(top, offset + effectiveLimit));
+      if (dryRun) return dryRunPayload({ connector: "wetten_bwb", url: "https://zoekservice.overheid.nl/sru/Search", params: { "x-connection": "BWB", operation: "searchRetrieve", version: "1.2", query, maximumRecords: fetchRows } });
+      const started = Date.now();
+      const out = await wettenBwb.search({ query, maximumRecords: fetchRows });
+      const responseTimeMs = Date.now() - started;
+      const records = out.items.map((x) => record("wetten-bwb", String(x.title ?? x.identifier ?? "BWB regeling"), String(x.canonical_url ?? "https://wetten.overheid.nl"), x as Record<string, unknown>, String(x.authority ?? ""), String(x.date ?? "")));
+      const response = buildFormattedResponse({ summary: `${records.length} BWB wetten`, records, provenance: prov("wetten_bwb_search", out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), out.total), outputFormat, offset, limit: effectiveLimit, total: out.total, access_note: out.access_note, verbose: singleConnectorVerbose({ enabled: verbose, connector: "wetten_bwb", endpoint: out.endpoint, responseTimeMs }) });
+      return toMcpToolPayload(response);
+    } catch (e) { return toMcpToolPayload(mapSourceError(e, "BWB wetgeving", "https://wetten.overheid.nl")); }
+  });
+
+  server.registerTool("cvdr_search", {
+    description: "Search Dutch decentralised/local regulations (CVDR: municipal, provincial and water-authority bylaws) via KOOP SRU. Keywords match the 'keyword' index. Returns CVDR id, title, issuing municipality/authority, date and a lokaleregelgeving.overheid.nl link. Pass topic keywords only.",
+    inputSchema: { query: z.string().describe("Local-regulation topic keywords, e.g. 'hondenbelasting', 'parkeerverordening', 'afvalstoffenheffing'. Matched against the CVDR 'keyword' index."), top: z.number().int().min(1).max(config.limits.maxRows).default(20), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ query, top, offset, limit, outputFormat, verbose, dryRun }) => {
+    try {
+      const effectiveLimit = limit ?? top;
+      const fetchRows = Math.min(config.limits.maxRows, Math.max(top, offset + effectiveLimit));
+      if (dryRun) return dryRunPayload({ connector: "cvdr", url: "https://zoekservice.overheid.nl/sru/Search", params: { "x-connection": "cvdr", operation: "searchRetrieve", version: "1.2", query, maximumRecords: fetchRows } });
+      const started = Date.now();
+      const out = await cvdr.search({ query, maximumRecords: fetchRows });
+      const responseTimeMs = Date.now() - started;
+      const records = out.items.map((x) => record("cvdr", String(x.title ?? x.identifier ?? "CVDR regeling"), String(x.canonical_url ?? "https://lokaleregelgeving.overheid.nl"), x as Record<string, unknown>, String(x.gemeente ?? ""), String(x.date ?? "")));
+      const response = buildFormattedResponse({ summary: `${records.length} CVDR regelingen`, records, provenance: prov("cvdr_search", out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), out.total), outputFormat, offset, limit: effectiveLimit, total: out.total, access_note: out.access_note, verbose: singleConnectorVerbose({ enabled: verbose, connector: "cvdr", endpoint: out.endpoint, responseTimeMs }) });
+      return toMcpToolPayload(response);
+    } catch (e) { return toMcpToolPayload(mapSourceError(e, "CVDR lokale regelgeving", "https://lokaleregelgeving.overheid.nl")); }
+  });
+
+  server.registerTool("bestuurlijke_gebieden_search", {
+    description: "Search Dutch administrative areas (gemeente/provincie/land) via PDOK Bestuurlijke Gebieden OGC API Features. Filter by exact naam, code, or RD (EPSG:28992) bbox. Returns naam, code, identificatie, parent province/country, bbox/centroid and optional GeoJSON geometry.",
+    inputSchema: {
+      niveau: z.enum(["gemeente", "provincie", "land"]).default("gemeente").describe("Administrative level: gemeente (municipality), provincie (province) or land (country)."),
+      naam: z.string().optional().describe("Exact area name (case-sensitive), e.g. 'Utrecht'. Filters on the naam property (exact match)."),
+      code: z.string().optional().describe("Exact area code, e.g. '0344' for a gemeente or '26' for a provincie."),
+      bbox: z.string().optional().describe("Optional RD New (EPSG:28992) bounding box 'minx,miny,maxx,maxy'."),
+      includeGeometry: z.boolean().default(false).describe("Include full GeoJSON geometry (large for gemeente/provincie polygons). Needed for outputFormat=geojson."),
+      top: z.number().int().min(1).max(config.limits.maxRows).default(20),
+      ...paginationInputSchema,
+      outputFormat: outputFormatSchema,
+      verbose: z.boolean().default(false),
+      dryRun: z.boolean().default(false),
+    },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ niveau, naam, code, bbox, includeGeometry, top, offset, limit, outputFormat, verbose, dryRun }) => {
+    try {
+      const effectiveLimit = limit ?? top;
+      const fetchRows = Math.min(config.limits.maxRows, Math.max(top, offset + effectiveLimit));
+      if (dryRun) {
+        return dryRunPayload({ connector: "bestuurlijke_gebieden", url: "https://api.pdok.nl/kadaster/bestuurlijkegebieden/ogc/v1", params: { niveau, naam, code, bbox, limit: fetchRows } });
+      }
+      const started = Date.now();
+      const out = await bestuurlijkeGebieden.search({ niveau, naam, code, bbox, includeGeometry, rows: fetchRows });
+      const responseTimeMs = Date.now() - started;
+      const records = out.items.map((x) => record(
+        "bestuurlijke_gebieden",
+        x.title,
+        x.url,
+        { id: x.id, niveau: x.niveau, naam: x.naam, code: x.code, identificatie: x.identificatie, ligt_in_provincie_naam: x.ligtInProvincieNaam, ligt_in_provincie_code: x.ligtInProvincieCode, ligt_in_land_naam: x.ligtInLandNaam, ligt_in_land_code: x.ligtInLandCode, bbox: x.bbox, centroid: x.centroid, ...(x.geometry ? { geometry: x.geometry } : {}) },
+        `${x.niveau} — code ${x.code}`.trim(),
+      ));
+      const response = buildFormattedResponse({
+        summary: `${records.length} bestuurlijke gebieden`,
+        records,
+        provenance: prov("bestuurlijke_gebieden_search", out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), out.total),
+        outputFormat,
+        offset,
+        limit: effectiveLimit,
+        total: out.total,
+        access_note: out.access_note,
+        verbose: singleConnectorVerbose({ enabled: verbose, connector: "bestuurlijke_gebieden", endpoint: out.endpoint, responseTimeMs }),
+      });
+      return toMcpToolPayload(response);
+    } catch (e) {
+      return toMcpToolPayload(mapSourceError(e, "PDOK Bestuurlijke Gebieden", "https://api.pdok.nl/kadaster/bestuurlijkegebieden/ogc/v1"));
+    }
+  });
+
+  server.registerTool("brk_kadastrale_kaart_search", {
+    description: "Search Dutch cadastral parcels and map objects (BRK Kadastrale Kaart) via PDOK OGC API Features. bbox-driven (EPSG:28992). Collections: perceel, kadastralegrens, openbareruimtenaam, bebouwing, nummeraanduidingreeks. Returns kadastrale aanduiding (gemeente/sectie/perceelnummer), grootte, bbox/centroid and optional GeoJSON geometry.",
+    inputSchema: {
+      collectie: z.enum(["perceel", "kadastralegrens", "openbareruimtenaam", "bebouwing", "nummeraanduidingreeks"]).default("perceel").describe("BRK collection to query."),
+      bbox: z.string().describe("Required RD New (EPSG:28992) bounding box 'minx,miny,maxx,maxy'. Keep it small; this API is bbox-driven."),
+      includeGeometry: z.boolean().default(false).describe("Include full GeoJSON geometry. Needed for outputFormat=geojson."),
+      top: z.number().int().min(1).max(config.limits.maxRows).default(50),
+      ...paginationInputSchema,
+      outputFormat: outputFormatSchema,
+      verbose: z.boolean().default(false),
+      dryRun: z.boolean().default(false),
+    },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ collectie, bbox, includeGeometry, top, offset, limit, outputFormat, verbose, dryRun }) => {
+    try {
+      const effectiveLimit = limit ?? top;
+      const fetchRows = Math.min(config.limits.maxRows, Math.max(top, offset + effectiveLimit));
+      if (dryRun) {
+        return dryRunPayload({ connector: "brk_kadastrale_kaart", url: "https://api.pdok.nl/kadaster/brk-kadastrale-kaart/ogc/v1", params: { collectie, bbox, limit: fetchRows } });
+      }
+      const started = Date.now();
+      const out = await brkKadastraleKaart.search({ collectie, bbox, includeGeometry, rows: fetchRows });
+      const responseTimeMs = Date.now() - started;
+      const records = out.items.map((x) => record(
+        "brk_kadastrale_kaart",
+        x.title,
+        x.url,
+        { id: x.id, collectie: x.collectie, kadastrale_aanduiding: x.kadastraleAanduiding, kadastrale_gemeente: x.kadastraleGemeente, sectie: x.sectie, perceelnummer: x.perceelnummer, kadastrale_grootte_m2: x.kadastraleGrootteM2, tekst: x.tekst, bronhouder: x.bronhouder, bbox: x.bbox, centroid: x.centroid, ...(x.geometry ? { geometry: x.geometry } : {}) },
+        x.kadastraleAanduiding ?? x.collectie,
+      ));
+      const response = buildFormattedResponse({
+        summary: `${records.length} BRK objecten`,
+        records,
+        provenance: prov("brk_kadastrale_kaart_search", out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), out.total),
+        outputFormat,
+        offset,
+        limit: effectiveLimit,
+        total: out.total,
+        access_note: out.access_note,
+        verbose: singleConnectorVerbose({ enabled: verbose, connector: "brk_kadastrale_kaart", endpoint: out.endpoint, responseTimeMs }),
+      });
+      return toMcpToolPayload(response);
+    } catch (e) {
+      return toMcpToolPayload(mapSourceError(e, "PDOK BRK Kadastrale Kaart", "https://api.pdok.nl/kadaster/brk-kadastrale-kaart/ogc/v1"));
+    }
+  });
+
+  server.registerTool("bron_ongevallen_search", {
+    inputSchema: {
+      bbox: z.string().optional().describe("RD New (EPSG:28992) bounding box 'minx,miny,maxx,maxy'. REQUIRED — searching the full dataset is not allowed. Example: '190000,442000,195000,445000'."),
+      jaar: z.enum(["2022", "2023", "2024", "2022_2024"]).optional().default("2024").describe("Accident year table. '2022_2024' is the combined three-year set."),
+      afloop: z.enum(["letsel", "dodelijk", "ums", "all"]).optional().default("all").describe("Severity filter: letsel (injury), dodelijk (fatal), ums (material damage only), all."),
+      gemeente: z.string().optional().describe("Optional municipality substring filter on the gemeente field."),
+      query: z.string().optional().describe("Optional substring filter on street/place/municipality (straatnaam/woonplaats/gemeente). Do NOT pass full questions."),
+      top: z.number().int().min(1).max(config.limits.maxRows).default(20),
+      ...paginationInputSchema,
+      outputFormat: outputFormatSchema,
+      verbose: z.boolean().default(false),
+      dryRun: z.boolean().default(false),
+    },
+    description: "Search Dutch road traffic accidents (Rijkswaterstaat BRON, verkeersongevallen) via WFS GetFeature within an EPSG:28992 bbox. Returns severity (afloop), crash type (aard), involved vehicle types, location and RD coordinates as GeoJSON-capable records. Keywords: verkeersongeval, ongeval, letsel, dodelijk, aanrijding.",
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ bbox, jaar, afloop, gemeente, query, top, offset, limit, outputFormat, verbose, dryRun }) => {
+    try {
+      const effectiveLimit = limit ?? top;
+      const fetchRows = Math.min(config.limits.maxRows, Math.max(top, offset + effectiveLimit));
+      if (dryRun) return dryRunPayload({ connector: "bron_ongevallen", url: "https://geo.rijkswaterstaat.nl/services/ogc/gdr/verkeersongevallen_nederland/ows", params: { bbox: bbox ?? "", jaar: jaar ?? "2024", afloop: afloop ?? "all", count: fetchRows } });
+      const started = Date.now();
+      const out = await bronOngevallen.search({ bbox, jaar: jaar ?? "2024", afloop: afloop ?? "all", gemeente, query, rows: fetchRows });
+      const responseTimeMs = Date.now() - started;
+      const records = out.items.map((x) => record(
+        "bron_ongevallen",
+        x.title,
+        x.url,
+        { id: x.id, jaar: x.jaar, afloop: x.afloop, aardOngeval: x.aardOngeval, aantalPartijen: x.aantalPartijen, vervoerswijzen: x.vervoerswijzen, straatnaam: x.straatnaam, woonplaats: x.woonplaats, gemeente: x.gemeente, provincie: x.provincie, maximumSnelheid: x.maximumSnelheid, rd: x.rd },
+        `${x.afloop} — ${x.aardOngeval} — ${x.gemeente}`.trim(),
+        String(x.jaar ?? ""),
+      ));
+      const response = buildFormattedResponse({
+        summary: `${records.length} verkeersongevallen`,
+        records,
+        provenance: prov("bron_ongevallen_search", out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), out.total),
+        outputFormat,
+        offset,
+        limit: effectiveLimit,
+        total: out.total,
+        access_note: out.access_note,
+        verbose: singleConnectorVerbose({ enabled: verbose, connector: "bron_ongevallen", endpoint: out.endpoint, responseTimeMs }),
+      });
+      return toMcpToolPayload(response);
+    } catch (e) {
+      return toMcpToolPayload(mapSourceError(e, "BRON Verkeersongevallen (Rijkswaterstaat WFS)", "https://geo.rijkswaterstaat.nl/services/ogc/gdr/verkeersongevallen_nederland/ows"));
+    }
+  });
+
+  server.registerTool("nza_zorgbeeld_search", {
+    description: "Search current NZa Zorgbeeld waiting times for Dutch hospital / medical-specialist (MSZ) care. Filter by keywords (care provider, location, specialism, treatment, city), KVK number, and treatment type. Returns care provider, specialism, waiting time in days and reference date (peildatum).",
+    inputSchema: {
+      query: z.string().optional().describe("Optional keywords, substring-matched on care provider, location, specialism, treatment or city. Examples: 'orthopedie', 'Radboudumc', 'staaroperatie'. Do NOT pass full questions."),
+      kvk: z.string().optional().describe("Optional KVK number of the care provider to narrow server-side (digits only). Example: '41055629'."),
+      treatmentType: z.enum(["Behandeling", "Polikliniekbezoek", "Diagnostiek"]).optional().describe("Optional treatment type filter."),
+      top: z.number().int().min(1).max(config.limits.maxRows).default(20),
+      ...paginationInputSchema,
+      outputFormat: outputFormatSchema,
+      verbose: z.boolean().default(false),
+      dryRun: z.boolean().default(false),
+    },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ query, kvk, treatmentType, top, offset, limit, outputFormat, verbose, dryRun }) => {
+    try {
+      const effectiveLimit = limit ?? top;
+      const fetchRows = Math.min(config.limits.maxRows, Math.max(top, offset + effectiveLimit));
+      if (dryRun) return dryRunPayload({ connector: "nza_zorgbeeld", url: "https://zorgbeeld.nza.nl/openapi/WaitingTimeMSZ", params: { ...(kvk ? { KVKNummer: kvk } : {}), ...(query ? { q: query } : {}), ...(treatmentType ? { treatmentType } : {}), rows: fetchRows } });
+      const started = Date.now();
+      const out = await nzaZorgbeeld.search({ query, kvk, treatmentType, rows: fetchRows });
+      const responseTimeMs = Date.now() - started;
+      const records = out.items.map((x) => record("nza_zorgbeeld", String(x.title), String(x.url), x as unknown as Record<string, unknown>, `${x.specialism} — ${x.waitingTimeDays ?? "n.v.t."} dagen wachttijd`, String(x.date)));
+      const response = buildFormattedResponse({
+        summary: `${records.length} NZa wachttijden`,
+        records,
+        provenance: prov("nza_zorgbeeld_search", out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), out.total),
+        outputFormat,
+        offset,
+        limit: effectiveLimit,
+        total: out.total,
+        access_note: out.access_note,
+        verbose: singleConnectorVerbose({ enabled: verbose, connector: "nza_zorgbeeld", endpoint: out.endpoint, responseTimeMs }),
+      });
+      return toMcpToolPayload(response);
+    } catch (e) { return toMcpToolPayload(mapSourceError(e, "NZa Zorgbeeld", "https://zorgbeeld.nza.nl")); }
+  });
+
+server.registerTool(
+  "overheidsorganisaties_search",
+  {
+    description:
+      "Search the Dutch government organisation register (ROO / TOOI): find agencies, municipalities, provinces, ministries, water authorities and ZBOs by name. Returns organisation name, organisation type, TOOI URI, website, phone and visiting address. Utility for cross-source linking (name -> canonical TOOI id).",
+    inputSchema: {
+      query: z
+        .string()
+        .describe("Name substring of the government organisation, e.g. 'Amsterdam' or 'Kadaster'. Leave empty to browse the full register."),
+      type: z
+        .string()
+        .optional()
+        .describe("Optional TOOI type URI filter, e.g. https://identifier.overheid.nl/tooi/def/ont/Gemeente"),
+      enrich: z
+        .boolean()
+        .default(true)
+        .describe("Enrich each hit with contact + visiting address (extra API calls; auto-skipped above 15 hits)."),
+      top: z.number().int().min(1).max(config.limits.maxRows).default(20),
+      ...paginationInputSchema,
+      outputFormat: outputFormatSchema,
+      verbose: z.boolean().default(false),
+      dryRun: z.boolean().default(false),
+    },
+    annotations: TOOL_ANNOTATIONS,
+  },
+  async ({ query, type, enrich, top, offset, limit, outputFormat, verbose, dryRun }) => {
+    try {
+      const effectiveLimit = limit ?? top;
+      const fetchRows = Math.min(config.limits.maxRows, Math.max(top, offset + effectiveLimit));
+      if (dryRun)
+        return dryRunPayload({
+          connector: "overheidsorganisaties",
+          url: "https://api-organisaties.overheid.nl/v1/overheidsorganisaties",
+          params: { query, type: type ?? "", top: fetchRows },
+        });
+      const started = Date.now();
+      const out = await overheidsorganisaties.search({ query, rows: fetchRows, type, enrich });
+      const responseTimeMs = Date.now() - started;
+      const records = out.items.map((x) =>
+        record(
+          "overheidsorganisaties",
+          String(x.title ?? x.id ?? "Overheidsorganisatie"),
+          String(x.url ?? "https://organisaties.overheid.nl/"),
+          x as unknown as Record<string, unknown>,
+          String(x.organisatietype ?? ""),
+          "",
+        ),
+      );
+      const response = buildFormattedResponse({
+        summary: `${records.length} overheidsorganisaties`,
+        records,
+        provenance: prov(
+          "overheidsorganisaties_search",
+          out.endpoint,
+          out.params,
+          Math.min(effectiveLimit, Math.max(0, records.length - offset)),
+          out.total,
+        ),
+        outputFormat,
+        offset,
+        limit: effectiveLimit,
+        total: out.total,
+        access_note: out.access_note,
+        verbose: singleConnectorVerbose({
+          enabled: verbose,
+          connector: "overheidsorganisaties",
+          endpoint: out.endpoint,
+          responseTimeMs,
+        }),
+      });
+      return toMcpToolPayload(response);
+    } catch (e) {
+      return toMcpToolPayload(
+        mapSourceError(e, "Register Overheidsorganisaties", "https://organisaties.overheid.nl/"),
+      );
+    }
+  },
+);
+
+  server.registerTool("ovapi_departures", {
+    description: "Realtime public transport departures for a Dutch stop (halte). Requires a timingpointcode (haltecode). Returns line, destination, planned + expected departure time, delay minutes and live trip status. Tram/bus/metro/ferry.",
+    inputSchema: {
+      timingPointCode: z.string().describe("Halte timingpointcode (REQUIRED). Example: '32002646'. Look it up via 9292 or the OVapi/GTFS index (https://gtfs.ovapi.nl/nl/). Do NOT pass a stop name."),
+      line: z.string().optional().describe("Optional filter on public line number, e.g. '2' or '6'."),
+      top: z.number().int().min(1).max(config.limits.maxRows).default(20),
+      ...paginationInputSchema,
+      outputFormat: outputFormatSchema,
+      verbose: z.boolean().default(false),
+      dryRun: z.boolean().default(false),
+    },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ timingPointCode, line, top, offset, limit, outputFormat, verbose, dryRun }) => {
+    try {
+      const effectiveLimit = limit ?? top;
+      const fetchRows = Math.min(config.limits.maxRows, Math.max(top, offset + effectiveLimit));
+      if (dryRun) return dryRunPayload({ connector: "ovapi", url: `http://v0.ovapi.nl/tpc/${timingPointCode}`, params: { timingPointCode, line: line ?? "", top: fetchRows } });
+      const started = Date.now();
+      const out = await ovapi.search({ timingPointCode, line, rows: fetchRows });
+      const responseTimeMs = Date.now() - started;
+      const records = out.items.map((x) => record("ovapi", String(x.title ?? "Vertrek"), String(x.url ?? "http://v0.ovapi.nl"), x as unknown as Record<string, unknown>, `${String(x.line ?? "")} → ${String(x.destination ?? "")} · verwacht ${String(x.expectedDepartureTime ?? "")}${typeof x.delayMinutes === "number" && x.delayMinutes !== 0 ? ` (${x.delayMinutes > 0 ? "+" : ""}${String(x.delayMinutes)} min)` : ""}`, String(x.expectedDepartureTime ?? "")));
+      const response = buildFormattedResponse({
+        summary: `${records.length} OVapi vertrekken`,
+        records,
+        provenance: prov("ovapi_departures", out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), out.total),
+        outputFormat,
+        offset,
+        limit: effectiveLimit,
+        total: out.total,
+        access_note: out.access_note,
+        verbose: singleConnectorVerbose({ enabled: verbose, connector: "ovapi", endpoint: out.endpoint, responseTimeMs }),
+      });
+      return toMcpToolPayload(response);
+    } catch (e) { return toMcpToolPayload(mapSourceError(e, "OVapi", "http://v0.ovapi.nl")); }
+  });
+
+  server.registerTool("bro_ondergrond_search", {
+    description: "Query the Dutch Key Register of the Subsurface (BRO, Basisregistratie Ondergrond) public REST services. Pass a BRO object id (GMW/GLD/GMN/CPT/BHR, e.g. GMW000000036287) to fetch one subsurface object with location (WGS84 + RD), quality regime and registration metadata; pass a keyword to search the BRO reference-code domains. Keywords: grondwater, monitoringput, sondering, boring, ondergrond.",
+    inputSchema: {
+      query: z.string().describe("A BRO object id (GMW/GLD/GMN/CPT/BHR + digits, e.g. 'GMW000000036287') for a direct object lookup, OR a keyword to filter the BRO refcode domains (e.g. 'grondwater'). Do NOT pass full questions."),
+      top: z.number().int().min(1).max(config.limits.maxRows).default(20),
+      ...paginationInputSchema,
+      outputFormat: outputFormatSchema,
+      verbose: z.boolean().default(false),
+      dryRun: z.boolean().default(false),
+    },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ query, top, offset, limit, outputFormat, verbose, dryRun }) => {
+    try {
+      const effectiveLimit = limit ?? top;
+      const fetchRows = Math.min(config.limits.maxRows, Math.max(top, offset + effectiveLimit));
+      if (dryRun) return dryRunPayload({ connector: "bro", url: "https://publiek.broservices.nl/", params: { query, top: fetchRows } });
+      const started = Date.now();
+      const out = await broOndergrond.search({ query, rows: fetchRows });
+      const responseTimeMs = Date.now() - started;
+      const records = out.items.map((x) => record("bro", String(x.title ?? x.id ?? "BRO object"), String(x.url ?? "https://www.broloket.nl"), x as Record<string, unknown>, String(x.description ?? x.registration_status ?? ""), String(x.date ?? "")));
+      const response = buildFormattedResponse({
+        summary: `${records.length} BRO ondergrond resultaten`,
+        records,
+        provenance: prov("bro_ondergrond_search", out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), out.total),
+        outputFormat,
+        offset,
+        limit: effectiveLimit,
+        total: out.total,
+        access_note: out.access_note,
+        verbose: singleConnectorVerbose({ enabled: verbose, connector: "bro", endpoint: out.endpoint, responseTimeMs }),
+      });
+      return toMcpToolPayload(response);
+    } catch (e) {
+      return toMcpToolPayload(mapSourceError(e, "BRO Basisregistratie Ondergrond", "https://www.broloket.nl"));
+    }
+  });
+
+  server.registerTool(
+    "ned_energie_search",
+    {
+      description:
+        "Search NED.nl (Nationaal Energie Dashboard) energy generation/consumption per source (solar, wind, wind offshore, gas, nuclear) via /v1/utilizations. Returns capacity (kW), volume (kWh), utilization percentage and CO2 emission per time period, incl. forecasts. Requires NED_API_KEY.",
+      inputSchema: {
+        type: z.string().optional().describe("Energy source: alias (zon/solar, wind, wind_offshore, gas, kern/nuclear, verbruik) or NED code (0=all,1=wind,2=solar,17=wind offshore,18=fossil gas,20=nuclear,23=natural gas,59=electricity load). Default 2 (solar)."),
+        point: z.string().optional().describe("Area (point): 0=Netherlands, 1-12=provinces, 14=offshore. Default 0."),
+        granularity: z.string().optional().describe("Time interval: alias (10min/15min/hour/day/month/year) or code (3-8). Default hour (5)."),
+        activity: z.string().optional().describe("Operation: providing/opwek(1), consuming/verbruik(2), import(3), export(4). Default 1."),
+        classification: z.string().optional().describe("forecast(1) or current/measured(2). Default 2."),
+        timezone: z.string().optional().describe("Granularity timezone: utc(0) or cet(1). Default 1."),
+        validFrom: z.string().optional().describe("Lower bound on validfrom (YYYY-MM-DD or ISO), filter validfrom[after]."),
+        validTo: z.string().optional().describe("Upper bound on validfrom (YYYY-MM-DD or ISO), filter validfrom[before]."),
+        rows: z.number().int().min(1).max(config.limits.maxRows).default(20),
+      },
+      annotations: TOOL_ANNOTATIONS,
+    },
+    async ({ type, point, granularity, activity, classification, timezone, validFrom, validTo, rows }) => {
+      const apiKey = process.env[ENV_KEYS.NED_API_KEY];
+      if (!apiKey) {
+        return toMcpToolPayload(
+          errorResponse({
+            error: "not_configured",
+            message: "NED_API_KEY ontbreekt",
+            suggestion:
+              "Maak een persoonlijke API-sleutel aan via je account op https://ned.nl/nl/api en zet NED_API_KEY. De sleutel gaat mee als X-AUTH-TOKEN-header.",
+          }),
+        );
+      }
+      try {
+        const { NedSource } = await import("./sources/ned.js");
+        const src = new NedSource(config, apiKey);
+        const out = await src.search({ type, point, granularity, activity, classification, timezone, validFrom, validTo, rows });
+        const records = out.items.map((x) =>
+          record(
+            "ned",
+            x.title,
+            x.url,
+            x as unknown as Record<string, unknown>,
+            x.typeLabel ?? x.type,
+            x.validfrom,
+          ),
+        );
+        return toMcpToolPayload(
+          successResponse({
+            summary: `${records.length} NED energie-datapunten`,
+            records,
+            provenance: prov("ned_energie_search", out.endpoint, out.params, records.length, out.total),
+            access_note: out.access_note,
+          }),
+        );
+      } catch (e) {
+        return toMcpToolPayload(mapSourceError(e, "NED.nl Nationaal Energie Dashboard", "https://ned.nl/nl/api"));
+      }
+    },
+  );
+
+  server.registerTool(
+    "ep_online_energielabel",
+    {
+      description:
+        "Look up the registered energy label (energielabel) for a Dutch address from EP-Online (RVO national register). Returns energy class, registration/validity dates, building type, BAG ids, and energy indicators. Query by postcode+huisnummer or by BAG verblijfsobject id. Requires EP_ONLINE_API_KEY.",
+      inputSchema: {
+        postcode: z
+          .string()
+          .optional()
+          .describe("Postcode zoals '3511LX' (spaties worden verwijderd). Vereist samen met huisnummer, tenzij bagId is opgegeven."),
+        huisnummer: z
+          .union([z.string(), z.number()])
+          .optional()
+          .describe("Huisnummer. Vereist samen met postcode, tenzij bagId is opgegeven."),
+        huisletter: z.string().optional().describe("Optionele huisletter, bijv. 'A'."),
+        huisnummertoevoeging: z.string().optional().describe("Optionele huisnummertoevoeging."),
+        detailaanduiding: z.string().optional().describe("Optionele detailaanduiding."),
+        bagId: z
+          .string()
+          .optional()
+          .describe("BAG verblijfsobject-id. Gebruikt het AdresseerbaarObject-endpoint i.p.v. adreszoekopdracht."),
+        rows: z.number().int().min(1).max(config.limits.maxRows).default(20),
+      },
+      annotations: TOOL_ANNOTATIONS,
+    },
+    async ({ postcode, huisnummer, huisletter, huisnummertoevoeging, detailaanduiding, bagId, rows }) => {
+      const apiKey = process.env[ENV_KEYS.EP_ONLINE_API_KEY];
+      if (!apiKey) {
+        return toMcpToolPayload(
+          errorResponse({
+            error: "not_configured",
+            message: "EP_ONLINE_API_KEY ontbreekt",
+            suggestion:
+              "Vraag een API-key aan via https://www.ep-online.nl/ (EP-Online / RVO) en zet EP_ONLINE_API_KEY. De key wordt als kale waarde in de Authorization-header meegestuurd.",
+          }),
+        );
+      }
+      try {
+        const src = new EpOnlineSource(config, apiKey);
+        const out = await src.search({ postcode, huisnummer, huisletter, huisnummertoevoeging, detailaanduiding, bagId, rows });
+        const records = out.items.map((x) =>
+          record(
+            "ep_online",
+            x.title,
+            x.url,
+            x as unknown as Record<string, unknown>,
+            x.energieklasse,
+            x.registratiedatum,
+          ),
+        );
+        return toMcpToolPayload(
+          successResponse({
+            summary: `${records.length} EP-Online energielabel(s)`,
+            records,
+            provenance: prov("ep_online_energielabel", out.endpoint, out.params, records.length, out.total),
+            access_note: out.access_note,
+          }),
+        );
+      } catch (e) {
+        return toMcpToolPayload(mapSourceError(e, "EP-Online", "https://www.ep-online.nl"));
+      }
+    },
+  );
+
+  server.registerTool(
+    "ns_reisinformatie",
+    {
+      description:
+        "Query NS (Dutch Railways) Reisinformatie API for live train info. operation=disruptions (verstoringen/werkzaamheden, v3), departures (vertrektijden per station, v2), arrivals (aankomsttijden, v2), trips (reisadvies from/to station, v3). Realtime; requires NS_API_KEY.",
+      inputSchema: {
+        operation: z
+          .enum(["disruptions", "departures", "arrivals", "trips"])
+          .default("disruptions")
+          .describe("Welke NS-operatie: verstoringen, vertrektijden, aankomsttijden of reisadvies."),
+        station: z
+          .string()
+          .optional()
+          .describe("Stationcode (bijv. 'UT' Utrecht, 'ASD' Amsterdam CS, 'RTD' Rotterdam). Vereist voor departures/arrivals."),
+        fromStation: z.string().optional().describe("Vertrekstation (code) — vereist voor operation 'trips'."),
+        toStation: z.string().optional().describe("Aankomststation (code) — vereist voor operation 'trips'."),
+        dateTime: z
+          .string()
+          .optional()
+          .describe("Optioneel ISO-8601 tijdstip, bijv. '2026-07-03T08:00:00+02:00'. Default = nu."),
+        isActive: z.boolean().optional().describe("disruptions: alleen actieve verstoringen tonen (default true)."),
+        rows: z.number().int().min(1).max(config.limits.maxRows).default(20),
+      },
+      annotations: TOOL_ANNOTATIONS,
+    },
+    async ({ operation, station, fromStation, toStation, dateTime, isActive, rows }) => {
+      const apiKey = process.env[ENV_KEYS.NS_API_KEY];
+      if (!apiKey) {
+        return toMcpToolPayload(
+          errorResponse({
+            error: "not_configured",
+            message: "NS_API_KEY ontbreekt",
+            suggestion:
+              "Vraag een gratis subscription-key aan via https://apiportal.ns.nl/ (product 'Reisinformatie API') en zet NS_API_KEY. De sleutel gaat mee als header 'Ocp-Apim-Subscription-Key'.",
+          }),
+        );
+      }
+      try {
+        const { NsReisinformatieSource } = await import("./sources/ns-reisinformatie.js");
+        const src = new NsReisinformatieSource(config, apiKey);
+        const out = await src.search({ operation, station, fromStation, toStation, dateTime, isActive, rows });
+        const records = out.items.map((x) =>
+          record(
+            "ns",
+            String(x.title),
+            String(x.url),
+            x as unknown as Record<string, unknown>,
+            String(x.cause ?? x.status ?? x.disruptionType ?? x.trainCategory ?? ""),
+            String(x.date ?? ""),
+          ),
+        );
+        return toMcpToolPayload(
+          successResponse({
+            summary: `${records.length} NS ${operation}`,
+            records,
+            provenance: prov("ns_reisinformatie", out.endpoint, out.params, records.length, out.total),
+            access_note: out.access_note,
+          }),
+        );
+      } catch (e) {
+        return toMcpToolPayload(mapSourceError(e, "NS Reisinformatie", "https://www.ns.nl/reisinformatie"));
+      }
+    },
+  );
+
+  server.registerTool(
+    "dnb_statistics_search",
+    {
+      description:
+        "Fetch datapoints from the DNB Statistics API (De Nederlandsche Bank): interest rates, exchange rates, mortgages, pension fund and insurer balance sheets, balance of payments. Returns period, value and unit per observation. Requires DNB_API_KEY. Dataset paths are phased/behind My DNB login, so pass 'dataset' as a code, path, or full endpoint URL.",
+      inputSchema: {
+        dataset: z.string().describe("DNB dataset code, path or full endpoint URL. Examples: 'interest-rates', 'statistics/v1/exchange-rates', or a full https URL from the DNB Statistics API docs (api.portal.dnb.nl -> APIs -> DNB Statistics API)."),
+        query: z.string().optional().describe("Optional free-text filter, applied client-side to period/label/unit/value."),
+        startPeriod: z.string().optional().describe("Optional start period (SDMX-style), e.g. '2020' or '2020-01'."),
+        endPeriod: z.string().optional().describe("Optional end period, e.g. '2024-12'."),
+        rows: z.number().int().min(1).max(config.limits.maxRows).default(20),
+      },
+      annotations: TOOL_ANNOTATIONS,
+    },
+    async ({ dataset, query, startPeriod, endPeriod, rows }) => {
+      const apiKey = process.env[ENV_KEYS.DNB_API_KEY];
+      if (!apiKey) {
+        return toMcpToolPayload(
+          errorResponse({
+            error: "not_configured",
+            message: "DNB_API_KEY ontbreekt",
+            suggestion:
+              "Maak een gratis My DNB-account aan, abonneer op het product 'Public' via https://api.portal.dnb.nl en zet de subscription key als DNB_API_KEY. Zie de Starters Guide: https://api.portal.dnb.nl/startersguide.",
+          }),
+        );
+      }
+      try {
+        const { DnbStatisticsSource } = await import("./sources/dnb-statistics.js");
+        const src = new DnbStatisticsSource(config, apiKey);
+        const out = await src.search({ dataset, query, startPeriod, endPeriod, rows });
+        const records = out.items.map((x) =>
+          record(
+            "dnb",
+            x.title,
+            x.url,
+            { id: x.id, dataset: x.dataset, period: x.period, value: x.value, unit: x.unit, label: x.label, frequency: x.frequency },
+            x.unit ? `${x.value ?? ""} ${x.unit}`.trim() : String(x.value ?? ""),
+            x.period,
+          ),
+        );
+        return toMcpToolPayload(
+          successResponse({
+            summary: `${records.length} DNB datapunten (${dataset})`,
+            records,
+            provenance: prov("dnb_statistics_search", out.endpoint, out.params, records.length, out.total),
+            access_note: out.access_note,
+          }),
+        );
+      } catch (e) {
+        return toMcpToolPayload(mapSourceError(e, "DNB Statistics API", "https://www.dnb.nl/en/statistics/data-search/"));
+      }
+    },
+  );
+
 }
