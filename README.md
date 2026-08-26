@@ -277,6 +277,18 @@ Restart Claude Desktop after saving.
 | `MCP_TRANSPORT` | `stdio` | Transport mode: `stdio`, `sse`, or `streamable-http` (alternative to CLI flags) |
 | `LOG_LEVEL` | `info` | Pino log level (`debug`, `info`, `warn`, `error`, `silent`) |
 
+### Running behind a proxy
+
+Node's built-in `fetch` — which every connector uses — **ignores `HTTP_PROXY` / `HTTPS_PROXY`**. On a network that only allows outbound traffic through a proxy, requests therefore go out directly and individual sources start failing with confusing statuses (403, 406, timeouts) while `curl` to the same URL from the same machine succeeds, because curl *does* honour those variables.
+
+Start the server with Node's proxy support enabled:
+
+```bash
+NODE_USE_ENV_PROXY=1 HTTPS_PROXY=http://proxy.internal:3128 npm run start
+```
+
+Node ≥ 22 prints an "experimental" warning for this flag; it works. Symptom to recognise: some sources work and others do not, with no pattern in the code — that is an egress problem, not a connector problem.
+
 ## Source-specific details
 
 ### Tweede Kamer document retrieval
