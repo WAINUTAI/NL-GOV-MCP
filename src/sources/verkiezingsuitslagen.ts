@@ -1,5 +1,6 @@
 import type { AppConfig } from "../types.js";
 import { getJson, getText } from "../utils/http.js";
+import { placeKey, placeKeys } from "../utils/place-aliases.js";
 
 /**
  * Kiesraad — Databank Verkiezingsuitslagen.
@@ -302,7 +303,9 @@ export class VerkiezingsuitslagenSource {
     }
 
     const groups = national.Regios?.Regios ?? [];
-    const needle = normalizeName(gebied);
+    // The databank lists the official names, so "Den Haag" has to reach
+    // "'s-Gravenhage" and "Friesland" has to reach "Fryslân".
+    const needles = placeKeys(gebied);
     let matchId: string | undefined;
     let matchName = "";
     let niveau: GebiedUitslag["niveau"] = "gemeente";
@@ -312,7 +315,7 @@ export class VerkiezingsuitslagenSource {
       for (const option of group.Options ?? []) {
         const value = str(option.Value);
         if (value === "-" || !value) continue;
-        if (normalizeName(value) === needle) {
+        if (needles.has(placeKey(value))) {
           matchId = str(option.Id);
           matchName = value;
           niveau = groupName.startsWith("provincie") ? "provincie" : "gemeente";

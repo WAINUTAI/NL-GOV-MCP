@@ -1,5 +1,6 @@
 import type { AppConfig } from "../types.js";
 import { getJson, getText } from "../utils/http.js";
+import { placeVariants } from "../utils/place-aliases.js";
 
 function uniqBy<T>(items: T[], keyFn: (item: T) => string): T[] {
   const seen = new Set<string>();
@@ -248,6 +249,52 @@ export class DuoSource {
     return { records, total, endpoint: meta.url, params };
   }
 
+  /**
+   * Run a datastore query, retrying with the other spellings of a place name.
+   *
+   * DUO filters server-side on an exact string and spells one municipality more
+   * than one way — Den Haag is "'S-GRAVENHAGE" under PLAATSNAAM but
+   * "S GRAVENHAGE" (no apostrophe, no hyphen) under GEMEENTENAAM — so the right
+   * spelling cannot be known up front. Variants are tried in order, the caller's
+   * own spelling first, and the first attempt that returns rows wins. A query
+   * that already matches costs exactly one call; only one that finds nothing
+   * pays for the retries.
+   *
+   * Place fields advance in lockstep so a gemeente + plaats pair stays
+   * internally consistent instead of mixing spellings of the same city.
+   */
+  private async datastoreSearchByPlace(args: {
+    resourceId: string;
+    filters: Record<string, string | number>;
+    placeFields: Record<string, string>;
+    q?: string;
+    sort?: string;
+    limit: number;
+    offset?: number;
+  }): Promise<{
+    records: Array<Record<string, unknown>>;
+    total: number;
+    endpoint: string;
+    params: Record<string, string>;
+  }> {
+    const { placeFields, filters, ...rest } = args;
+    const variantsByField = Object.entries(placeFields).map(
+      ([field, value]) => [field, placeVariants(value).map((v) => v.toUpperCase())] as const,
+    );
+    const attempts = Math.max(1, ...variantsByField.map(([, variants]) => variants.length));
+
+    let last: Awaited<ReturnType<typeof this.datastoreSearch>> | undefined;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const attemptFilters = { ...filters };
+      for (const [field, variants] of variantsByField) {
+        attemptFilters[field] = variants[Math.min(attempt, variants.length - 1)];
+      }
+      last = await this.datastoreSearch({ ...rest, filters: attemptFilters });
+      if (last.records.length) return last;
+    }
+    return last as Awaited<ReturnType<typeof this.datastoreSearch>>;
+  }
+
   async getSchools(args: {
     name?: string;
     municipality?: string;
@@ -268,16 +315,17 @@ export class DuoSource {
     const resourceId = await this.resolveResourceId(resource);
 
     const filters: Record<string, string | number> = {};
-    const gemeente = upper(args.municipality);
-    const plaats = upper(args.place);
     const postcode = normalizePostcode(args.postcode);
-    if (gemeente) filters.GEMEENTENAAM = gemeente;
-    if (plaats) filters.PLAATSNAAM = plaats;
     if (postcode) filters.POSTCODE = postcode;
 
-    const out = await this.datastoreSearch({
+    const placeFields: Record<string, string> = {};
+    if (args.municipality?.trim()) placeFields.GEMEENTENAAM = args.municipality.trim();
+    if (args.place?.trim()) placeFields.PLAATSNAAM = args.place.trim();
+
+    const out = await this.datastoreSearchByPlace({
       resourceId,
       filters,
+      placeFields,
       q: args.name,
       sort: `${resource.nameField} asc`,
       limit: args.top,
@@ -347,18 +395,20 @@ export class DuoSource {
 
     const filters: Record<string, string | number> = {};
     if (args.year) filters.SCHOOLJAAR = args.year;
-    const gemeente = upper(args.municipality);
-    if (gemeente) filters["GEMEENTENAAM VESTIGING"] = gemeente;
     const onderwijstype = upper(args.onderwijstype);
     if (onderwijstype) filters["ONDERWIJSTYPE VO"] = onderwijstype;
+
+    const placeFields: Record<string, string> = {};
+    if (args.municipality?.trim()) placeFields["GEMEENTENAAM VESTIGING"] = args.municipality.trim();
 
     const sort = args.sortByScore
       ? "SLAGINGSPERCENTAGE desc"
       : "SCHOOLJAAR desc, SLAGINGSPERCENTAGE desc";
 
-    const out = await this.datastoreSearch({
+    const out = await this.datastoreSearchByPlace({
       resourceId,
       filters,
+      placeFields,
       q: args.school,
       sort,
       limit: args.top,

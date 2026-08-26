@@ -9,6 +9,7 @@ const stations = [
   { number: "NL10643", location: "Utrecht-Griftpark" },
   { number: "NL10418", location: "Rotterdam-Pleinweg" },
   { number: "NL49565", location: "Oude Meer-Aalsmeerderdijk" },
+  { number: "NL49020", location: "Den Haag-Bleriotlaan" },
 ];
 
 describe("matchStationsByPlace", () => {
@@ -35,6 +36,14 @@ describe("matchStationsByPlace", () => {
 
   it("returns nothing for empty input", () => {
     expect(matchStationsByPlace(stations, "  ")).toHaveLength(0);
+  });
+
+  it("finds a city under the name other sources publish it by", () => {
+    // These stations are labelled "Den Haag-…" while the Kiesraad and DUO call
+    // the same city "'s-Gravenhage"; both spellings have to land here.
+    expect(matchStationsByPlace(stations, "'s-Gravenhage").map((s) => s.number)).toEqual(["NL49020"]);
+    expect(matchStationsByPlace(stations, "Den Haag").map((s) => s.number)).toEqual(["NL49020"]);
+    expect(matchStationsByPlace(stations, "The Hague").map((s) => s.number)).toEqual(["NL49020"]);
   });
 });
 

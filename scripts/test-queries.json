@@ -741,12 +741,13 @@
   },
   {
     "id": "dnb_statistics_search",
-    "description": "DNB statistics search",
+    "description": "DNB statistics search (dataset path is version-stamped by DNB; refresh it from api.portal.dnb.nl if this 404s)",
     "tool": "dnb_statistics_search",
     "args": {
-      "dataset": "T1.3"
+      "dataset": "statisticsdata/v2026061000/exchange-rates-of-the-euro-and-gold-price-day",
+      "rows": 3
     },
-    "minRecords": 0,
+    "minRecords": 1,
     "requireEnv": [
       "DNB_API_KEY"
     ]

@@ -1,5 +1,6 @@
 import type { AppConfig } from "../types.js";
 import { getJson } from "../utils/http.js";
+import { placeKey, placeKeys } from "../utils/place-aliases.js";
 
 interface LuchtMeetnetMeasurement {
   station_number?: number | string;
@@ -95,34 +96,35 @@ async function fetchStationNames(): Promise<Map<string, string>> {
   return map;
 }
 
-/** Fold case and punctuation so "Den Haag" matches "'s-Gravenhage-Rebecquestraat" loosely. */
-function normalizePlace(value: string): string {
-  return value
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-}
-
 /**
  * Resolve a place name to its measuring stations.
  *
  * Station names are "City-Streetname" (e.g. "Utrecht-Griftpark"), so a prefix
  * match on the city part is both precise and forgiving. Falls back to a
  * contains-match so "Griftpark" or a full station name also resolves.
+ *
+ * Every name the place is known by is tried, caller's spelling first: these
+ * stations are labelled "Den Haag-\u2026" while the rest of the government publishes
+ * the same city as "'s-Gravenhage", so someone arriving from the Kiesraad or DUO
+ * spelling would otherwise find nothing here.
  */
 export function matchStationsByPlace(stations: StationEntry[], place: string): StationEntry[] {
-  const needle = normalizePlace(place);
-  if (!needle) return [];
+  const needles = [...placeKeys(place)].filter(Boolean);
+  if (!needles.length) return [];
 
-  const byCity = stations.filter((s) => {
-    const name = normalizePlace(s.location ?? "");
-    return name === needle || name.startsWith(`${needle} `);
-  });
-  if (byCity.length) return byCity;
+  for (const needle of needles) {
+    const byCity = stations.filter((s) => {
+      const name = placeKey(s.location ?? "");
+      return name === needle || name.startsWith(`${needle} `);
+    });
+    if (byCity.length) return byCity;
+  }
 
-  return stations.filter((s) => normalizePlace(s.location ?? "").includes(needle));
+  for (const needle of needles) {
+    const loose = stations.filter((s) => placeKey(s.location ?? "").includes(needle));
+    if (loose.length) return loose;
+  }
+  return [];
 }
 
 /** Cap on stations queried for one place — a city has a handful, not dozens. */
