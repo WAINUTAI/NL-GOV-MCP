@@ -14,7 +14,16 @@ interface RIVMItem {
 }
 
 // RIVM publishes data via GeoNetwork CSW, not CKAN.
-const RIVM_CSW_ENDPOINT = "https://data.rivm.nl/geonetwork/srv/eng/csw";
+/**
+ * RIVM moved its GeoNetwork catalogue from /geonetwork/ to /meta/.
+ *
+ * The old path answers 302 to an HTML search page, which the XML parser could
+ * make nothing of — so this connector had been returning its fallback on every
+ * call. That went unnoticed because the fallback fabricated a record, which kept
+ * the acceptance test green. Verified on the new host: a CQL search for "zorg"
+ * matches 32 records.
+ */
+const RIVM_CSW_ENDPOINT = "https://data.rivm.nl/meta/srv/eng/csw";
 const RIVM_DATA_BROWSE = "https://data.rivm.nl/data/";
 
 function scoreRivmItem(title: string, description: string, query: string): number {
@@ -143,26 +152,21 @@ export class RivmSource {
     }));
   }
 
+  /**
+   * The CSW endpoint was unreachable or answered with nothing usable.
+   *
+   * Previously synthesised a record titled "RIVM fallback discovery voor
+   * '<query>'" — real-looking enough to be rendered as data. Reporting zero
+   * results and why is both honest and lets a caller distinguish "no matches"
+   * from "source down" via the note.
+   */
   fallback(args: { query: string; rows: number }) {
-    const qSlug = args.query.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-    const items: RIVMItem[] = [
-      {
-        id: `rivm-fallback-${qSlug}`,
-        title: `RIVM fallback discovery voor '${args.query}'`,
-        description: "Live RIVM discovery endpoint gaf geen bruikbare response; deterministische fallbackrecord.",
-        type: "fallback",
-        url: "https://data.rivm.nl",
-        source: "fallback",
-        updated_at: "1970-01-01T00:00:00Z",
-      },
-    ];
-
     return {
-      items: items.slice(0, args.rows),
-      total: items.length,
-      endpoint: `${RIVM_CSW_ENDPOINT} (fallback)`,
+      items: [] as RIVMItem[],
+      total: 0,
+      endpoint: `${RIVM_CSW_ENDPOINT} (geen bruikbare respons)`,
       params: { q: args.query, rows: String(args.rows) },
-      access_note: "RIVM endpoints waren onbereikbaar/instabiel; fallbackrecord gebruikt.",
+      access_note: `Het RIVM CSW-endpoint was niet bereikbaar of gaf geen bruikbare respons voor '${args.query}'. Probeer het later opnieuw of zoek rechtstreeks op https://data.rivm.nl.`,
     };
   }
 }

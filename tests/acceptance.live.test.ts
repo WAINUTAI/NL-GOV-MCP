@@ -97,6 +97,9 @@ beforeAll(async () => {
   });
   sessionId = init.sessionId!;
   expect(sessionId).toBeDefined();
+  // The protocol expects this after initialize; without it the session stays
+  // half-open and the transport leaves promises dangling at teardown.
+  await post("/mcp", { jsonrpc: "2.0", method: "notifications/initialized" }, sessionId);
 }, 10_000);
 
 afterAll(async () => {

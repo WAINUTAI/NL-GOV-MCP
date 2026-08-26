@@ -63,11 +63,26 @@ export class KnmiSource {
     return { Authorization: this.apiKey };
   }
 
+  /**
+   * The curated catalogue, served without contacting KNMI.
+   *
+   * That is not a shortcut: the open-data API exposes no dataset-listing
+   * endpoint at all — `/open-data/v1/datasets` answers 404 ("HTTP method/URL
+   * path not found"), only per-dataset file listings exist. So this list is the
+   * only catalogue available.
+   *
+   * The note matters because this tool succeeds whether or not KNMI access
+   * works. Without it a green result here reads as "KNMI is reachable", while
+   * the tools that do call KNMI may be failing on an expired key or a rate
+   * limit. Use knmi_latest_files to actually exercise the API.
+   */
   async datasets() {
     return {
       items: KNMI_KNOWN_DATASETS,
       endpoint: "https://developer.dataplatform.knmi.nl/open-data-api (known dataset catalog)",
       params: {},
+      access_note:
+        "Samengestelde cataloguslijst uit deze server; KNMI wordt hiervoor niet bevraagd (de open-data API heeft geen dataset-overzicht endpoint). Een resultaat hier zegt dus niets over of je KNMI_API_KEY werkt — gebruik daarvoor knmi_latest_files.",
     };
   }
 
@@ -85,6 +100,7 @@ export class KnmiSource {
       items,
       endpoint: out.endpoint,
       params: { query: query ?? "" },
+      access_note: out.access_note,
     };
   }
 

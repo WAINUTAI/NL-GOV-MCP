@@ -31,23 +31,30 @@ describe("new source fallbacks", () => {
     expect(out.items[0].timestamp).toBe("1970-01-01T00:00:00Z");
   });
 
-  it("rechtspraak fallback emits ecli", () => {
+  // An unreachable source returns nothing and explains itself. These three used
+  // to synthesise a record — for Rechtspraak even one carrying the ECLI the
+  // caller typed, which reads as a ruling that was actually found.
+  it("rechtspraak fallback returns no results, with a link to search on", () => {
     const src = new RechtspraakSource(config);
     const out = src.fallback({ query: "ECLI:NL:HR:2024:123", rows: 1 });
-    expect(String(out.items[0].ecli)).toBe("ECLI:NL:HR:2024:123");
+    expect(out.items).toHaveLength(0);
+    expect(out.total).toBe(0);
+    expect(out.access_note).toContain("ECLI:NL:HR:2024:123");
+    expect(out.access_note).toMatch(/rechtspraak\.nl/);
   });
 
-  it("ndw fallback returns one result", () => {
-    const ndw = new NdwSource(config);
-    const ndwOut = ndw.fallback({ query: "doorstroming", rows: 1 });
-    expect(ndwOut.items.length).toBe(1);
+  it("ndw fallback returns no results, with an explanation", () => {
+    const out = new NdwSource(config).fallback({ query: "doorstroming", rows: 1 });
+    expect(out.items).toHaveLength(0);
+    expect(out.total).toBe(0);
+    expect(out.access_note).toContain("doorstroming");
   });
 
-  it("rivm fallback is deterministic", () => {
-    const src = new RivmSource(config);
-    const out = src.fallback({ query: "lucht", rows: 1 });
-    expect(out.items.length).toBe(1);
-    expect(String(out.items[0].id)).toContain("rivm-fallback-lucht");
+  it("rivm fallback returns no results, with an explanation", () => {
+    const out = new RivmSource(config).fallback({ query: "lucht", rows: 1 });
+    expect(out.items).toHaveLength(0);
+    expect(out.total).toBe(0);
+    expect(out.access_note).toMatch(/data\.rivm\.nl/);
   });
 
   it("sparql fallback and guardrails work", async () => {

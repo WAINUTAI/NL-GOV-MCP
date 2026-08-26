@@ -67,22 +67,22 @@ export class NdwSource {
     return this.fallback(args);
   }
 
+  /**
+   * Nothing usable came back from the discovery pages.
+   *
+   * This used to answer with a synthesised record titled "NDW fallback voor
+   * '<query>'". It carried a plausible url and date, so anything rendering
+   * records without reading the note showed it as a real NDW item. An empty
+   * result with an explanation is the honest shape, and the one the newer
+   * connectors use.
+   */
   fallback(args: { query: string; rows: number }) {
-    const fallback: NdwItem[] = [{
-      id: `ndw-fallback-${args.query.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
-      title: `NDW fallback voor '${args.query}'`,
-      description: "Geen live NDW feedresponse beschikbaar in deze omgeving.",
-      updated_at: "1970-01-01T00:00:00Z",
-      source: "fallback",
-      url: "https://www.ndw.nu",
-    }];
-
     return {
-      items: fallback.slice(0, args.rows),
-      total: fallback.length,
-      endpoint: `${NDW_DISCOVERY_PAGES[0]} (fallback)`,
+      items: [] as NdwItem[],
+      total: 0,
+      endpoint: `${NDW_DISCOVERY_PAGES[0]} (geen bruikbare respons)`,
       params: { q: args.query, rows: String(args.rows) },
-      access_note: "NDW open pages leverden geen bruikbare items; fallbackrecord gebruikt.",
+      access_note: `De open NDW-pagina's leverden geen bruikbare items op voor '${args.query}'. NDW publiceert vooral bulk-datafeeds; probeer een bredere zoekterm of raadpleeg https://www.ndw.nu rechtstreeks.`,
     };
   }
 }
