@@ -981,5 +981,46 @@
       "top": 5
     },
     "minRecords": 1
+  },
+  {
+    "id": "luchtmeetnet_plaats",
+    "description": "Luchtmeetnet metingen voor een plaats",
+    "tool": "luchtmeetnet_latest",
+    "args": {
+      "plaats": "Utrecht",
+      "rows": 5
+    },
+    "minRecords": 1,
+    "liveProfile": true
+  },
+  {
+    "id": "luchtmeetnet_geen_station",
+    "description": "Luchtmeetnet plaats zonder meetstation",
+    "tool": "luchtmeetnet_latest",
+    "args": {
+      "plaats": "Staphorst",
+      "rows": 5
+    },
+    "minRecords": 0
+  },
+  {
+    "id": "ask_router_luchtkwaliteit",
+    "description": "Router: luchtkwaliteitsvraag per stad",
+    "tool": "nl_gov_ask",
+    "args": {
+      "question": "Wat is de luchtkwaliteit in Utrecht?",
+      "top": 5
+    },
+    "minRecords": 1
+  },
+  {
+    "id": "ask_router_woningen_cbs",
+    "description": "Router: CBS-vraag die eerder 0 gaf",
+    "tool": "nl_gov_ask",
+    "args": {
+      "question": "Hoeveel woningen zijn er gebouwd in Rotterdam sinds 2020?",
+      "top": 5
+    },
+    "minRecords": 1
   }
 ]

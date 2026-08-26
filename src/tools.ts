@@ -148,6 +148,55 @@ export function extractPlaceName(text: string): string | undefined {
   return raw.length >= 3 ? raw : undefined;
 }
 
+/**
+ * Narrow a natural question down to CBS-searchable topic words.
+ *
+ * CBS table titles are national and topical ("Woningen; ...", "Bevolking; ..."):
+ * they never carry a municipality name and rarely a question word, so searching
+ * the full sentence — even after the generic rewriter — returns nothing. These
+ * candidates are only ever tried AFTER the existing ones come back empty, so a
+ * query that works today keeps its current result.
+ */
+export function cbsNarrowingCandidates(strictQuery: string, place?: string): string[] {
+  const placeTokens = new Set(
+    (place ?? "")
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(Boolean),
+  );
+  // Quantity/question words survive the shared rewriter (its frames only strip
+  // them directly before a verb) but never appear in a CBS table title.
+  const quantityWords = new Set([
+    "hoeveel", "aantal", "aantallen", "veel", "many", "much", "count",
+    "welke", "welk", "wat", "hoe", "waar", "wanneer", "wie",
+  ]);
+
+  const tokens = strictQuery
+    .toLowerCase()
+    .split(/\s+/)
+    .map((t) => t.replace(/[^\p{L}\p{N}-]/gu, ""))
+    .filter((t) => t.length > 2 && !quantityWords.has(t) && !placeTokens.has(t));
+
+  if (!tokens.length) return [];
+
+  const joined = tokens.join(" ");
+  // Longest token = most distinctive noun; the last resort when even the
+  // narrowed phrase finds nothing ("woningen gebouwd" -> "woningen").
+  const longest = [...tokens].sort((a, b) => b.length - a.length)[0];
+
+  return [...new Set([joined, longest])].filter(Boolean);
+}
+
+/** Map an air-quality component named in a (lowercased) question to a Luchtmeetnet formula. */
+export function extractLuchtComponent(lowered: string): string | undefined {
+  if (/\bno2\b|stikstofdioxide/.test(lowered)) return "NO2";
+  if (/\bpm\s?2[.,]?5\b|\bpm25\b/.test(lowered)) return "PM25";
+  if (/\bpm\s?10\b|fijn\s?stof/.test(lowered)) return "PM10";
+  if (/\bozon\b|\bo3\b/.test(lowered)) return "O3";
+  if (/\bso2\b|zwaveldioxide/.test(lowered)) return "SO2";
+  return undefined;
+}
+
 /** Map an election kind mentioned in a (lowercased) question to a Kiesraad code prefix. */
 export function extractVerkiezingHint(lowered: string): string | undefined {
   if (/tweede\s*kamer/.test(lowered)) return "TK";
@@ -957,9 +1006,9 @@ export function registerTools(server: McpServer): void {
     }
   });
 
-  server.registerTool("luchtmeetnet_latest", { inputSchema: { component: z.string().optional(), rows: z.number().int().min(1).max(config.limits.maxRows).default(20) }, description: "Fetch latest air quality measurements from Luchtmeetnet. Optionally filter by component (e.g. NO2, PM10, PM2.5, O3).", annotations: TOOL_ANNOTATIONS }, async ({ component, rows }) => {
+  server.registerTool("luchtmeetnet_latest", { inputSchema: { component: z.string().optional().describe("Optional component filter: NO2, PM10, PM25, O3, SO2, CO."), plaats: z.string().optional().describe("Optional place/city name, e.g. 'Utrecht' or 'Den Haag'. Resolved to that place's measuring stations; places without a station return an explanation instead of national data."), rows: z.number().int().min(1).max(config.limits.maxRows).default(20) }, description: "Fetch latest air quality measurements from Luchtmeetnet. Filter by place (city) and/or component (e.g. NO2, PM10, PM2.5, O3). Use for 'luchtkwaliteit', 'fijnstof', 'smog' questions.", annotations: TOOL_ANNOTATIONS }, async ({ component, plaats, rows }) => {
     try {
-      const out = await luchtmeetnet.latest({ component, rows });
+      const out = await luchtmeetnet.latest({ component, plaats, rows });
       const records = out.items.map((x) => record("luchtmeetnet", `${String(x.formula ?? "component")}-${String(x.station_name ?? x.station_number ?? "station")}`, "https://www.luchtmeetnet.nl", x, `${String(x.component ?? x.formula ?? "")}: ${String(x.value ?? "")} ${String(x.unit ?? "")}`, String(x.timestamp ?? x.timestamp_measured ?? "")));
       return toMcpToolPayload(successResponse({ summary: `${records.length} luchtmeetnet metingen`, records, provenance: prov("luchtmeetnet_latest", out.endpoint, out.params, records.length, out.total), access_note: (out as { access_note?: string }).access_note }));
     } catch {
@@ -1345,6 +1394,9 @@ export function registerTools(server: McpServer): void {
     const tuchtrechtTerms = ["tuchtrecht", "tuchtcollege", "tuchtcolleges", "tuchtklacht", "tuchtklachten", "tuchtzaak", "tuchtzaken", "berisping", "doorhaling", "tuchtrechter"];
     const gewasTerms = ["gewasperceel", "gewaspercelen", "landbouwperceel", "landbouwpercelen", "landbouwgrond", "akkerbouw", "gewas", "gewassen", "teelt", "grondgebruik", "agrarisch"];
     const catalogiTerms = ["productbeschrijving", "productbeschrijvingen", "samenwerkende catalogi", "gemeentelijke dienstverlening", "welke gemeenten bieden", "loket"];
+    // Only unambiguous air-quality words: bare "stikstof" is a parliamentary and
+    // agricultural topic, so it must keep routing to Tweede Kamer / CBS.
+    const luchtTerms = ["luchtkwaliteit", "luchtvervuiling", "luchtverontreiniging", "fijnstof", "fijn stof", "smog", "stikstofdioxide", "no2", "pm10", "pm2.5", "pm25", "ozon", "luchtmeetnet", "air quality"];
     const examTerms = ["examen", "examens", "eindexamen", "slagingspercentage", "geslaagd", "geslaagden", "gezakt", "examencijfer", "examencijfers", "examenresultaten"];
     const schoolTerms = ["school", "scholen", "basisschool", "basisscholen", "middelbare school", "middelbare scholen", "onderwijsinstelling", "onderwijsinstellingen", "vestiging", "vestigingen", "schooladres", "schooladressen"];
 
@@ -1781,6 +1833,43 @@ export function registerTools(server: McpServer): void {
         fallbackSteps.push("brp_gewaspercelen:search_failed");
       }
 
+      if (has(luchtTerms)) try {
+        const plaats = extractPlaceName(decodedQuestion);
+        const out = await timed("luchtmeetnet", () =>
+          luchtmeetnet.latest({ plaats, component: extractLuchtComponent(q), rows: top }),
+        );
+        const records = out.items.map((x) => record(
+          "luchtmeetnet",
+          `${String(x.formula ?? "component")}-${String(x.station_name ?? x.station_number ?? "station")}`,
+          "https://www.luchtmeetnet.nl",
+          x,
+          `${String(x.component ?? x.formula ?? "")}: ${String(x.value ?? "")} ${String(x.unit ?? "")}`.trim(),
+          String(x.timestamp ?? x.timestamp_measured ?? ""),
+        ));
+        if (records.length) {
+          return askSuccess({
+            summary: `Router: Luchtmeetnet${plaats ? ` ${plaats}` : ""} (${records.length} metingen)`,
+            records,
+            provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total),
+            access_note: (out as { access_note?: string }).access_note,
+            total: out.total,
+          });
+        }
+        // A place without a measuring station is a real answer, not an empty one.
+        const note = (out as { access_note?: string }).access_note;
+        if (note && plaats) {
+          return askSuccess({
+            summary: `Router: Luchtmeetnet — geen meetstation voor ${plaats}`,
+            records: [],
+            provenance: prov("nl_gov_ask", out.endpoint, out.params, 0, 0),
+            access_note: note,
+            total: 0,
+          });
+        }
+      } catch {
+        fallbackSteps.push("luchtmeetnet:search_failed");
+      }
+
       if (has(catalogiTerms)) try {
         const productQuery = makeStrictQuery(questionForSearch) || questionForSearch;
         const out = await timed("samenwerkende_catalogi", () =>
@@ -1862,6 +1951,11 @@ export function registerTools(server: McpServer): void {
         if (q.includes("inwoner") || q.includes("population")) candidates.push("bevolking");
         if (q.includes("opleidingsniveau") || q.includes("opleiding")) candidates.push("opleidingsniveau gemeenten");
         if (q.includes("werkloos")) candidates.push("werkloosheid");
+        // Appended last: progressively narrower topic terms for questions the
+        // full-sentence candidates cannot match (see cbsNarrowingCandidates).
+        candidates.push(
+          ...cbsNarrowingCandidates(makeStrictQuery(questionForSearch), extractPlaceName(decodedQuestion)),
+        );
 
         let out = await timed("cbs", () => cbs.searchTables(candidates[0] || questionForSearch, Math.max(top, 8)));
         let items = out.items;

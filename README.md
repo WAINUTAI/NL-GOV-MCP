@@ -18,7 +18,7 @@ Examples:
 - *"Wat besteedt provincie Overijssel aan?"* → TenderNed procurement notices and awards
 - *"Hoe stemde Tilburg bij de Tweede Kamerverkiezingen?"* → Kiesraad results per party
 - *"Toon alle rechtspraak over huurrecht dit jaar"* → Rechtspraak search with date-aware mapping
-- *"Wat is de luchtkwaliteit in Utrecht?"* → live Luchtmeetnet retrieval
+- *"Wat is de luchtkwaliteit in Utrecht?"* → live Luchtmeetnet measurements from that city’s own stations
 - *"Geef me de rijksbegroting voor onderwijs"* → Rijksbegroting search + chapter navigation
 
 ## How is this different from data.overheid.nl?
@@ -43,7 +43,7 @@ Examples:
 | PDOK / BAG | Geospatial search, BAG address registry, and authoritative per-address detail (oppervlakte, bouwjaar, gebruiksdoelen) via Kadaster Individuele Bevragingen REST API |
 | Rechtspraak | Court rulings via official `uitspraken.rechtspraak.nl` search backend |
 | RDW | Vehicle open data |
-| Luchtmeetnet | Live air quality measurements |
+| Luchtmeetnet | Live air quality measurements per city/station (NO2, PM10, PM2.5, O3) |
 | Rijkswaterstaat | Water data catalog + real-time measurements |
 | NDW | Traffic discovery/metadata |
 | ORI | Open Raadsinformatie discovery |
@@ -100,7 +100,7 @@ Bbox-driven sources (BRON verkeersongevallen, ruimtelijke plannen, BRP gewasperc
 
 ### Built-in resilience (zero-config)
 No setup required — the following run automatically in-process:
-- Per-connector circuit breaker (auto-disables after repeated failures, probes for recovery)
+- Per-connector circuit breaker (auto-disables after repeated failures, probes for recovery). A source whose primary endpoint is expected to fail over gives its fallback its own connector name, so a degraded primary cannot lock out the path that still works (see Luchtmeetnet).
 - Per-connector concurrency limiter (default 3 in-flight, overflow queued with timeout)
 - In-process HTTP response cache with hardcoded TTL per source category
 - Per-connector health counters (exposed via `/health/sources` on SSE transport)

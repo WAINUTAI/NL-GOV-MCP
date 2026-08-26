@@ -100,8 +100,11 @@
 ## Luchtmeetnet
 - `luchtmeetnet_latest`
   - authless latest measurements
+  - `plaats`: plaats-/stadsnaam (bv. 'Utrecht', 'Den Haag'). Wordt via `/stations` naar de meetstations van die plaats geresolved en per station bevraagd. Een plaats zonder meetstation levert een expliciete uitleg in `access_note` - geen landelijke cijfers alsof ze over die plaats gaan.
+  - `component`: NO2, PM10, PM25, O3, SO2, CO
   - verrijkte output: `location_name/component/value/unit/timestamp` + coordinaten
-  - fallback-measurement met vaste timestamp/waarde als endpoint niet bereikbaar is
+  - drie endpoints, drie connectors: `/measurements` (`luchtmeetnet`), `/lki` (`luchtmeetnet_lki`) en `/stations` (`luchtmeetnet_stations`). `/measurements` is met regelmaat 502; onder een gedeelde connectornaam sloten drie van die fouten de circuit breaker voor de hele bron, inclusief de werkende LKI-fallback en de stationlijst.
+  - fallback-measurement met vaste timestamp/waarde als geen enkel endpoint bereikbaar is
 
 ## RDW
 - `rdw_open_data_search`
@@ -178,6 +181,8 @@
   - specific-source routes run **before** the broad CBS/Tweede Kamer ones: elections, procurement, disciplinary law, agricultural parcels and per-school education
   - extracts a place name from the question ("in Tilburg", "gemeente Land van Cuijk") to drive gemeente-scoped sources; falls back with an explanatory `access_note` when the name does not resolve
   - education questions prefer real per-school records (`duo_schools` / `duo_exam_results`) and fall back to the DUO dataset catalogue only when those return nothing
+  - air-quality questions route to Luchtmeetnet for the place named in the question; only unambiguous terms trigger it, so bare "stikstof" keeps routing to Tweede Kamer / CBS
+  - CBS questions that find nothing with the full sentence retry with progressively narrower topic terms (municipality and quantity words removed - CBS table titles carry neither)
 
 ## Known limits / behavior notes
 - KNMI `knmi_warnings` (`waarschuwingen_nederland_48h`) and `knmi_earthquakes` (`aardbevingen_nederland`) try multiple dataset candidates and return a clear `access_note` if none currently resolves.

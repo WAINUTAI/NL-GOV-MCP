@@ -30,6 +30,10 @@ const CONNECTOR_CATEGORY: Record<string, ConnectorCategory> = {
   data_europa: "semi_live",
 
   luchtmeetnet: "live",
+  // Split from `luchtmeetnet` so the intermittently-502 /measurements endpoint
+  // cannot trip the breaker for its own fallback and reference data.
+  luchtmeetnet_lki: "live",
+  luchtmeetnet_stations: "static",
   ndw: "live",
   rdw: "live",
   rws_waterdata: "live",

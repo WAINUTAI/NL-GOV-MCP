@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { extractPlaceName, extractVerkiezingHint } from "../src/tools.js";
+import {
+  cbsNarrowingCandidates,
+  extractLuchtComponent,
+  extractPlaceName,
+  extractVerkiezingHint,
+} from "../src/tools.js";
 import { freeTextCql, freeTextCqlTerms, escapeSruValue } from "../src/utils/sru-cql.js";
 
 describe("extractPlaceName", () => {
@@ -77,5 +82,53 @@ describe("escapeSruValue", () => {
   it("escapes backslashes and quotes for quoted CQL values", () => {
     expect(escapeSruValue('Centraal "Tucht" College')).toBe('Centraal \\"Tucht\\" College');
     expect(escapeSruValue("a\\b")).toBe("a\\\\b");
+  });
+});
+
+describe("extractLuchtComponent", () => {
+  it("maps named components to Luchtmeetnet formulas", () => {
+    expect(extractLuchtComponent("wat is de no2-concentratie in amsterdam")).toBe("NO2");
+    expect(extractLuchtComponent("stikstofdioxide in rotterdam")).toBe("NO2");
+    expect(extractLuchtComponent("hoeveel fijnstof in utrecht")).toBe("PM10");
+    expect(extractLuchtComponent("pm 2.5 waarden")).toBe("PM25");
+    expect(extractLuchtComponent("ozon vandaag")).toBe("O3");
+  });
+
+  it("returns undefined for a general air-quality question", () => {
+    expect(extractLuchtComponent("wat is de luchtkwaliteit in utrecht")).toBeUndefined();
+  });
+
+  it("does not treat bare nitrogen policy as a component", () => {
+    expect(extractLuchtComponent("moties over stikstof")).toBeUndefined();
+  });
+});
+
+describe("cbsNarrowingCandidates", () => {
+  it("drops quantity words and the municipality, which never appear in CBS titles", () => {
+    expect(cbsNarrowingCandidates("hoeveel woningen gebouwd rotterdam", "Rotterdam")).toEqual([
+      "woningen gebouwd",
+      "woningen",
+    ]);
+  });
+
+  it("keeps the topic when no place was detected", () => {
+    expect(cbsNarrowingCandidates("hoeveel woningen gebouwd")).toEqual([
+      "woningen gebouwd",
+      "woningen",
+    ]);
+  });
+
+  it("handles a multi-word place name", () => {
+    expect(cbsNarrowingCandidates("werkloosheid bergen op zoom", "Bergen op Zoom")).toEqual([
+      "werkloosheid",
+    ]);
+  });
+
+  it("returns a single candidate when narrowing yields one token", () => {
+    expect(cbsNarrowingCandidates("hoeveel inwoners tilburg", "Tilburg")).toEqual(["inwoners"]);
+  });
+
+  it("returns nothing when only noise is left", () => {
+    expect(cbsNarrowingCandidates("hoeveel in rotterdam", "Rotterdam")).toEqual([]);
   });
 });
