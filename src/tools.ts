@@ -39,6 +39,10 @@ import { NedSource } from "./sources/ned.js";
 import { EpOnlineSource } from "./sources/ep-online.js";
 import { NsReisinformatieSource } from "./sources/ns-reisinformatie.js";
 import { DnbStatisticsSource } from "./sources/dnb-statistics.js";
+import { TenderNedSource } from "./sources/tenderned.js";
+import { KoopCollectieSource } from "./sources/koop-collecties.js";
+import { BrpGewasperceelSource } from "./sources/brp-gewaspercelen.js";
+import { VerkiezingsuitslagenSource } from "./sources/verkiezingsuitslagen.js";
 import { mapSourceError, nowIso, successResponse, toMcpToolPayload, errorResponse } from "./utils/response.js";
 import { parseTemporalRange } from "./utils/temporal.js";
 import { applyOutputFormat } from "./utils/output-format.js";
@@ -85,6 +89,11 @@ const nzaZorgbeeld = new NzaZorgbeeldSource(config);
 const overheidsorganisaties = new OverheidsorganisatiesSource(config);
 const ovapi = new OvapiSource(config);
 const broOndergrond = new BroOndergrondSource(config);
+const tenderned = new TenderNedSource(config);
+const tuchtrecht = new KoopCollectieSource(config, "tuchtrecht");
+const samenwerkendeCatalogi = new KoopCollectieSource(config, "samenwerkendecatalogi");
+const brpGewaspercelen = new BrpGewasperceelSource(config);
+const verkiezingsuitslagen = new VerkiezingsuitslagenSource(config);
 
 function record(source: string, title: string, canonical_url: string, data: Record<string, unknown>, snippet?: string, date?: string): MCPRecord {
   return { source_name: source, title, canonical_url, data, snippet, date };
@@ -123,6 +132,109 @@ function metadataScore(rec: MCPRecord): number {
   if (rec.title) score += 1;
   if (rec.canonical_url) score += 1;
   return score;
+}
+
+/**
+ * Lowercase words that bind the parts of a Dutch place name together:
+ * "Alphen aan den Rijn", "Bergen op Zoom", "Berkel en Rodenrijs". They only ever
+ * appear *between* capitalised words, so a match still has to end on one.
+ */
+const PLACE_INFIXES = "aan|bij|de|den|der|en|het|op|ten|ter|van|['’]t";
+
+/**
+ * One place name: a capitalised word followed by any number of further
+ * capitalised words, optionally bound by the infixes above.
+ *
+ * Shaped as `capital (infix* capital)*` rather than `capital (infix capital)*`,
+ * because the second half of a Dutch place name is not always introduced by an
+ * infix: "Den Helder" and "Den Haag" are two capitals in a row, and the earlier
+ * pattern stopped after "Den". That truncation was not harmless — "Den" prefix-
+ * matches the "Den Haag-…" Luchtmeetnet stations and resolves to De Bilt in the
+ * PDOK Locatieserver, so a question about Den Helder came back with Den Haag's
+ * air quality and parcels 89 km away.
+ *
+ * "'s-Hertogenbosch" and "'t Zand" open on an apostrophe, hence the prefix.
+ */
+const PLACE_CORE = `(?:['’]s-|['’]t\\s+)?[A-ZÀ-Þ][\\wÀ-ÿ'’-]*(?:(?:\\s+(?:${PLACE_INFIXES}))*\\s+[A-ZÀ-Þ][\\wÀ-ÿ'’-]*)*`;
+
+const GEMEENTE_PLACE_RE = new RegExp(`\\bgemeente\\s+(${PLACE_CORE})`);
+const IN_PLACE_RE = new RegExp(`\\bin\\s+(${PLACE_CORE})`);
+
+/**
+ * Pull a place name out of a raw (non-lowercased) question so bbox- and
+ * gemeente-scoped sources can be driven from natural language: "in Tilburg",
+ * "gemeente Land van Cuijk". Exported for router-intent tests.
+ *
+ * Over-capturing ("in Amsterdam en Utrecht") is preferred over truncating: an
+ * unresolvable name makes a source answer "not found", which is honest, while a
+ * truncated one silently resolves to a different place.
+ */
+export function extractPlaceName(text: string): string | undefined {
+  const gemeenteMatch = GEMEENTE_PLACE_RE.exec(text);
+  const inMatch = IN_PLACE_RE.exec(text);
+  const raw = (gemeenteMatch?.[1] ?? inMatch?.[1] ?? "").trim().replace(/[?.,;:!]+$/, "");
+  return raw.length >= 3 ? raw : undefined;
+}
+
+/**
+ * Narrow a natural question down to CBS-searchable topic words.
+ *
+ * CBS table titles are national and topical ("Woningen; ...", "Bevolking; ..."):
+ * they never carry a municipality name and rarely a question word, so searching
+ * the full sentence — even after the generic rewriter — returns nothing. These
+ * candidates are only ever tried AFTER the existing ones come back empty, so a
+ * query that works today keeps its current result.
+ */
+export function cbsNarrowingCandidates(strictQuery: string, place?: string): string[] {
+  const placeTokens = new Set(
+    (place ?? "")
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(Boolean),
+  );
+  // Quantity/question words survive the shared rewriter (its frames only strip
+  // them directly before a verb) but never appear in a CBS table title.
+  const quantityWords = new Set([
+    "hoeveel", "aantal", "aantallen", "veel", "many", "much", "count",
+    "welke", "welk", "wat", "hoe", "waar", "wanneer", "wie",
+  ]);
+
+  const tokens = strictQuery
+    .toLowerCase()
+    .split(/\s+/)
+    .map((t) => t.replace(/[^\p{L}\p{N}-]/gu, ""))
+    .filter((t) => t.length > 2 && !quantityWords.has(t) && !placeTokens.has(t));
+
+  if (!tokens.length) return [];
+
+  const joined = tokens.join(" ");
+  // Longest token = most distinctive noun; the last resort when even the
+  // narrowed phrase finds nothing ("woningen gebouwd" -> "woningen").
+  const longest = [...tokens].sort((a, b) => b.length - a.length)[0];
+
+  return [...new Set([joined, longest])].filter(Boolean);
+}
+
+/** Map an air-quality component named in a (lowercased) question to a Luchtmeetnet formula. */
+export function extractLuchtComponent(lowered: string): string | undefined {
+  if (/\bno2\b|stikstofdioxide/.test(lowered)) return "NO2";
+  if (/\bpm\s?2[.,]?5\b|\bpm25\b/.test(lowered)) return "PM25";
+  if (/\bpm\s?10\b|fijn\s?stof/.test(lowered)) return "PM10";
+  if (/\bozon\b|\bo3\b/.test(lowered)) return "O3";
+  if (/\bso2\b|zwaveldioxide/.test(lowered)) return "SO2";
+  return undefined;
+}
+
+/** Map an election kind mentioned in a (lowercased) question to a Kiesraad code prefix. */
+export function extractVerkiezingHint(lowered: string): string | undefined {
+  if (/tweede\s*kamer/.test(lowered)) return "TK";
+  if (/gemeenteraad/.test(lowered)) return "GR";
+  if (/provinciale\s*staten/.test(lowered)) return "PS";
+  if (/europe(es|se)\s*parlement|europese verkiezing/.test(lowered)) return "EP";
+  if (/eerste\s*kamer/.test(lowered)) return "EK";
+  if (/waterschap/.test(lowered)) return "WS";
+  const code = /\b([a-z]{2})\s?(\d{8})\b/.exec(lowered);
+  return code ? `${code[1].toUpperCase()}${code[2]}` : undefined;
 }
 
 export function shouldDeepenTweedeKamerQuery(question: string): boolean {
@@ -719,12 +831,75 @@ export function registerTools(server: McpServer): void {
     } catch(e){ return toMcpToolPayload(mapSourceError(e, "DUO", "https://onderwijsdata.duo.nl")); }
   });
 
-  server.registerTool("duo_schools", { description: "Search DUO school data by name, municipality, or school type.", inputSchema: { name: z.string().optional(), municipality: z.string().optional(), type: z.string().optional(), top: z.number().int().min(1).max(config.limits.maxRows).default(20) }, annotations: TOOL_ANNOTATIONS }, async ({ name, municipality, type, top }) => {
-    try { const out = await duo.getSchools({ name, municipality, type, top }); const records = out.items.map((x)=>record("duo", String(x.title ?? x.name ?? x.id ?? "School dataset"), String(x.url ?? "https://onderwijsdata.duo.nl"), x)); return toMcpToolPayload(successResponse({ summary: `${records.length} school-gerelateerde resultaten`, records, provenance: prov("duo_schools", out.endpoint, out.params, records.length, out.total) })); } catch(e){ return toMcpToolPayload(mapSourceError(e, "DUO", "https://onderwijsdata.duo.nl")); }
+  server.registerTool("duo_schools", {
+    description: "Find individual Dutch schools and education institutions (per vestiging) from DUO's address registers. Returns real school records — name, BRIN/instellingscode, address, municipality, denomination, phone, website — not dataset descriptions. Filter by municipality, place, postcode and sector (po/vo/mbo/ho); pass a school name as free-text search.",
+    inputSchema: {
+      name: z.string().optional().describe("School or institution name (free-text search across all fields). Example: 'Beatrix College', 'Sint Jozef'."),
+      municipality: z.string().optional().describe("Municipality (gemeente) name, exact match, case-insensitive input. Example: 'Tilburg'."),
+      place: z.string().optional().describe("Place (woonplaats) name, exact match, case-insensitive input. Example: 'Berkel-Enschot'."),
+      postcode: z.string().optional().describe("Postcode, with or without space. Example: '5041 EB' or '5041EB'."),
+      sector: z.enum(["po", "vo", "mbo", "ho"]).default("po").describe("Education sector: po = primary (basisonderwijs), vo = secondary, mbo = vocational, ho = higher education."),
+      top: z.number().int().min(1).max(config.limits.maxRows).default(20),
+      ...paginationInputSchema,
+      outputFormat: outputFormatSchema,
+      verbose: z.boolean().default(false),
+      dryRun: z.boolean().default(false),
+    },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ name, municipality, place, postcode, sector, top, offset, limit, outputFormat, verbose, dryRun }) => {
+    try {
+      const effectiveLimit = limit ?? top;
+      const fetchRows = Math.min(config.limits.maxRows, Math.max(top, offset + effectiveLimit));
+      if (dryRun) return dryRunPayload({ connector: "duo", url: `${config.endpoints.duoDatasets}/api/3/action/datastore_search`, params: { sector, name, municipality, place, postcode, limit: fetchRows } });
+      const started = Date.now();
+      const out = await duo.getSchools({ name, municipality, place, postcode, sector, top: fetchRows });
+      const responseTimeMs = Date.now() - started;
+      const records = out.items.map((x) => record(
+        "duo",
+        x.naam || "School",
+        x.url,
+        { naam: x.naam, instellingscode: x.instellingscode, vestigingscode: x.vestigingscode, bevoegd_gezag: x.bevoegdGezag, onderwijstype: x.onderwijstype, straat: x.straat, postcode: x.postcode, plaats: x.plaats, gemeente: x.gemeente, gemeentecode: x.gemeentecode, provincie: x.provincie, denominatie: x.denominatie, telefoon: x.telefoon, website: x.website },
+        [x.straat, x.postcode, x.plaats].filter(Boolean).join(", "),
+      ));
+      const response = buildFormattedResponse({ summary: `${records.length} onderwijsvestigingen (${sector})`, records, provenance: prov("duo_schools", out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), out.total), outputFormat, offset, limit: effectiveLimit, total: out.total, access_note: out.access_note, verbose: singleConnectorVerbose({ enabled: verbose, connector: "duo", endpoint: out.endpoint, responseTimeMs }) });
+      return toMcpToolPayload(response);
+    } catch (e) { return toMcpToolPayload(mapSourceError(e, "DUO", "https://onderwijsdata.duo.nl")); }
   });
 
-  server.registerTool("duo_exam_results", { description: "Search DUO exam result data by year, school name, or municipality.", inputSchema: { year: z.number().int().min(2000).max(2100).optional(), school: z.string().optional(), municipality: z.string().optional(), top: z.number().int().min(1).max(config.limits.maxRows).default(20) }, annotations: TOOL_ANNOTATIONS }, async ({ year, school, municipality, top }) => {
-    try { const out = await duo.getExamResults({ year, school, municipality, top }); const records = out.items.map((x)=>record("duo", String(x.title ?? x.name ?? x.id ?? "Exam results dataset"), String(x.url ?? "https://onderwijsdata.duo.nl"), x)); return toMcpToolPayload(successResponse({ summary: `${records.length} exam-resultaten bronnen`, records, provenance: prov("duo_exam_results", out.endpoint, out.params, records.length, out.total) })); } catch(e){ return toMcpToolPayload(mapSourceError(e, "DUO", "https://onderwijsdata.duo.nl")); }
+  server.registerTool("duo_exam_results", {
+    description: "Get per-school (per vestiging) secondary-education exam results from DUO: pass rate (slagingspercentage), number of candidates, passes/failures and average school/central exam marks. Filter by school year, municipality, school name and education type (VMBO/HAVO/VWO). Use sortByScore to rank schools by pass rate. Coverage: school years 2013-2017.",
+    inputSchema: {
+      year: z.number().int().min(2000).max(2100).optional().describe("School year. The dataset covers 2013-2017; a year outside that range returns 0 records with an explanation in access_note. Leave empty for all covered years, newest first."),
+      school: z.string().optional().describe("School name (free-text search). Example: 'Beatrix College'."),
+      municipality: z.string().optional().describe("Municipality of the school location, exact match, case-insensitive input. Example: 'Tilburg'."),
+      onderwijstype: z.string().optional().describe("Education type: VMBO, HAVO or VWO (exact match, case-insensitive input)."),
+      sortByScore: z.boolean().default(false).describe("Sort by pass rate (slagingspercentage) descending — use when asked which school scores best."),
+      top: z.number().int().min(1).max(config.limits.maxRows).default(20),
+      ...paginationInputSchema,
+      outputFormat: outputFormatSchema,
+      verbose: z.boolean().default(false),
+      dryRun: z.boolean().default(false),
+    },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ year, school, municipality, onderwijstype, sortByScore, top, offset, limit, outputFormat, verbose, dryRun }) => {
+    try {
+      const effectiveLimit = limit ?? top;
+      const fetchRows = Math.min(config.limits.maxRows, Math.max(top, offset + effectiveLimit));
+      if (dryRun) return dryRunPayload({ connector: "duo", url: `${config.endpoints.duoDatasets}/api/3/action/datastore_search`, params: { year, school, municipality, onderwijstype, sortByScore, limit: fetchRows } });
+      const started = Date.now();
+      const out = await duo.getExamResults({ year, school, municipality, onderwijstype, sortByScore, top: fetchRows });
+      const responseTimeMs = Date.now() - started;
+      const records = out.items.map((x) => record(
+        "duo",
+        `${x.school}${x.onderwijstype ? ` — ${x.onderwijstype}` : ""}`,
+        x.url,
+        { school: x.school, brin: x.brin, brin_vestiging: x.brinVestiging, gemeente: x.gemeente, provincie: x.provincie, onderwijstype: x.onderwijstype, schooljaar: x.schooljaar, examenkandidaten: x.examenkandidaten, geslaagden: x.geslaagden, gezakten: x.gezakten, slagingspercentage: x.slagingspercentage, gemiddeld_cijfer_schoolexamen: x.gemiddeldSchoolexamen, gemiddeld_cijfer_centraal_examen: x.gemiddeldCentraalExamen, gemiddeld_cijfer_cijferlijst: x.gemiddeldCijferlijst },
+        `${x.slagingspercentage ?? "?"}% geslaagd (${x.geslaagden ?? "?"}/${x.examenkandidaten ?? "?"})`,
+        x.schooljaar ? String(x.schooljaar) : undefined,
+      ));
+      const response = buildFormattedResponse({ summary: `${records.length} examenresultaten per vestiging`, records, provenance: prov("duo_exam_results", out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), out.total), outputFormat, offset, limit: effectiveLimit, total: out.total, access_note: out.access_note, verbose: singleConnectorVerbose({ enabled: verbose, connector: "duo", endpoint: out.endpoint, responseTimeMs }) });
+      return toMcpToolPayload(response);
+    } catch (e) { return toMcpToolPayload(mapSourceError(e, "DUO", "https://onderwijsdata.duo.nl")); }
   });
 
   server.registerTool("duo_rio_search", { description: "Search the DUO Register Instellingen en Opleidingen (RIO). Use institution or program names.", inputSchema: { query: z.string().describe("Institution or education program name. Examples: 'Universiteit Utrecht', 'geneeskunde', 'HBO informatica'. Do NOT pass full questions."), top: z.number().int().min(1).max(config.limits.maxRows).default(20) }, annotations: TOOL_ANNOTATIONS }, async ({ query, top }) => {
@@ -859,9 +1034,9 @@ export function registerTools(server: McpServer): void {
     }
   });
 
-  server.registerTool("luchtmeetnet_latest", { inputSchema: { component: z.string().optional(), rows: z.number().int().min(1).max(config.limits.maxRows).default(20) }, description: "Fetch latest air quality measurements from Luchtmeetnet. Optionally filter by component (e.g. NO2, PM10, PM2.5, O3).", annotations: TOOL_ANNOTATIONS }, async ({ component, rows }) => {
+  server.registerTool("luchtmeetnet_latest", { inputSchema: { component: z.string().optional().describe("Optional component filter: NO2, PM10, PM25, O3, SO2, CO."), plaats: z.string().optional().describe("Optional place/city name, e.g. 'Utrecht' or 'Den Haag'. Resolved to that place's measuring stations; places without a station return an explanation instead of national data."), rows: z.number().int().min(1).max(config.limits.maxRows).default(20) }, description: "Fetch latest air quality measurements from Luchtmeetnet. Filter by place (city) and/or component (e.g. NO2, PM10, PM2.5, O3). Use for 'luchtkwaliteit', 'fijnstof', 'smog' questions.", annotations: TOOL_ANNOTATIONS }, async ({ component, plaats, rows }) => {
     try {
-      const out = await luchtmeetnet.latest({ component, rows });
+      const out = await luchtmeetnet.latest({ component, plaats, rows });
       const records = out.items.map((x) => record("luchtmeetnet", `${String(x.formula ?? "component")}-${String(x.station_name ?? x.station_number ?? "station")}`, "https://www.luchtmeetnet.nl", x, `${String(x.component ?? x.formula ?? "")}: ${String(x.value ?? "")} ${String(x.unit ?? "")}`, String(x.timestamp ?? x.timestamp_measured ?? "")));
       return toMcpToolPayload(successResponse({ summary: `${records.length} luchtmeetnet metingen`, records, provenance: prov("luchtmeetnet_latest", out.endpoint, out.params, records.length, out.total), access_note: (out as { access_note?: string }).access_note }));
     } catch {
@@ -1232,15 +1407,26 @@ export function registerTools(server: McpServer): void {
         },
       );
 
-    const cbsTerms = ["cbs", "statistiek", "statistics", "bevolking", "population", "inwoners", "inflatie", "werkloos", "woning", "inkomen", "economie", "bbp", "gdp", "import", "export", "geboorte", "sterfte", "opleidingsniveau", "opleiding", "onderwijsniveau", "emissie", "emissies"];
-    const tkTerms = ["tweede kamer", "parlement", "motie", "moties", "amendement", "kamerstuk", "kamervraag", "debat", "stemming", "fractie", "commissie", "wetsvoorstel", "kamerlid", "minister-president", "premier"];
-    const obTerms = ["staatsblad", "staatscourant", "tractatenblad", "gemeenteblad", "bekendmaking", "verordening", "regeling", "officieel besluit", "stcrt", "gmb"];
+    const cbsTerms = ["cbs", "statistiek", "statistieken", "statistics", "bevolking", "population", "inwoner", "inwoners", "inflatie", "werkloos", "werkloosheid", "woning", "woningen", "inkomen", "inkomens", "economie", "bbp", "gdp", "import", "export", "geboorte", "geboortes", "sterfte", "opleidingsniveau", "opleiding", "onderwijsniveau", "emissie", "emissies"];
+    const tkTerms = ["tweede kamer", "parlement", "motie", "moties", "amendement", "amendementen", "kamerstuk", "kamerstukken", "kamervraag", "kamervragen", "debat", "debatten", "stemming", "stemmingen", "fractie", "fracties", "commissie", "commissies", "wetsvoorstel", "wetsvoorstellen", "kamerlid", "kamerleden", "minister-president", "premier"];
+    const obTerms = ["staatsblad", "staatscourant", "tractatenblad", "gemeenteblad", "bekendmaking", "bekendmakingen", "verordening", "verordeningen", "regeling", "regelingen", "officieel besluit", "officiele publicatie", "officiële publicatie", "stcrt", "gmb"];
     const rijkTerms = ["rijksoverheid", "kabinet", "minister", "ministerie", "beleid", "toespraak", "schoolvakantie", "schoolvakanties", "school holiday", "school holidays", "vakantie regio"];
-    const budgetTerms = ["begroting", "budget", "uitgaven", "spending", "rijksfinanci", "begrotingsartikel", "defensie-uitgaven"];
-    const duoTerms = ["school", "leerling", "student", "leraar", "teacher", "onderwijs", "education", "slagingspercentage", "examen", "diploma", "duo", "basisschool", "middelbare", "mbo", "hbo", "universiteit"];
+    const budgetTerms = ["begroting", "begrotingen", "rijksbegroting", "budget", "uitgaven", "spending", "rijksfinanci", "begrotingsartikel", "defensie-uitgaven"];
+    const duoTerms = ["school", "scholen", "leerling", "leerlingen", "student", "studenten", "leraar", "leraren", "docent", "docenten", "teacher", "onderwijs", "education", "slagingspercentage", "slagingspercentages", "examen", "examens", "diploma", "diplomas", "duo", "basisschool", "basisscholen", "middelbare", "mbo", "hbo", "universiteit", "universiteiten"];
     const weatherTerms = ["weer", "weather", "temperatuur", "rain", "regen", "wind", "storm", "klimaat", "earthquake", "aardbeving", "seismologie"];
     const apiTerms = ["welke api", "which api", "is er een api", "data over", "api heeft"];
     const rechtspraakTerms = ["jurisprudentie", "rechtspraak", "rechtszaak", "rechtszaken", "rechterlijke uitspraak", "rechterlijk", "ecli", "vonnis", "vonnissen", "arrest", "arresten", "beschikking", "gerechtshof", "rechtbank", "raad van state", "hoge raad", "gesanctioneerd", "sanctie", "sancties", "handhaving", "boete", "overtreding", "beroep", "bezwaar", "uitspraak", "tuchtrecht", "bestuursrecht"];
+    const verkiezingTerms = ["verkiezing", "verkiezingen", "verkiezingsuitslag", "verkiezingsuitslagen", "kiesraad", "opkomst", "opkomstpercentage", "gestemd", "stembureau", "stembureaus", "kiesgerechtigden", "election", "election results"];
+    const aanbestedingTerms = ["aanbesteding", "aanbestedingen", "tender", "tenders", "tenderned", "gunning", "gunningen", "gegund", "marktconsultatie", "offerteaanvraag", "overheidsopdracht", "overheidsopdrachten", "inkoop", "procurement"];
+    // Disciplinary law has its own collection; rechtspraak.nl does not carry it.
+    const tuchtrechtTerms = ["tuchtrecht", "tuchtcollege", "tuchtcolleges", "tuchtklacht", "tuchtklachten", "tuchtzaak", "tuchtzaken", "berisping", "doorhaling", "tuchtrechter"];
+    const gewasTerms = ["gewasperceel", "gewaspercelen", "landbouwperceel", "landbouwpercelen", "landbouwgrond", "akkerbouw", "gewas", "gewassen", "teelt", "grondgebruik", "agrarisch"];
+    const catalogiTerms = ["productbeschrijving", "productbeschrijvingen", "samenwerkende catalogi", "gemeentelijke dienstverlening", "welke gemeenten bieden", "loket"];
+    // Only unambiguous air-quality words: bare "stikstof" is a parliamentary and
+    // agricultural topic, so it must keep routing to Tweede Kamer / CBS.
+    const luchtTerms = ["luchtkwaliteit", "luchtvervuiling", "luchtverontreiniging", "fijnstof", "fijn stof", "smog", "stikstofdioxide", "no2", "pm10", "pm2.5", "pm25", "ozon", "luchtmeetnet", "air quality"];
+    const examTerms = ["examen", "examens", "eindexamen", "slagingspercentage", "geslaagd", "geslaagden", "gezakt", "examencijfer", "examencijfers", "examenresultaten"];
+    const schoolTerms = ["school", "scholen", "basisschool", "basisscholen", "middelbare school", "middelbare scholen", "onderwijsinstelling", "onderwijsinstellingen", "vestiging", "vestigingen", "schooladres", "schooladressen"];
 
     const scoreCbsTable = (item: Record<string, unknown>): number => {
       const title = String(item.Title ?? item.title ?? "").toLowerCase();
@@ -1575,11 +1761,237 @@ export function registerTools(server: McpServer): void {
         }
       }
 
+      // Specific-source routes run before the broad statistical/parliamentary
+      // ones: "verkiezingsuitslag in Tilburg" mentions a municipality, which the
+      // CBS branch would otherwise happily swallow.
+      if (has(verkiezingTerms)) try {
+        const gebied = extractPlaceName(decodedQuestion);
+        const out = await timed("verkiezingsuitslagen", () =>
+          verkiezingsuitslagen.uitslag({ verkiezing: extractVerkiezingHint(q), gebied }),
+        );
+        if (out.uitslag) {
+          const u = out.uitslag;
+          const records = u.partijen.slice(0, top).map((p) => record(
+            "verkiezingsuitslagen",
+            p.partij,
+            u.url,
+            { partij: p.partij, aantal_stemmen: p.aantalStemmen, percentage: p.percentage, aantal_zetels: p.aantalZetels, verkiezing: u.verkiezingCode, gebied: u.gebied, niveau: u.niveau, opkomst_percentage: u.opkomstPercentage },
+            `${p.aantalStemmen ?? "?"} stemmen (${p.percentage ?? "?"}%)`,
+            u.verkiezingDatum,
+          ));
+          if (records.length) {
+            return askSuccess({
+              summary: `Router: Verkiezingsuitslagen ${u.verkiezingNaam} — ${u.gebied} (${records.length} partijen)`,
+              records,
+              provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, u.partijen.length),
+              access_note: mergeAccessNotes(`Opkomst ${u.opkomstPercentage ?? "?"}%.`, out.access_note),
+              total: u.partijen.length,
+            });
+          }
+        }
+      } catch {
+        // One dead upstream must not sink the router — fall through to the next source.
+        fallbackSteps.push("verkiezingsuitslagen:search_failed");
+      }
+
+      if (has(aanbestedingTerms)) try {
+        const tenderQuery = makeKeywordQuery(questionForSearch, 5) || questionForSearch;
+        const out = await timed("tenderned", () =>
+          tenderned.search({ query: tenderQuery, rows: Math.min(top, 100), datumVanaf: temporal?.from, datumTot: temporal?.to }),
+        );
+        const records = out.items.map((x) => record(
+          "tenderned",
+          x.title,
+          x.url,
+          { publicatie_id: x.id, opdrachtgever: x.opdrachtgever, publicatie_datum: x.publicatieDatum, sluitings_datum: x.sluitingsDatum, type_publicatie: x.typePublicatie, procedure: x.procedure, type_opdracht: x.typeOpdracht, beschrijving: x.beschrijving },
+          `${x.opdrachtgever}${x.typePublicatie ? ` — ${x.typePublicatie}` : ""}`.trim(),
+          x.publicatieDatum,
+        ));
+        if (records.length) {
+          return askSuccess({ summary: `Router: TenderNed (${records.length} publicaties)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), access_note: out.access_note, total: out.total });
+        }
+      } catch {
+        fallbackSteps.push("tenderned:search_failed");
+      }
+
+      // Before the Rechtspraak route: disciplinary rulings are NOT on
+      // rechtspraak.nl, and "tuchtrecht" is one of its trigger words.
+      if (has(tuchtrechtTerms)) try {
+        const tuchtQuery = makeStrictQuery(questionForSearch) || questionForSearch;
+        const out = await timed("tuchtrecht", () =>
+          tuchtrecht.search({ query: tuchtQuery, date_from: temporal?.from, date_to: temporal?.to, maximumRecords: top }),
+        );
+        const records = out.items.map((raw) => {
+          const x = raw as import("./sources/koop-collecties.js").TuchtrechtItem;
+          return record(
+            "tuchtrecht",
+            x.title,
+            x.canonical_url,
+            { ecli: x.identifier, college: x.college, domein: x.domein, zaaknummer: x.zaaknummer, beslissing: x.beslissing, uitspraakdatum: x.uitspraakdatum, onderwerp: x.onderwerp },
+            [x.beslissing, x.onderwerp].filter(Boolean).join(" — ") || x.samenvatting,
+            x.uitspraakdatum,
+          );
+        });
+        if (records.length) {
+          return askSuccess({ summary: `Router: Tuchtrecht (${records.length} uitspraken)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), access_note: out.access_note, total: out.total });
+        }
+      } catch {
+        fallbackSteps.push("tuchtrecht:search_failed");
+      }
+
+      if (has(gewasTerms)) try {
+        const gemeente = extractPlaceName(decodedQuestion);
+        if (gemeente) {
+          const out = await timed("brp_gewaspercelen", () =>
+            brpGewaspercelen.search({ gemeente, categorie: "all", includeGeometry: false, rows: top }),
+          );
+          const records = out.items.map((x) => record(
+            "brp_gewaspercelen",
+            x.title,
+            x.url,
+            { gewas: x.gewas, categorie: x.categorie, jaar: x.jaar, oppervlakte_ha: x.oppervlakteHa, centroid: x.centroid },
+            `${x.categorie}${x.oppervlakteHa !== null ? ` — ${x.oppervlakteHa} ha` : ""}`,
+            x.jaar,
+          ));
+          if (records.length) {
+            return askSuccess({ summary: `Router: BRP Gewaspercelen ${gemeente} (${records.length} percelen)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), access_note: out.access_note, total: out.total });
+          }
+        }
+      } catch {
+        fallbackSteps.push("brp_gewaspercelen:search_failed");
+      }
+
+      if (has(luchtTerms)) try {
+        const plaats = extractPlaceName(decodedQuestion);
+        const out = await timed("luchtmeetnet", () =>
+          luchtmeetnet.latest({ plaats, component: extractLuchtComponent(q), rows: top }),
+        );
+        const records = out.items.map((x) => record(
+          "luchtmeetnet",
+          `${String(x.formula ?? "component")}-${String(x.station_name ?? x.station_number ?? "station")}`,
+          "https://www.luchtmeetnet.nl",
+          x,
+          `${String(x.component ?? x.formula ?? "")}: ${String(x.value ?? "")} ${String(x.unit ?? "")}`.trim(),
+          String(x.timestamp ?? x.timestamp_measured ?? ""),
+        ));
+        if (records.length) {
+          // Without a recognised place these are stations from all over the
+          // country. Saying so beats letting "luchtkwaliteit Utrecht" read as if
+          // the returned Oude Meer station were Utrecht's.
+          const scopeNote = plaats
+            ? undefined
+            : "Geen plaatsnaam in de vraag herkend; dit zijn landelijke metingen. Noem de plaats expliciet (bijv. 'luchtkwaliteit in Utrecht') voor lokale waarden.";
+          return askSuccess({
+            summary: `Router: Luchtmeetnet${plaats ? ` ${plaats}` : " — landelijk"} (${records.length} metingen)`,
+            records,
+            provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total),
+            access_note:
+              [scopeNote, (out as { access_note?: string }).access_note].filter(Boolean).join(" ") ||
+              undefined,
+            total: out.total,
+          });
+        }
+        // A place without a measuring station is a real answer, not an empty one.
+        const note = (out as { access_note?: string }).access_note;
+        if (note && plaats) {
+          return askSuccess({
+            summary: `Router: Luchtmeetnet — geen meetstation voor ${plaats}`,
+            records: [],
+            provenance: prov("nl_gov_ask", out.endpoint, out.params, 0, 0),
+            access_note: note,
+            total: 0,
+          });
+        }
+      } catch {
+        fallbackSteps.push("luchtmeetnet:search_failed");
+      }
+
+      if (has(catalogiTerms)) try {
+        const productQuery = makeStrictQuery(questionForSearch) || questionForSearch;
+        const out = await timed("samenwerkende_catalogi", () =>
+          samenwerkendeCatalogi.search({ query: productQuery, maximumRecords: top }),
+        );
+        const records = out.items.map((raw) => {
+          const x = raw as import("./sources/koop-collecties.js").SamenwerkendeCatalogiItem;
+          return record(
+            "samenwerkende_catalogi",
+            x.title,
+            x.canonical_url,
+            { organisatie: x.organisatie, organisatietype: x.organisatietype, gebied: x.gebied, doelgroep: x.doelgroep, samenvatting: x.samenvatting },
+            [x.organisatie, x.doelgroep].filter(Boolean).join(" — "),
+            x.gewijzigd,
+          );
+        });
+        if (records.length) {
+          return askSuccess({ summary: `Router: Samenwerkende Catalogi (${records.length} productbeschrijvingen)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), access_note: out.access_note, total: out.total });
+        }
+      } catch {
+        fallbackSteps.push("samenwerkende_catalogi:search_failed");
+      }
+
+      // Education: prefer real per-school records over the dataset catalogue when
+      // the question is about a concrete school, place or exam performance.
+      // schoolTerms/examTerms carry the plural forms duoTerms lacks ("basisscholen"),
+      // and word-boundary matching means those would otherwise miss entirely.
+      if (has(duoTerms) || has(schoolTerms) || has(examTerms)) try {
+        const gemeente = extractPlaceName(decodedQuestion);
+        const wantsExam = has(examTerms);
+        const wantsSchools = has(schoolTerms) || Boolean(gemeente);
+
+        if (wantsExam) {
+          const out = await timed("duo", () =>
+            duo.getExamResults({ municipality: gemeente, sortByScore: /best|hoogst|beste|top/.test(q), top }),
+          );
+          const records = out.items.map((x) => record(
+            "duo",
+            `${x.school}${x.onderwijstype ? ` — ${x.onderwijstype}` : ""}`,
+            x.url,
+            { school: x.school, brin: x.brin, gemeente: x.gemeente, onderwijstype: x.onderwijstype, schooljaar: x.schooljaar, examenkandidaten: x.examenkandidaten, geslaagden: x.geslaagden, slagingspercentage: x.slagingspercentage, gemiddeld_cijfer_centraal_examen: x.gemiddeldCentraalExamen },
+            `${x.slagingspercentage ?? "?"}% geslaagd`,
+            x.schooljaar ? String(x.schooljaar) : undefined,
+          ));
+          if (records.length) {
+            return askSuccess({ summary: `Router: DUO examenresultaten (${records.length} vestigingen)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), access_note: out.access_note, total: out.total });
+          }
+        }
+
+        if (wantsSchools) {
+          const sector = /middelbare|voortgezet|havo|vwo|vmbo|middelbaar/.test(q)
+            ? "vo"
+            : /\bmbo\b|beroepsonderwijs/.test(q)
+              ? "mbo"
+              : /\bhbo\b|universiteit|hogeschool|hoger onderwijs/.test(q)
+                ? "ho"
+                : "po";
+          const out = await timed("duo", () =>
+            duo.getSchools({ municipality: gemeente, sector, top }),
+          );
+          const records = out.items.map((x) => record(
+            "duo",
+            x.naam,
+            x.url,
+            { naam: x.naam, instellingscode: x.instellingscode, vestigingscode: x.vestigingscode, onderwijstype: x.onderwijstype, straat: x.straat, postcode: x.postcode, plaats: x.plaats, gemeente: x.gemeente, denominatie: x.denominatie, website: x.website },
+            [x.straat, x.postcode, x.plaats].filter(Boolean).join(", "),
+          ));
+          if (records.length) {
+            return askSuccess({ summary: `Router: DUO onderwijsvestigingen (${records.length} scholen, ${sector})`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), access_note: out.access_note, total: out.total });
+          }
+        }
+      } catch {
+        // Falls through to the DUO dataset-catalogue branch further down.
+        fallbackSteps.push("duo:per_school_search_failed");
+      }
+
       if (has(cbsTerms)) {
         const candidates = [makeCbsQuery(questionForSearch), questionForSearch];
         if (q.includes("inwoner") || q.includes("population")) candidates.push("bevolking");
         if (q.includes("opleidingsniveau") || q.includes("opleiding")) candidates.push("opleidingsniveau gemeenten");
         if (q.includes("werkloos")) candidates.push("werkloosheid");
+        // Appended last: progressively narrower topic terms for questions the
+        // full-sentence candidates cannot match (see cbsNarrowingCandidates).
+        candidates.push(
+          ...cbsNarrowingCandidates(makeStrictQuery(questionForSearch), extractPlaceName(decodedQuestion)),
+        );
 
         let out = await timed("cbs", () => cbs.searchTables(candidates[0] || questionForSearch, Math.max(top, 8)));
         let items = out.items;
@@ -2514,4 +2926,261 @@ server.registerTool(
     },
   );
 
+
+  server.registerTool("tenderned_aanbestedingen_search", {
+    description: "Search Dutch public procurement notices and awards (TenderNed) — every tender published by Rijk, provincies, gemeenten, waterschappen, zorg- and onderwijsinstellingen. Returns contracting authority, tender name, publication type (aankondiging/gunning/marktconsultatie/vroegtijdige beëindiging), procedure, contract type, closing date and description. Use for 'welke aanbestedingen', 'wat besteedt gemeente X aan', 'wie won opdracht Y'.",
+    inputSchema: {
+      query: z.string().optional().describe("Free-text search over tender name, description and contracting authority. Examples: 'fietsbrug', 'jeugdzorg', 'Provincie Overijssel'. Keywords only, not full questions."),
+      typeOpdracht: z.enum(["leveringen", "diensten", "werken", "all"]).default("all").describe("Contract type: leveringen (supplies), diensten (services), werken (works)."),
+      procedure: z.string().optional().describe("Optional procedure code. Known codes: OPE (openbaar), NOP (niet-openbaar), MAC (marktconsultatie), OZB (onderhands), CCD (concessie)."),
+      date_from: z.string().optional().describe("Publication date from (YYYY-MM-DD)."),
+      date_to: z.string().optional().describe("Publication date until (YYYY-MM-DD)."),
+      page: z.number().int().min(0).default(0).describe("Zero-based page number; TenderNed serves max 100 notices per page."),
+      top: z.number().int().min(1).max(100).default(20),
+      ...paginationInputSchema,
+      outputFormat: outputFormatSchema,
+      verbose: z.boolean().default(false),
+      dryRun: z.boolean().default(false),
+    },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ query, typeOpdracht, procedure, date_from, date_to, page, top, offset, limit, outputFormat, verbose, dryRun }) => {
+    try {
+      const effectiveLimit = limit ?? top;
+      // Not pre-clamped to 100: the source clamps and reports the cap in
+      // access_note, so a caller asking for more learns why it got 100.
+      const fetchRows = Math.max(top, offset + effectiveLimit);
+      if (dryRun) return dryRunPayload({ connector: "tenderned", url: "https://www.tenderned.nl/papi/tenderned-rs-tns/v2/publicaties", params: { search: query, typeOpdracht, procedure, publicatieDatumVanaf: date_from, publicatieDatumTot: date_to, page, size: Math.min(100, fetchRows) } });
+      const started = Date.now();
+      const out = await tenderned.search({ query, typeOpdracht, procedure, datumVanaf: date_from, datumTot: date_to, rows: fetchRows, page });
+      const responseTimeMs = Date.now() - started;
+      const records = out.items.map((x) => record(
+        "tenderned",
+        x.title,
+        x.url,
+        { publicatie_id: x.id, opdrachtgever: x.opdrachtgever, publicatie_datum: x.publicatieDatum, sluitings_datum: x.sluitingsDatum, type_publicatie: x.typePublicatie, type_publicatie_code: x.typePublicatieCode, procedure: x.procedure, type_opdracht: x.typeOpdracht, europees: x.europees, kenmerk: x.kenmerk, beschrijving: x.beschrijving },
+        `${x.opdrachtgever}${x.typePublicatie ? ` — ${x.typePublicatie}` : ""}`.trim(),
+        x.publicatieDatum,
+      ));
+      const response = buildFormattedResponse({ summary: `${records.length} TenderNed publicaties`, records, provenance: prov("tenderned_aanbestedingen_search", out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), out.total), outputFormat, offset, limit: effectiveLimit, total: out.total, access_note: out.access_note, verbose: singleConnectorVerbose({ enabled: verbose, connector: "tenderned", endpoint: out.endpoint, responseTimeMs }) });
+      return toMcpToolPayload(response);
+    } catch (e) {
+      return toMcpToolPayload(mapSourceError(e, "TenderNed", "https://www.tenderned.nl/aankondigingen/overzicht"));
+    }
+  });
+
+  server.registerTool("tenderned_aanbesteding_get", {
+    description: "Get the full detail of one TenderNed procurement notice by publicatieId (from tenderned_aanbestedingen_search): CPV codes, NUTS region, legal framework, procedure, contract start/end dates, award status and related publications. Set include_text to also extract the text of the official notice PDF.",
+    inputSchema: {
+      publicatieId: z.string().describe("TenderNed publication id, e.g. '437355'."),
+      include_text: z.boolean().default(false).describe("Extract the text layer of the official notice PDF."),
+      max_chars: z.number().int().min(1).max(200000).optional().describe("Cap on extracted PDF characters (default 12000)."),
+    },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ publicatieId, include_text, max_chars }) => {
+    try {
+      const out = await tenderned.get({ publicatieId, include_text, max_chars });
+      const x = out.item;
+      const records = [record(
+        "tenderned",
+        x.title,
+        x.url,
+        { ...x },
+        `${x.opdrachtgever}${x.typePublicatie ? ` — ${x.typePublicatie}` : ""}`.trim(),
+        x.publicatieDatum,
+      )];
+      return toMcpToolPayload(successResponse({
+        summary: `TenderNed publicatie ${x.id}: ${x.title}`,
+        records,
+        provenance: prov("tenderned_aanbesteding_get", out.endpoint, out.params, records.length, records.length),
+        access_note: out.access_note,
+      }));
+    } catch (e) {
+      return toMcpToolPayload(mapSourceError(e, "TenderNed", "https://www.tenderned.nl/aankondigingen/overzicht"));
+    }
+  });
+
+  server.registerTool("tuchtrecht_search", {
+    description: "Search Dutch disciplinary rulings (tuchtrecht.overheid.nl) for regulated professions: healthcare (medisch tuchtcollege), lawyers, notaries, accountants, veterinarians and bailiffs. Rechtspraak.nl does NOT contain these rulings — use this tool for 'tuchtklacht', 'tuchtcollege', 'berisping', 'doorhaling BIG-register'. Returns ECLI, college, decision, case number and a summary.",
+    inputSchema: {
+      query: z.string().optional().describe("Topic keywords, matched full-text. Examples: 'onjuiste diagnose', 'medicatiefout', 'geheimhoudingsplicht'. Keywords only, not full questions."),
+      college: z.string().optional().describe("Exact name of the disciplinary board, e.g. 'Centraal Tuchtcollege voor de Gezondheidszorg'. Exact match — leave empty when unsure."),
+      date_from: z.string().optional().describe("Published/modified from (YYYY-MM-DD)."),
+      date_to: z.string().optional().describe("Published/modified until (YYYY-MM-DD)."),
+      top: z.number().int().min(1).max(config.limits.maxRows).default(20),
+      ...paginationInputSchema,
+      outputFormat: outputFormatSchema,
+      verbose: z.boolean().default(false),
+      dryRun: z.boolean().default(false),
+    },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ query, college, date_from, date_to, top, offset, limit, outputFormat, verbose, dryRun }) => {
+    try {
+      const effectiveLimit = limit ?? top;
+      const fetchRows = Math.min(config.limits.maxRows, Math.max(top, offset + effectiveLimit));
+      if (dryRun) return dryRunPayload({ connector: "tuchtrecht", url: "https://repository.overheid.nl/sru", params: { query: `c.product-area==tuchtrecht${query ? ` AND ${query}` : ""}`, maximumRecords: fetchRows } });
+      const started = Date.now();
+      const out = await tuchtrecht.search({ query, organisatie: college, date_from, date_to, maximumRecords: fetchRows });
+      const responseTimeMs = Date.now() - started;
+      const records = out.items.map((raw) => {
+        const x = raw as import("./sources/koop-collecties.js").TuchtrechtItem;
+        return record(
+          "tuchtrecht",
+          x.title,
+          x.canonical_url,
+          { ecli: x.identifier, college: x.college, domein: x.domein, plaats: x.plaats, zaaknummer: x.zaaknummer, beslissing: x.beslissing, uitspraakdatum: x.uitspraakdatum, onderwerp: x.onderwerp, pdf_url: x.pdf_url },
+          [x.beslissing, x.onderwerp].filter(Boolean).join(" — ") || x.samenvatting,
+          x.uitspraakdatum,
+        );
+      });
+      const response = buildFormattedResponse({ summary: `${records.length} tuchtrechtuitspraken`, records, provenance: prov("tuchtrecht_search", out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), out.total), outputFormat, offset, limit: effectiveLimit, total: out.total, access_note: out.access_note, verbose: singleConnectorVerbose({ enabled: verbose, connector: "tuchtrecht", endpoint: out.endpoint, responseTimeMs }) });
+      return toMcpToolPayload(response);
+    } catch (e) {
+      return toMcpToolPayload(mapSourceError(e, "Tuchtrecht (KOOP SRU)", "https://tuchtrecht.overheid.nl"));
+    }
+  });
+
+  server.registerTool("samenwerkende_catalogi_search", {
+    description: "Search Samenwerkende Catalogi — the national index of products and services offered by Dutch municipalities, provinces and water authorities (paspoort aanvragen, gehandicaptenparkeerkaart, bijstandsuitkering, ...). Answers 'welke gemeenten bieden X aan' and 'wat biedt gemeente Y op gebied van Z'. Returns product title, responsible organisation, target audience and a summary.",
+    inputSchema: {
+      query: z.string().optional().describe("Product/service keywords, matched full-text. Examples: 'paspoort', 'hondenbelasting', 'schuldhulpverlening'."),
+      organisatie: z.string().optional().describe("Exact organisation name (gemeente/provincie/waterschap), e.g. 'Amsterdam'. Exact match."),
+      date_from: z.string().optional().describe("Last modified from (YYYY-MM-DD)."),
+      date_to: z.string().optional().describe("Last modified until (YYYY-MM-DD)."),
+      top: z.number().int().min(1).max(config.limits.maxRows).default(20),
+      ...paginationInputSchema,
+      outputFormat: outputFormatSchema,
+      verbose: z.boolean().default(false),
+      dryRun: z.boolean().default(false),
+    },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ query, organisatie, date_from, date_to, top, offset, limit, outputFormat, verbose, dryRun }) => {
+    try {
+      const effectiveLimit = limit ?? top;
+      const fetchRows = Math.min(config.limits.maxRows, Math.max(top, offset + effectiveLimit));
+      if (dryRun) return dryRunPayload({ connector: "samenwerkende_catalogi", url: "https://repository.overheid.nl/sru", params: { query: `c.product-area==samenwerkendecatalogi${query ? ` AND ${query}` : ""}`, maximumRecords: fetchRows } });
+      const started = Date.now();
+      const out = await samenwerkendeCatalogi.search({ query, organisatie, date_from, date_to, maximumRecords: fetchRows });
+      const responseTimeMs = Date.now() - started;
+      const records = out.items.map((raw) => {
+        const x = raw as import("./sources/koop-collecties.js").SamenwerkendeCatalogiItem;
+        return record(
+          "samenwerkende_catalogi",
+          x.title,
+          x.canonical_url,
+          { identifier: x.identifier, organisatie: x.organisatie, organisatietype: x.organisatietype, gebied: x.gebied, informatietype: x.informatietype, doelgroep: x.doelgroep, samenvatting: x.samenvatting },
+          [x.organisatie, x.doelgroep].filter(Boolean).join(" — "),
+          x.gewijzigd,
+        );
+      });
+      const response = buildFormattedResponse({ summary: `${records.length} productbeschrijvingen (Samenwerkende Catalogi)`, records, provenance: prov("samenwerkende_catalogi_search", out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), out.total), outputFormat, offset, limit: effectiveLimit, total: out.total, access_note: out.access_note, verbose: singleConnectorVerbose({ enabled: verbose, connector: "samenwerkende_catalogi", endpoint: out.endpoint, responseTimeMs }) });
+      return toMcpToolPayload(response);
+    } catch (e) {
+      return toMcpToolPayload(mapSourceError(e, "Samenwerkende Catalogi (KOOP SRU)", "https://www.samenwerkendecatalogi.nl"));
+    }
+  });
+
+  server.registerTool("brp_gewaspercelen_search", {
+    description: "Search Dutch agricultural parcels (BRP Gewaspercelen, RVO) — the crop grown on every registered farm parcel, with polygon, area and year. Query by gemeente (auto-converted to a bbox) or by an EPSG:28992 bbox, and filter on crop name, category (bouwland/grasland/natuurterrein/landschapselement/braakland) or year. Use for land use, nitrogen, water quality and agriculture questions.",
+    inputSchema: {
+      gemeente: z.string().optional().describe("Municipality name; resolved to a bbox via the PDOK Locatieserver. Example: 'Dronten'."),
+      bbox: z.string().optional().describe("RD New (EPSG:28992) bounding box 'minx,miny,maxx,maxy'. Takes precedence over gemeente."),
+      gewas: z.string().optional().describe("Crop name substring filter (client-side). Examples: 'mais', 'aardappel', 'tarwe'."),
+      categorie: z.enum(["bouwland", "grasland", "natuurterrein", "landschapselement", "braakland", "all"]).default("all").describe("Parcel category filter."),
+      jaar: z.number().int().min(2009).max(2100).optional().describe("Registration year (jaar) filter."),
+      includeGeometry: z.boolean().default(false).describe("Include the full GeoJSON polygon. Needed for outputFormat=geojson."),
+      top: z.number().int().min(1).max(config.limits.maxRows).default(20),
+      ...paginationInputSchema,
+      outputFormat: outputFormatSchema,
+      verbose: z.boolean().default(false),
+      dryRun: z.boolean().default(false),
+    },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ gemeente, bbox, gewas, categorie, jaar, includeGeometry, top, offset, limit, outputFormat, verbose, dryRun }) => {
+    try {
+      const effectiveLimit = limit ?? top;
+      const fetchRows = Math.min(config.limits.maxRows, Math.max(top, offset + effectiveLimit));
+      if (dryRun) return dryRunPayload({ connector: "brp_gewaspercelen", url: "https://service.pdok.nl/rvo/brpgewaspercelen/wfs/v1_0", params: { typeNames: "brpgewaspercelen:BrpGewas", bbox, gemeente, gewas, categorie, jaar, count: fetchRows } });
+      const started = Date.now();
+      const out = await brpGewaspercelen.search({ bbox, gemeente, gewas, categorie: categorie ?? "all", jaar, includeGeometry, rows: fetchRows });
+      const responseTimeMs = Date.now() - started;
+      const records = out.items.map((x) => record(
+        "brp_gewaspercelen",
+        x.title,
+        x.url,
+        { id: x.id, gewas: x.gewas, gewascode: x.gewascode, categorie: x.categorie, jaar: x.jaar, status: x.status, oppervlakte_m2: x.oppervlakteM2, oppervlakte_ha: x.oppervlakteHa, centroid: x.centroid, bbox: x.bbox, ...(x.geometry ? { geometry: x.geometry } : {}) },
+        `${x.categorie}${x.oppervlakteHa !== null ? ` — ${x.oppervlakteHa} ha` : ""}`,
+        x.jaar,
+      ));
+      const response = buildFormattedResponse({ summary: `${records.length} gewaspercelen`, records, provenance: prov("brp_gewaspercelen_search", out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), out.total), outputFormat, offset, limit: effectiveLimit, total: out.total, access_note: out.access_note, verbose: singleConnectorVerbose({ enabled: verbose, connector: "brp_gewaspercelen", endpoint: out.endpoint, responseTimeMs }) });
+      return toMcpToolPayload(response);
+    } catch (e) {
+      return toMcpToolPayload(mapSourceError(e, "BRP Gewaspercelen (PDOK WFS)", "https://service.pdok.nl/rvo/brpgewaspercelen/wfs/v1_0"));
+    }
+  });
+
+  server.registerTool("verkiezingsuitslagen_search", {
+    description: "Get Dutch election results per party from the Kiesraad databank (Databank Verkiezingsuitslagen): votes, percentage and seats, nationally or for one province or municipality, plus turnout (opkomst) and blank/invalid votes. Covers Tweede Kamer, Gemeenteraad, Provinciale Staten, Europees Parlement, Eerste Kamer, waterschappen and referenda. Use for 'hoe stemde gemeente X', 'uitslag verkiezingen', 'opkomst in Y'.",
+    inputSchema: {
+      verkiezing: z.string().optional().describe("Election code (e.g. 'TK20251029'), election kind ('TK', 'gemeenteraad', 'Europees Parlement') or empty for the most recent election."),
+      gebied: z.string().optional().describe("Municipality or province name for a regional result, e.g. 'Tilburg' or 'Overijssel'. Empty returns the national result."),
+      list_elections: z.boolean().default(false).describe("Return the list of available elections instead of a result."),
+      top: z.number().int().min(1).max(config.limits.maxRows).default(50),
+      ...paginationInputSchema,
+      outputFormat: outputFormatSchema,
+      verbose: z.boolean().default(false),
+      dryRun: z.boolean().default(false),
+    },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ verkiezing, gebied, list_elections, top, offset, limit, outputFormat, verbose, dryRun }) => {
+    try {
+      const effectiveLimit = limit ?? top;
+      if (dryRun) return dryRunPayload({ connector: "verkiezingsuitslagen", url: "https://www.verkiezingsuitslagen.nl/verkiezingen/detailJson", params: { verkiezing, gebied, list_elections } });
+      const started = Date.now();
+
+      if (list_elections) {
+        const listed = await verkiezingsuitslagen.listVerkiezingen();
+        const responseTimeMs = Date.now() - started;
+        const records = listed.items.map((x) => record(
+          "verkiezingsuitslagen",
+          `${x.naam} — ${x.datum}`,
+          x.url,
+          { code: x.code, soort: x.soort, naam: x.naam, datum: x.datum, opkomst: x.opkomst },
+          `Opkomst ${x.opkomst}`,
+          x.datum,
+        ));
+        return toMcpToolPayload(buildFormattedResponse({ summary: `${records.length} beschikbare verkiezingen`, records, provenance: prov("verkiezingsuitslagen_search", listed.endpoint, { list_elections: "true" }, records.length, records.length), outputFormat, offset, limit: effectiveLimit, total: records.length, access_note: "Overzicht van gepubliceerde verkiezingen in de Kiesraad-databank. Gebruik 'code' als verkiezing-parameter.", verbose: singleConnectorVerbose({ enabled: verbose, connector: "verkiezingsuitslagen", endpoint: listed.endpoint, responseTimeMs }) }));
+      }
+
+      const out = await verkiezingsuitslagen.uitslag({ verkiezing, gebied });
+      const responseTimeMs = Date.now() - started;
+
+      if (!out.uitslag) {
+        const records = out.verkiezingen.map((x) => record(
+          "verkiezingsuitslagen",
+          `${x.naam} — ${x.datum}`,
+          x.url,
+          { code: x.code, soort: x.soort, naam: x.naam, datum: x.datum, opkomst: x.opkomst },
+          `Opkomst ${x.opkomst}`,
+          x.datum,
+        ));
+        return toMcpToolPayload(buildFormattedResponse({ summary: "Verkiezing niet herkend; beschikbare verkiezingen", records, provenance: prov("verkiezingsuitslagen_search", out.endpoint, out.params, records.length, records.length), outputFormat, offset, limit: effectiveLimit, total: records.length, access_note: out.access_note, verbose: singleConnectorVerbose({ enabled: verbose, connector: "verkiezingsuitslagen", endpoint: out.endpoint, responseTimeMs }) }));
+      }
+
+      const u = out.uitslag;
+      const records = u.partijen.map((p) => record(
+        "verkiezingsuitslagen",
+        p.partij,
+        u.url,
+        { partij: p.partij, aantal_stemmen: p.aantalStemmen, percentage: p.percentage, aantal_zetels: p.aantalZetels, verkiezing: u.verkiezingCode, verkiezing_naam: u.verkiezingNaam, gebied: u.gebied, niveau: u.niveau, kiesgerechtigden: u.kiesgerechtigden, opkomst: u.opkomst, opkomst_percentage: u.opkomstPercentage, geldige_stemmen: u.geldigeStemmen, blanco_stemmen: u.blancoStemmen, ongeldige_stemmen: u.ongeldigeStemmen },
+        `${p.aantalStemmen ?? "?"} stemmen (${p.percentage ?? "?"}%)${p.aantalZetels ? ` — ${p.aantalZetels} zetels` : ""}`,
+        u.verkiezingDatum,
+      ));
+
+      const context = `${u.verkiezingNaam} ${u.verkiezingDatum} — ${u.gebied}: opkomst ${u.opkomstPercentage ?? "?"}%, ${u.geldigeStemmen ?? "?"} geldige stemmen.`;
+      const response = buildFormattedResponse({ summary: `${records.length} partijuitslagen — ${u.gebied} (${u.verkiezingNaam})`, records, provenance: prov("verkiezingsuitslagen_search", out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), records.length), outputFormat, offset, limit: effectiveLimit, total: records.length, access_note: mergeAccessNotes(context, out.access_note), verbose: singleConnectorVerbose({ enabled: verbose, connector: "verkiezingsuitslagen", endpoint: out.endpoint, responseTimeMs }) });
+      return toMcpToolPayload(response);
+    } catch (e) {
+      return toMcpToolPayload(mapSourceError(e, "Kiesraad Verkiezingsuitslagen", "https://www.verkiezingsuitslagen.nl"));
+    }
+  });
 }

@@ -27,6 +27,21 @@ const MEASUREMENTS_ENDPOINT = "https://api.luchtmeetnet.nl/open_api/measurements
 const LKI_ENDPOINT = "https://iq.luchtmeetnet.nl/open_api/lki";
 const STATIONS_ENDPOINT = "https://api.luchtmeetnet.nl/open_api/stations";
 
+/**
+ * Three distinct connector names on purpose.
+ *
+ * `/measurements` is intermittently 502 — that is precisely why this source has
+ * an LKI fallback. But all three endpoints used to share one connector name, so
+ * three 502s from the primary opened the circuit breaker for the WHOLE source:
+ * the healthy LKI fallback and the station lookup were locked out for five
+ * minutes, turning a designed-for failover into a hard outage (and a false
+ * "no measuring station found" for places that do have one). Separate names let
+ * the primary trip its own breaker while the fallback keeps serving.
+ */
+const CONNECTOR_MEASUREMENTS = "luchtmeetnet";
+const CONNECTOR_LKI = "luchtmeetnet_lki";
+const CONNECTOR_STATIONS = "luchtmeetnet_stations";
+
 function enrich(m: LuchtMeetnetMeasurement): LuchtMeetnetMeasurement {
   return {
     ...m,
@@ -40,46 +55,159 @@ function enrich(m: LuchtMeetnetMeasurement): LuchtMeetnetMeasurement {
   };
 }
 
-/** Fetch station name lookup from /stations (paginated, cached by http layer). */
-async function fetchStationNames(): Promise<Map<string, string>> {
-  const map = new Map<string, string>();
+/**
+ * Fetch the full station list from /stations (paginated, cached by the http layer).
+ *
+ * `lookupFailed` matters: an empty list because the endpoint is down must not be
+ * reported to the user as "this place has no measuring station".
+ */
+async function fetchStations(): Promise<{ stations: StationEntry[]; lookupFailed: boolean }> {
+  const stations: StationEntry[] = [];
   try {
     for (let page = 1; page <= 10; page++) {
       const { data } = await getJson<{ data?: StationEntry[]; pagination?: { last_page?: number } }>(
         STATIONS_ENDPOINT,
-        { query: { page: String(page), page_size: "200" }, timeoutMs: 8_000, retries: 1 },
+        {
+          query: { page: String(page), page_size: "200" },
+          timeoutMs: 8_000,
+          retries: 1,
+          connector: CONNECTOR_STATIONS,
+        },
       );
       for (const s of data.data ?? []) {
-        if (s.number && s.location) map.set(s.number, s.location);
+        if (s.number && s.location) stations.push(s);
       }
       if (page >= (data.pagination?.last_page ?? 1)) break;
     }
   } catch {
-    // stations lookup is best-effort
+    return { stations, lookupFailed: stations.length === 0 };
+  }
+  return { stations, lookupFailed: false };
+}
+
+/** Station number -> human-readable location name. */
+async function fetchStationNames(): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  const { stations } = await fetchStations();
+  for (const s of stations) {
+    if (s.number && s.location) map.set(s.number, s.location);
   }
   return map;
 }
 
+/** Fold case and punctuation so "Den Haag" matches "'s-Gravenhage-Rebecquestraat" loosely. */
+function normalizePlace(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+/**
+ * Resolve a place name to its measuring stations.
+ *
+ * Station names are "City-Streetname" (e.g. "Utrecht-Griftpark"), so a prefix
+ * match on the city part is both precise and forgiving. Falls back to a
+ * contains-match so "Griftpark" or a full station name also resolves.
+ */
+export function matchStationsByPlace(stations: StationEntry[], place: string): StationEntry[] {
+  const needle = normalizePlace(place);
+  if (!needle) return [];
+
+  const byCity = stations.filter((s) => {
+    const name = normalizePlace(s.location ?? "");
+    return name === needle || name.startsWith(`${needle} `);
+  });
+  if (byCity.length) return byCity;
+
+  return stations.filter((s) => normalizePlace(s.location ?? "").includes(needle));
+}
+
+/** Cap on stations queried for one place — a city has a handful, not dozens. */
+const MAX_PLACE_STATIONS = 5;
+
 export class LuchtmeetnetSource {
   constructor(private readonly config: AppConfig) {}
 
-  async latest(args: { component?: string; rows: number }) {
+  /**
+   * Resolve a place name to its stations. `lookupFailed` separates "this place
+   * has no station" from "the station list was unreachable" — reporting the
+   * second as the first would be a confident wrong answer.
+   */
+  private async resolvePlaceStations(
+    place: string,
+  ): Promise<{ stations: StationEntry[]; lookupFailed: boolean }> {
+    const { stations, lookupFailed } = await fetchStations();
+    return {
+      stations: matchStationsByPlace(stations, place).slice(0, MAX_PLACE_STATIONS),
+      lookupFailed,
+    };
+  }
+
+  async latest(args: { component?: string; plaats?: string; rows: number }) {
+    const place = args.plaats?.trim();
+    let stations: StationEntry[] = [];
+    let stationLookupFailed = false;
+
+    if (place) {
+      const resolved = await this.resolvePlaceStations(place);
+      stations = resolved.stations;
+      stationLookupFailed = resolved.lookupFailed;
+
+      if (!stations.length && !stationLookupFailed) {
+        return {
+          items: [],
+          total: 0,
+          endpoint: STATIONS_ENDPOINT,
+          params: { plaats: place },
+          access_note: `Geen Luchtmeetnet-meetstation gevonden voor '${place}'. Het meetnet dekt niet elke plaats; probeer een grotere stad in de buurt of laat 'plaats' weg voor landelijke metingen.`,
+        };
+      }
+    }
+
     const params: Record<string, string> = {
       page_size: String(args.rows),
       order_by: "-timestamp_measured",
     };
     if (args.component) params.formula = args.component;
+    if (stations.length) params.station_number = stations.map((s) => s.number ?? "").join(",");
 
-    // Strategy 1: /measurements (the original endpoint)
+    // Strategy 1: /measurements (the original endpoint). One request per station
+    // — the API filters on a single station_number at a time.
     try {
-      const { data, meta } = await getJson<LuchtMeetnetResponse>(MEASUREMENTS_ENDPOINT, { query: params, retries: 2 });
-      const items = (Array.isArray(data.data) ? data.data : []).map(enrich);
+      const requests = stations.length
+        ? stations.map((station) =>
+            getJson<LuchtMeetnetResponse>(MEASUREMENTS_ENDPOINT, {
+              query: { ...params, station_number: station.number ?? "" },
+              retries: 2,
+              connector: CONNECTOR_MEASUREMENTS,
+            }),
+          )
+        : [
+            getJson<LuchtMeetnetResponse>(MEASUREMENTS_ENDPOINT, {
+              query: params,
+              retries: 2,
+              connector: CONNECTOR_MEASUREMENTS,
+            }),
+          ];
+
+      const responses = await Promise.all(requests);
+      const items = responses
+        .flatMap(({ data }) => (Array.isArray(data.data) ? data.data : []))
+        .map(enrich)
+        .slice(0, args.rows);
+
       if (items.length) {
         return {
           items,
           total: items.length,
-          endpoint: meta.url,
+          endpoint: responses[0].meta.url,
           params,
+          access_note: place
+            ? `Metingen van ${stations.length} meetstation(s) in ${place}: ${stations.map((s) => s.location).join(", ")}.`
+            : undefined,
         };
       }
     } catch {
@@ -87,15 +215,23 @@ export class LuchtmeetnetSource {
     }
 
     // Strategy 2: /lki on iq.luchtmeetnet.nl with narrow time window
-    return this.latestViaLki(args);
+    return this.latestViaLki({ ...args, stations });
   }
 
-  private async latestViaLki(args: { component?: string; rows: number }) {
+  private async latestViaLki(args: {
+    component?: string;
+    plaats?: string;
+    rows: number;
+    stations?: StationEntry[];
+  }) {
     // Use a 3-hour window so we get all stations' latest values
     const now = new Date();
     const threeHoursAgo = new Date(now.getTime() - 3 * 60 * 60 * 1000);
+    const stations = args.stations ?? [];
     const lkiParams: Record<string, string> = {
-      station_number: "", // all stations
+      // "" means all stations; LKI accepts one station per call, so a place
+      // query fans out below and this records what was asked for.
+      station_number: stations.map((s) => s.number ?? "").join(",") || "",
       start: threeHoursAgo.toISOString(),
       end: now.toISOString(),
     };
@@ -105,16 +241,33 @@ export class LuchtmeetnetSource {
     let endpoint = LKI_ENDPOINT;
     let metaUrl = LKI_ENDPOINT;
 
-    for (let page = 1; page <= 3; page++) {
-      const pageParams = { ...lkiParams, page: String(page) };
-      const { data, meta } = await getJson<LuchtMeetnetResponse>(endpoint, {
-        query: pageParams,
-        retries: 2,
-      });
-      metaUrl = meta.url;
-      const entries = Array.isArray(data.data) ? data.data : [];
-      allEntries.push(...entries);
-      if (page >= (data.pagination?.last_page ?? 1)) break;
+    if (stations.length) {
+      const responses = await Promise.all(
+        stations.map((station) =>
+          getJson<LuchtMeetnetResponse>(endpoint, {
+            query: { ...lkiParams, station_number: station.number ?? "" },
+            retries: 2,
+            connector: CONNECTOR_LKI,
+          }),
+        ),
+      );
+      metaUrl = responses[0]?.meta.url ?? LKI_ENDPOINT;
+      for (const { data } of responses) {
+        allEntries.push(...(Array.isArray(data.data) ? data.data : []));
+      }
+    } else {
+      for (let page = 1; page <= 3; page++) {
+        const pageParams = { ...lkiParams, page: String(page) };
+        const { data, meta } = await getJson<LuchtMeetnetResponse>(endpoint, {
+          query: pageParams,
+          retries: 2,
+          connector: CONNECTOR_LKI,
+        });
+        metaUrl = meta.url;
+        const entries = Array.isArray(data.data) ? data.data : [];
+        allEntries.push(...entries);
+        if (page >= (data.pagination?.last_page ?? 1)) break;
+      }
     }
 
     const stationNames = await fetchStationNames();
@@ -143,12 +296,18 @@ export class LuchtmeetnetSource {
         });
       });
 
+    const placeNote = stations.length
+      ? ` Meetstation(s) in ${args.plaats}: ${stations.map((s) => s.location).join(", ")}.`
+      : args.plaats
+        ? ` Stationlijst was niet bereikbaar, dus '${args.plaats}' kon niet worden opgezocht; dit zijn landelijke metingen.`
+        : "";
+
     return {
       items,
       total: items.length,
       endpoint: metaUrl,
       params: lkiParams,
-      access_note: "Luchtmeetnet /measurements endpoint onbereikbaar; LKI (Lucht Kwaliteits Index) data gebruikt. Schaal 1 (goed) t/m 11 (zeer slecht).",
+      access_note: `Luchtmeetnet /measurements endpoint onbereikbaar; LKI (Lucht Kwaliteits Index) data gebruikt. Schaal 1 (goed) t/m 11 (zeer slecht).${placeNote}`,
     };
   }
 

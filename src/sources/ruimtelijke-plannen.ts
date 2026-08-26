@@ -1,10 +1,18 @@
 import type { AppConfig } from "../types.js";
 import { getJson } from "../utils/http.js";
+import {
+  bboxFromCenter,
+  resolveGemeenteBbox,
+  resolveWoonplaatsCentroids,
+  validateRdBbox,
+} from "../utils/geo.js";
 
 const WMS_ENDPOINT = "https://service.pdok.nl/kadaster/ruimtelijke-plannen/wms/v1_0";
-const LOCATIESERVER_FREE = "https://api.pdok.nl/bzk/locatieserver/search/v3_1/free";
 const VIEWER_BASE = "https://www.ruimtelijkeplannen.nl/viewer/view";
 const CONNECTOR = "ruimtelijke_plannen";
+// Tight box around the town centre — plan searches want the built-up area, not
+// the whole municipality (see bron-ongevallen.ts, which uses 12 km).
+const GEMEENTE_HALF_WIDTH_M = 5000;
 // A PDOK WMS GetFeatureInfo sample returns the FULL plan geometry (province-scale
 // MultiPolygons), so a single response can be tens of MB — well past the global
 // 12 MB body cap in http.ts. The connector only reads f.properties (geometry is
@@ -50,72 +58,12 @@ interface WmsFeatureCollection {
   features?: Array<{ id?: string; properties?: FeatureProperties }>;
 }
 
-interface LocatieserverResponse {
-  response?: { docs?: Array<{ centroide_rd?: string; weergavenaam?: string; gemeentenaam?: string }> };
-}
-
 const STATUS_MAP: Record<Exclude<PlanStatus, "all">, string[]> = {
   vigerend: ["vastgesteld", "geconsolideerd", "onherroepelijk"],
   vervallen: ["vervallen", "ingetrokken"],
   ontwerp: ["ontwerp", "voorontwerp"],
   vastgesteld: ["vastgesteld"],
 };
-
-function parseRdPoint(centroideRd: string | undefined): [number, number] | undefined {
-  if (!centroideRd) return undefined;
-  const match = centroideRd.match(/POINT\s*\(\s*([\d.+-]+)\s+([\d.+-]+)\s*\)/i);
-  if (!match) return undefined;
-  return [Number(match[1]), Number(match[2])];
-}
-
-function bboxFromCenter(center: [number, number], halfWidthMeters: number): string {
-  const [x, y] = center;
-  return `${x - halfWidthMeters},${y - halfWidthMeters},${x + halfWidthMeters},${y + halfWidthMeters}`;
-}
-
-function validateBbox(bbox: string): { ok: true } | { ok: false; reason: string } {
-  const parts = bbox.split(",").map((s) => s.trim());
-  if (parts.length !== 4) return { ok: false, reason: "bbox must have 4 comma-separated numbers (minx,miny,maxx,maxy in EPSG:28992)" };
-  const nums = parts.map(Number);
-  if (nums.some((n) => !Number.isFinite(n))) return { ok: false, reason: "bbox contains non-numeric values" };
-  const [minx, miny, maxx, maxy] = nums;
-  if (minx >= maxx || miny >= maxy) return { ok: false, reason: "bbox min must be less than max for both axes" };
-  // RD New (EPSG:28992) usable extent for NL roughly 0..300000 (x) and 300000..650000 (y)
-  if (minx < -10000 || maxx > 310000 || miny < 290000 || maxy > 660000) {
-    return { ok: false, reason: "bbox is outside the EPSG:28992 (RD New) extent for the Netherlands" };
-  }
-  return { ok: true };
-}
-
-async function resolveGemeenteBbox(gemeente: string): Promise<string | undefined> {
-  const params = {
-    q: `gemeente ${gemeente}`,
-    rows: "1",
-    fq: "type:gemeente",
-    fl: "centroide_rd,weergavenaam",
-  };
-  const { data } = await getJson<LocatieserverResponse>(LOCATIESERVER_FREE, { query: params });
-  const center = parseRdPoint(data.response?.docs?.[0]?.centroide_rd);
-  if (!center) return undefined;
-  return bboxFromCenter(center, 5000);
-}
-
-async function resolveWoonplaatsen(gemeente: string, max: number): Promise<Array<[number, number]>> {
-  const params = {
-    q: gemeente,
-    rows: String(max),
-    fq: `type:woonplaats AND gemeentenaam:${JSON.stringify(gemeente)}`,
-    fl: "centroide_rd,weergavenaam,gemeentenaam",
-  };
-  const { data } = await getJson<LocatieserverResponse>(LOCATIESERVER_FREE, { query: params });
-  const docs = data.response?.docs ?? [];
-  const points: Array<[number, number]> = [];
-  for (const d of docs) {
-    const p = parseRdPoint(d.centroide_rd);
-    if (p) points.push(p);
-  }
-  return points;
-}
 
 function statusMatches(planstatus: string | undefined, status: PlanStatus): boolean {
   if (status === "all") return true;
@@ -149,7 +97,7 @@ export class RuimtelijkePlannenSource {
   }> {
     let bbox = args.bbox;
     if (bbox) {
-      const v = validateBbox(bbox);
+      const v = validateRdBbox(bbox);
       if (!v.ok) {
         return {
           items: [],
@@ -163,8 +111,11 @@ export class RuimtelijkePlannenSource {
     let bboxNote: string | undefined;
     let woonplaatsen: Array<[number, number]> = [];
     if (!bbox && args.gemeente) {
-      woonplaatsen = await resolveWoonplaatsen(args.gemeente, 12);
-      bbox = await resolveGemeenteBbox(args.gemeente);
+      woonplaatsen = await resolveWoonplaatsCentroids(args.gemeente, 12, { connector: CONNECTOR });
+      bbox = await resolveGemeenteBbox(args.gemeente, {
+        halfWidthMeters: GEMEENTE_HALF_WIDTH_M,
+        connector: CONNECTOR,
+      });
       if (!bbox && woonplaatsen.length === 0) {
         return {
           items: [],

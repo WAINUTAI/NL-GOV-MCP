@@ -5,6 +5,7 @@ import {
   extractSruRecords,
   parseXml,
 } from "../utils/xml-parser.js";
+import { escapeSruValue, freeTextCql } from "../utils/sru-cql.js";
 
 function toStringValue(value: unknown): string | undefined {
   if (typeof value === "string") return value;
@@ -13,11 +14,6 @@ function toStringValue(value: unknown): string | undefined {
     if (typeof obj["#text"] === "string") return obj["#text"];
   }
   return undefined;
-}
-
-/** Escape a value for use inside double-quoted CQL/SRU strings. */
-function escapeSruValue(v: string): string {
-  return v.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
 function extractMeta(record: Record<string, unknown>) {
@@ -131,8 +127,11 @@ export class BekendmakingenSource {
     const endpoint = this.config.endpoints.bekendmakingenSru;
 
     const cqlParts: string[] = [];
-    // On this SRU endpoint, free-text terms work directly; keyword="..." is unsupported.
-    if (args.query?.trim()) cqlParts.push(args.query.trim());
+    // On this SRU endpoint, free-text terms work directly; keyword="..." is
+    // unsupported. Multi-word input must be AND-joined — a bare phrase is a CQL
+    // syntax error that the endpoint answers with zero records (see sru-cql.ts).
+    const freeText = freeTextCql(args.query);
+    if (freeText) cqlParts.push(freeText);
     cqlParts.push('c.product-area="officielepublicaties"');
     if (args.type?.trim()) cqlParts.push(`dt.type="${escapeSruValue(args.type.trim())}"`);
     if (args.authority?.trim()) cqlParts.push(`dt.creator="${escapeSruValue(args.authority.trim())}"`);

@@ -13,9 +13,12 @@ Ask in plain Dutch or English. The server routes to the right sources, retrieves
 Examples:
 - *"Hoeveel sociale huurwoningen zijn er gebouwd in Rotterdam sinds 2020?"* → combines relevant housing/statistics sources
 - *"Wat heeft de Tweede Kamer besloten over stikstof afgelopen maand?"* → parliamentary search with temporal parsing
-- *"Welke basisschool in Tilburg scoort het best?"* → DUO-related dataset/search helpers
+- *"Welke basisscholen zijn er in Tilburg?"* → real per-school records from DUO (address, denomination, BRIN)
+- *"Welke middelbare school scoort het best?"* → DUO exam results per school location (pass rate, average marks)
+- *"Wat besteedt provincie Overijssel aan?"* → TenderNed procurement notices and awards
+- *"Hoe stemde Tilburg bij de Tweede Kamerverkiezingen?"* → Kiesraad results per party
 - *"Toon alle rechtspraak over huurrecht dit jaar"* → Rechtspraak search with date-aware mapping
-- *"Wat is de luchtkwaliteit in Utrecht?"* → live Luchtmeetnet retrieval
+- *"Wat is de luchtkwaliteit in Utrecht?"* → live Luchtmeetnet measurements from that city’s own stations
 - *"Geef me de rijksbegroting voor onderwijs"* → Rijksbegroting search + chapter navigation
 
 ## How is this different from data.overheid.nl?
@@ -24,7 +27,7 @@ Examples:
 
 `NL-GOV-MCP` actively retrieves and normalizes data across many sources, can combine cross-source results, and returns a consistent MCP response contract ready for assistants and automations.
 
-## Sources (39 connectors, 64 tools)
+## Sources (44 connectors, 70 tools)
 
 | Source | What it covers |
 |---|---|
@@ -33,14 +36,14 @@ Examples:
 | Officiële Bekendmakingen | Official publications (SRU/XML search + lookup) |
 | Rijksoverheid | National government news/document search via the Rijksoverheid.nl RSS platform (server-side keyword) + school holidays |
 | Rijksbegroting | National budget data + chapter helper |
-| DUO | Education datasets + school/exam helpers + RIO adapter |
+| DUO | Per-school records (po/vo/mbo/ho addresses), per-location exam results, education dataset catalogue + RIO adapter |
 | data.overheid.nl | National open data catalog (CKAN) |
 | Overheid API register | API directory (requires `OVERHEID_API_KEY`) |
 | KNMI | Weather datasets/files, warnings, earthquakes (requires `KNMI_API_KEY`) |
 | PDOK / BAG | Geospatial search, BAG address registry, and authoritative per-address detail (oppervlakte, bouwjaar, gebruiksdoelen) via Kadaster Individuele Bevragingen REST API |
 | Rechtspraak | Court rulings via official `uitspraken.rechtspraak.nl` search backend |
 | RDW | Vehicle open data |
-| Luchtmeetnet | Live air quality measurements |
+| Luchtmeetnet | Live air quality measurements per city/station (NO2, PM10, PM2.5, O3) |
 | Rijkswaterstaat | Water data catalog + real-time measurements |
 | NDW | Traffic discovery/metadata |
 | ORI | Open Raadsinformatie discovery |
@@ -67,6 +70,11 @@ Examples:
 | DNB Statistics | Interest rates, mortgages, pensions, insurers, balance of payments (requires `DNB_API_KEY`) |
 | NZa Zorgbeeld | Current waiting times for medical-specialist care per institution |
 | Register Overheidsorganisaties | All Dutch government organisations + TOOI identifiers (KOOP) |
+| TenderNed | Public procurement — tender notices, awards, market consultations; detail with CPV/NUTS codes and PDF text |
+| Tuchtrecht | Disciplinary rulings for regulated professions (healthcare, bar, notaries, accountants, vets) — not on Rechtspraak.nl |
+| Samenwerkende Catalogi | National index of products/services offered by municipalities, provinces and water authorities (KOOP SRU) |
+| BRP Gewaspercelen (RVO) | Agricultural parcels with crop, category, area and polygon (PDOK WFS) |
+| Kiesraad Verkiezingsuitslagen | Election results per party, nationally and per province/municipality, incl. turnout |
 
 ## Key features
 
@@ -80,9 +88,19 @@ Every tool returns the same shape:
 - optional `pagination` (offset, limit, total, has_more)
 - optional `verbose` (request timings, connector health snapshots)
 
+### PDF text extraction
+Most Dutch government "data" is text inside a PDF. Tools that reach a PDF resource extract its text layer instead of handing back a link only:
+- `tweede_kamer_document_get` with `include_text: true` returns the text of a Kamerstuk PDF (`text_preview_source: "pdf_text_layer"`, plus page count)
+- `tenderned_aanbesteding_get` with `include_text: true` returns the text of the official tender notice PDF
+
+Extraction is capped (`max_chars`, default 12 000) and fails typed rather than hard: a scan without OCR reports `no_text_layer`, an encrypted file `encrypted`, an HTML error page `not_a_pdf`.
+
+### Shared geo primitive
+Bbox-driven sources (BRON verkeersongevallen, ruimtelijke plannen, BRP gewaspercelen) accept a `gemeente` name and resolve it to an RD (EPSG:28992) bbox through one shared implementation (`src/utils/geo.ts`), with a single extent validation and a consistent `access_note` when a name cannot be resolved.
+
 ### Built-in resilience (zero-config)
 No setup required — the following run automatically in-process:
-- Per-connector circuit breaker (auto-disables after repeated failures, probes for recovery)
+- Per-connector circuit breaker (auto-disables after repeated failures, probes for recovery). A source whose primary endpoint is expected to fail over gives its fallback its own connector name, so a degraded primary cannot lock out the path that still works (see Luchtmeetnet).
 - Per-connector concurrency limiter (default 3 in-flight, overflow queued with timeout)
 - In-process HTTP response cache with hardcoded TTL per source category
 - Per-connector health counters (exposed via `/health/sources` on SSE transport)
@@ -154,7 +172,7 @@ npm run test:live    # integration test suite (live API calls)
 
 ### Transport modes
 
-Three transport modes are supported. All expose the same 64 tools.
+Three transport modes are supported. All expose the same 70 tools.
 
 #### stdio (Claude Desktop, Claude Code)
 
@@ -259,6 +277,18 @@ Restart Claude Desktop after saving.
 | `MCP_TRANSPORT` | `stdio` | Transport mode: `stdio`, `sse`, or `streamable-http` (alternative to CLI flags) |
 | `LOG_LEVEL` | `info` | Pino log level (`debug`, `info`, `warn`, `error`, `silent`) |
 
+### Running behind a proxy
+
+Node's built-in `fetch` — which every connector uses — **ignores `HTTP_PROXY` / `HTTPS_PROXY`**. On a network that only allows outbound traffic through a proxy, requests therefore go out directly and individual sources start failing with confusing statuses (403, 406, timeouts) while `curl` to the same URL from the same machine succeeds, because curl *does* honour those variables.
+
+Start the server with Node's proxy support enabled:
+
+```bash
+NODE_USE_ENV_PROXY=1 HTTPS_PROXY=http://proxy.internal:3128 npm run start
+```
+
+Node ≥ 22 prints an "experimental" warning for this flag; it works. Symptom to recognise: some sources work and others do not, with no pattern in the code — that is an egress problem, not a connector problem.
+
 ## Source-specific details
 
 ### Tweede Kamer document retrieval
@@ -267,7 +297,7 @@ Restart Claude Desktop after saving.
 - `tweede_kamer_document_get` can optionally:
   - resolve the underlying resource URL / file metadata
   - include a capped text preview for text-like resources
-- PDFs remain resource-only in lean mode (no built-in PDF text extraction).
+  - extract the text layer of PDF resources (`include_text: true`), reported as `text_preview_source: "pdf_text_layer"` with `resource_pages`
 - `nl_gov_ask` may automatically deepen the top Tweede Kamer match when the user explicitly asks for content/summary rather than only discovery.
 
 ### Rechtspraak details
@@ -281,6 +311,22 @@ Uses structured parameters instead of natural-language parsing:
 The LLM interprets user intent and maps it to these parameters. A lightweight server-side query rewriter strips residual question framing as a safety net.
 
 Responses include facet-driven context in `access_note` when filters are applied.
+
+**Tuchtrecht is a separate source.** Disciplinary rulings against doctors, lawyers, notaries, accountants, vets and bailiffs are published on `tuchtrecht.overheid.nl`, not on Rechtspraak.nl. Use `tuchtrecht_search` for those; `nl_gov_ask` routes disciplinary questions there before it considers Rechtspraak.
+
+### TenderNed details
+
+`tenderned_aanbestedingen_search` sends only parameters that are verified to filter server-side (`search`, `typeOpdracht`, `procedure`, `publicatieDatumVanaf`, `publicatieDatumTot`, `page`, `size`). The upstream silently ignores unknown parameters, so an unsupported filter would look applied while returning everything — hence the deliberately small parameter surface. Page size is capped at 100 by the API; use `page` for more.
+
+### DUO per-school data
+
+`duo_schools` and `duo_exam_results` query the CKAN **datastore** (the rows), not the dataset catalogue:
+- `duo_schools` returns individual schools/institutions per sector (`po`, `vo`, `mbo`, `ho`) with address, BRIN/instellingscode, denomination and website. `municipality`, `place` and `postcode` filter exactly (case-insensitive input); `name` is a free-text search.
+- `duo_exam_results` returns pass rates and average exam marks per school location, filterable by year, municipality and education type, with `sortByScore` for "which school scores best". Coverage: school years 2013–2017 — the last per-location exam dataset DUO publishes machine-readably; a year outside that range returns 0 records with an explanation in `access_note` rather than a validation error.
+
+### Elections (Kiesraad)
+
+`verkiezingsuitslagen_search` accepts an election code (`TK20251029`), an election kind (`TK`, `gemeenteraad`, `Europees Parlement`) or nothing at all (most recent election). `gebied` drills down to a province or municipality; unknown areas fall back to the national result with an explanatory `access_note`. Use `list_elections: true` for the available elections.
 
 ## Documentation
 

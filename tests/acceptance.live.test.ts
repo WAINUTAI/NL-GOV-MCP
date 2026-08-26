@@ -455,3 +455,92 @@ describe("nl_gov_ask router", () => {
     expectRecords(res);
   }, 60_000);
 });
+
+/* ================================================================== */
+/*  NEW SOURCES (v0.3)                                                 */
+/* ================================================================== */
+describe("TenderNed", () => {
+  it("aanbestedingen_search: finds procurement notices", async () => {
+    const res = await callTool("tenderned_aanbestedingen_search", { query: "fietsbrug", top: 5 });
+    expectRecords(res);
+  }, 30_000);
+
+  it("aanbesteding_get: returns detail with CPV codes", async () => {
+    const list = await callTool("tenderned_aanbestedingen_search", { top: 1 });
+    expectRecords(list);
+    const id = String((list.records[0].data as Record<string, unknown>).publicatie_id ?? "");
+    const res = await callTool("tenderned_aanbesteding_get", { publicatieId: id });
+    expectRecords(res);
+    expect((res.records[0].data as Record<string, unknown>).cpvCodes).toBeDefined();
+  }, 45_000);
+
+  it("aanbesteding_get: extracts the notice PDF text", async () => {
+    const list = await callTool("tenderned_aanbestedingen_search", { top: 1 });
+    expectRecords(list);
+    const id = String((list.records[0].data as Record<string, unknown>).publicatie_id ?? "");
+    const res = await callTool("tenderned_aanbesteding_get", { publicatieId: id, include_text: true, max_chars: 2000 });
+    expectRecords(res);
+    const data = res.records[0].data as Record<string, unknown>;
+    expect(typeof data.pdf_text === "string" || typeof data.pdf_text_unavailable_reason === "string").toBe(true);
+  }, 60_000);
+});
+
+describe("Tuchtrecht", () => {
+  it("search: finds disciplinary rulings with an ECLI", async () => {
+    const res = await callTool("tuchtrecht_search", { query: "medicatiefout", top: 5 });
+    expectRecords(res);
+    expect(String((res.records[0].data as Record<string, unknown>).ecli ?? "")).toMatch(/^ECLI:/);
+  }, 30_000);
+
+  it("search: multi-word queries still return results", async () => {
+    const res = await callTool("tuchtrecht_search", { query: "huisarts medicatiefout", top: 5 });
+    expectRecords(res);
+  }, 30_000);
+});
+
+describe("Samenwerkende Catalogi", () => {
+  it("search: finds municipal product descriptions", async () => {
+    const res = await callTool("samenwerkende_catalogi_search", { query: "paspoort", top: 5 });
+    expectRecords(res);
+  }, 30_000);
+});
+
+describe("BRP Gewaspercelen", () => {
+  it("search: finds parcels for a rural municipality", async () => {
+    const res = await callTool("brp_gewaspercelen_search", { gemeente: "Dronten", top: 5 });
+    expectRecords(res);
+    expect((res.records[0].data as Record<string, unknown>).oppervlakte_ha).toBeDefined();
+  }, 60_000);
+});
+
+describe("Verkiezingsuitslagen", () => {
+  it("returns national results per party", async () => {
+    const res = await callTool("verkiezingsuitslagen_search", { verkiezing: "TK20251029", top: 30 });
+    expectRecords(res, 5);
+  }, 30_000);
+
+  it("drills down to a municipality", async () => {
+    const res = await callTool("verkiezingsuitslagen_search", { verkiezing: "TK20251029", gebied: "Tilburg", top: 30 });
+    expectRecords(res, 5);
+    expect((res.records[0].data as Record<string, unknown>).gebied).toBe("Tilburg");
+  }, 30_000);
+
+  it("lists available elections", async () => {
+    const res = await callTool("verkiezingsuitslagen_search", { list_elections: true, top: 20 });
+    expectRecords(res);
+  }, 30_000);
+});
+
+describe("DUO per-school data", () => {
+  it("schools: returns real schools for a municipality", async () => {
+    const res = await callTool("duo_schools", { municipality: "Tilburg", sector: "po", top: 5 });
+    expectRecords(res);
+    expect((res.records[0].data as Record<string, unknown>).gemeente).toBe("TILBURG");
+  }, 30_000);
+
+  it("exam_results: ranks schools by pass rate", async () => {
+    const res = await callTool("duo_exam_results", { municipality: "Tilburg", year: 2017, sortByScore: true, top: 5 });
+    expectRecords(res);
+    expect((res.records[0].data as Record<string, unknown>).slagingspercentage).toBeDefined();
+  }, 30_000);
+});

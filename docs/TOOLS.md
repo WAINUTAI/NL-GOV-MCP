@@ -26,7 +26,7 @@
   - default: lean metadata + resource endpoints
   - optional: `resolve_resource` to expose resolved file metadata/URL
   - optional: `include_text` to fetch a capped preview for text-like resources
-  - PDFs stay resource-only in lean mode (no built-in PDF text extraction)
+  - PDF resources: `include_text` extracts the PDF text layer (`text_preview_source: "pdf_text_layer"`, `resource_pages`); a scan without OCR reports `text_preview_unavailable_reason: "pdf_no_text_layer"`
   - `nl_gov_ask` can auto-deepen the top match on explicit content/summary questions
 - `tweede_kamer_votes`
 - `tweede_kamer_members`
@@ -50,9 +50,14 @@
 - `rijksbegroting_chapter`
 
 ## DUO
-- `duo_datasets_search`
-- `duo_schools`
-- `duo_exam_results`
+- `duo_datasets_search` — dataset catalogue (CKAN `package_search`)
+- `duo_schools` — **per-school records** (CKAN datastore), not catalogue hits
+  - inputs: `name` (free text), `municipality`, `place`, `postcode` (exact, case-insensitive input), `sector` (`po`|`vo`|`mbo`|`ho`), `top`, pagination/outputFormat/verbose/dryRun
+  - output: naam, instellingscode/vestigingscode, bevoegd gezag, onderwijstype, adres, postcode, plaats, gemeente(+code), provincie, denominatie, telefoon, website
+- `duo_exam_results` — **per-location exam results** (CKAN datastore)
+  - inputs: `year` (dataset covers 2013–2017; a year outside that range returns 0 records with an explanation in `access_note`), `school` (free text), `municipality`, `onderwijstype` (VMBO/HAVO/VWO), `sortByScore`, `top`, pagination/outputFormat/verbose/dryRun
+  - output: school, BRIN(+vestiging), gemeente, provincie, onderwijstype, schooljaar, examenkandidaten, geslaagden, gezakten, slagingspercentage, gemiddelde cijfers (schoolexamen/centraal examen/cijferlijst)
+  - coverage note is returned in `access_note`: DUO publishes this per-location set for school years 2013–2017 only
 - `duo_rio_search`
 
 ## API register (key required)
@@ -95,8 +100,11 @@
 ## Luchtmeetnet
 - `luchtmeetnet_latest`
   - authless latest measurements
+  - `plaats`: plaats-/stadsnaam (bv. 'Utrecht', 'Den Haag'). Wordt via `/stations` naar de meetstations van die plaats geresolved en per station bevraagd. Een plaats zonder meetstation levert een expliciete uitleg in `access_note` - geen landelijke cijfers alsof ze over die plaats gaan.
+  - `component`: NO2, PM10, PM25, O3, SO2, CO
   - verrijkte output: `location_name/component/value/unit/timestamp` + coordinaten
-  - fallback-measurement met vaste timestamp/waarde als endpoint niet bereikbaar is
+  - drie endpoints, drie connectors: `/measurements` (`luchtmeetnet`), `/lki` (`luchtmeetnet_lki`) en `/stations` (`luchtmeetnet_stations`). `/measurements` is met regelmaat 502; onder een gedeelde connectornaam sloten drie van die fouten de circuit breaker voor de hele bron, inclusief de werkende LKI-fallback en de stationlijst.
+  - fallback-measurement met vaste timestamp/waarde als geen enkel endpoint bereikbaar is
 
 ## RDW
 - `rdw_open_data_search`
@@ -170,10 +178,15 @@
   - decodes percent-encoded questions before routing
   - prioritizes school holiday queries to `rijksoverheid_schoolholidays` with fallback attempts
   - improved CBS ranking for municipality/education phrasing
+  - specific-source routes run **before** the broad CBS/Tweede Kamer ones: elections, procurement, disciplinary law, agricultural parcels and per-school education
+  - extracts a place name from the question ("in Tilburg", "gemeente Land van Cuijk") to drive gemeente-scoped sources; falls back with an explanatory `access_note` when the name does not resolve
+  - education questions prefer real per-school records (`duo_schools` / `duo_exam_results`) and fall back to the DUO dataset catalogue only when those return nothing
+  - air-quality questions route to Luchtmeetnet for the place named in the question; only unambiguous terms trigger it, so bare "stikstof" keeps routing to Tweede Kamer / CBS
+  - CBS questions that find nothing with the full sentence retry with progressively narrower topic terms (municipality and quantity words removed - CBS table titles carry neither)
 
 ## Known limits / behavior notes
 - KNMI `knmi_warnings` (`waarschuwingen_nederland_48h`) and `knmi_earthquakes` (`aardbevingen_nederland`) try multiple dataset candidates and return a clear `access_note` if none currently resolves.
-- DUO `duo_schools` and `duo_exam_results` aggregate several query variants and include `helper_query` in record data for provenance.
+- DUO `duo_schools` and `duo_exam_results` return per-school rows from the CKAN datastore; the exam dataset covers school years 2013–2017 (stated in `access_note`).
 - API register search uses official endpoints first; if unavailable, deterministic HTML-card scoring fallback is used.
 
 ## Response contract
@@ -287,3 +300,52 @@ Haalt datapunten op uit de DNB Statistics API (De Nederlandsche Bank).
 - **Output**: records met `period`, `value`, `unit`, `label`, `frequency` per datapunt.
 - **Auth**: `DNB_API_KEY` vereist (header `Ocp-Apim-Subscription-Key`); zonder key `not_configured`.
 - **Voorbeeld**: `{ "dataset": "interest-rates", "startPeriod": "2023", "rows": 24 }`.
+
+
+## Nieuwe tools (v0.3)
+
+## `tenderned_aanbestedingen_search`
+
+Zoekt aanbestedingspublicaties op TenderNed (aankondigingen, gunningen, marktconsultaties, vroegtijdige beëindigingen).
+
+- **Inputs**: `query` (vrije tekst over naam/beschrijving/opdrachtgever), `typeOpdracht` (`leveringen`|`diensten`|`werken`|`all`), `procedure` (code, bv. `OPE`), `date_from`/`date_to` (JJJJ-MM-DD, publicatiedatum), `page` (0-based), `top` (max 100), pagination/outputFormat/verbose/dryRun.
+- **Output**: publicatie_id, opdrachtgever, publicatie-/sluitingsdatum, type publicatie (+code), procedure, type opdracht, europees, kenmerk, beschrijving; canonical url is de TenderNed-aankondigingspagina.
+- **Let op**: TenderNed levert maximaal 100 publicaties per pagina (`size>100` → HTTP 400) — gebruik `page`. Een ongeldig datumformaat wordt genegeerd en gemeld in `access_note` in plaats van stil mis te filteren.
+
+## `tenderned_aanbesteding_get`
+
+Detail van één publicatie op `publicatieId`.
+
+- **Inputs**: `publicatieId`, `include_text` (tekstlaag van de officiële aankondigings-PDF), `max_chars`.
+- **Output**: alle zoekvelden + CPV-codes, NUTS-codes, juridisch kader, opdrachtaard, aanbestedingsstatus, aanvang/voltooiing opdracht, `isGegund`, gerelateerde publicaties en `pdfUrl`. Met `include_text`: `pdf_text`, `pdf_text_chars`, `pdf_text_truncated`, `pdf_pages` — of `pdf_text_unavailable_reason` met een typed reden.
+
+## `tuchtrecht_search`
+
+Tuchtrechtuitspraken (gezondheidszorg, advocatuur, notariaat, accountants, diergeneeskunde, gerechtsdeurwaarders) via KOOP SRU.
+
+- **Inputs**: `query` (trefwoorden, meerdere woorden worden AND-gecombineerd), `college` (exacte naam), `date_from`/`date_to` (ISO), `top`, pagination/outputFormat/verbose/dryRun.
+- **Output**: ECLI, college, domein, plaats, zaaknummer, beslissing, uitspraakdatum, onderwerp, samenvatting, `tuchtrecht.overheid.nl`-link en `pdf_url`.
+- **Waarom apart van Rechtspraak**: rechtspraak.nl bevat deze uitspraken niet. `nl_gov_ask` routeert tuchtrechtvragen daarom vóór de Rechtspraak-route.
+
+## `samenwerkende_catalogi_search`
+
+Productbeschrijvingen (dienstverlening) van gemeenten, provincies en waterschappen via KOOP SRU.
+
+- **Inputs**: `query`, `organisatie` (exacte naam), `date_from`/`date_to`, `top`, pagination/outputFormat/verbose/dryRun.
+- **Output**: titel, organisatie(+type), gebied, informatietype, doelgroep, samenvatting, gewijzigd-datum.
+
+## `brp_gewaspercelen_search`
+
+Landbouwpercelen met gewas uit de RVO Basisregistratie Gewaspercelen (PDOK WFS).
+
+- **Inputs**: `gemeente` (wordt via de PDOK Locatieserver naar een bbox omgezet, ±8 km) of `bbox` (EPSG:28992), `gewas` (substring), `categorie` (`bouwland`|`grasland`|`natuurterrein`|`landschapselement`|`braakland`|`all`), `jaar`, `includeGeometry`, `top`, pagination/outputFormat/verbose/dryRun.
+- **Output**: gewas, gewascode, categorie, jaar, status, oppervlakte (m²/ha), centroid, bbox en optioneel de GeoJSON-polygon (`outputFormat: "geojson"` werkt met `includeGeometry: true`).
+- **Let op**: gewas/categorie/jaar filteren client-side (de MapServer-WFS negeert `cql_filter`); percelen liggen buiten de bebouwde kom, dus een stadscentrum-bbox levert legitiem 0 resultaten.
+
+## `verkiezingsuitslagen_search`
+
+Verkiezingsuitslagen per partij uit de Kiesraad-databank.
+
+- **Inputs**: `verkiezing` (code `TK20251029`, soort `TK`/`gemeenteraad`/`Europees Parlement`, of leeg = meest recente), `gebied` (gemeente of provincie; leeg = landelijk), `list_elections` (lijst beschikbare verkiezingen), `top`, pagination/outputFormat/verbose/dryRun.
+- **Output**: één record per partij met stemmen, percentage en zetels, plus gebiedscontext (kiesgerechtigden, opkomst, geldige/blanco/ongeldige stemmen) in elk record en in `access_note`.
+- **Gedrag**: een onbekend gebied levert de landelijke uitslag mét uitleg in `access_note`; een onbekende verkiezingsnaam levert de lijst met beschikbare verkiezingen in plaats van een lege respons.

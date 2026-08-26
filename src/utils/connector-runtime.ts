@@ -30,6 +30,10 @@ const CONNECTOR_CATEGORY: Record<string, ConnectorCategory> = {
   data_europa: "semi_live",
 
   luchtmeetnet: "live",
+  // Split from `luchtmeetnet` so the intermittently-502 /measurements endpoint
+  // cannot trip the breaker for its own fallback and reference data.
+  luchtmeetnet_lki: "live",
+  luchtmeetnet_stations: "static",
   ndw: "live",
   rdw: "live",
   rws_waterdata: "live",
@@ -58,6 +62,11 @@ const CONNECTOR_CATEGORY: Record<string, ConnectorCategory> = {
   ep_online: "semi_live",
   ns: "live",
   dnb: "static",
+  tenderned: "semi_live",
+  tuchtrecht: "static",
+  samenwerkende_catalogi: "static",
+  brp_gewaspercelen: "static",
+  verkiezingsuitslagen: "static",
 };
 
 const FAILURE_THRESHOLD = 3;
@@ -156,8 +165,11 @@ export function inferConnectorName(endpointUrl: string): string {
     if (host.includes("pdok.nl") || host.includes("kadaster.nl")) {
       if (host.includes("labs.kadaster.nl")) return "bag_linked_data";
       if (path.includes("/kadaster/ruimtelijke-plannen/")) return "ruimtelijke_plannen";
+      if (path.includes("/rvo/brpgewaspercelen/")) return "brp_gewaspercelen";
       return "pdok_bag";
     }
+    if (host.includes("tenderned.nl")) return "tenderned";
+    if (host.includes("verkiezingsuitslagen.nl")) return "verkiezingsuitslagen";
     if (host.includes("nationaalgeoregister.nl")) return "ngr";
     if (host.includes("ori") && host.includes("overheid")) return "ori";
     if (host.includes("ndw")) return "ndw";
