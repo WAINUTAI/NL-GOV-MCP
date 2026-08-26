@@ -18,8 +18,28 @@ describe("extractPlaceName", () => {
     expect(extractPlaceName("Wat was de uitslag in Bergen op Zoom?")).toBe("Bergen op Zoom");
   });
 
+  it("keeps both halves of a two-capital place name", () => {
+    // "Den" alone prefix-matches the Den Haag stations and resolves to De Bilt
+    // in the PDOK Locatieserver, so truncating here returned another city's data.
+    expect(extractPlaceName("Wat is de luchtkwaliteit in Den Helder?")).toBe("Den Helder");
+    expect(extractPlaceName("Wat is de luchtkwaliteit in Den Haag?")).toBe("Den Haag");
+    expect(extractPlaceName("Gewaspercelen in Den Bosch")).toBe("Den Bosch");
+  });
+
+  it("keeps infix-joined place names whole", () => {
+    expect(extractPlaceName("Scholen in Alphen aan den Rijn")).toBe("Alphen aan den Rijn");
+    expect(extractPlaceName("Uitslag in Berkel en Rodenrijs")).toBe("Berkel en Rodenrijs");
+    expect(extractPlaceName("Percelen in Capelle aan den IJssel")).toBe("Capelle aan den IJssel");
+  });
+
+  it("handles places that open on an apostrophe", () => {
+    expect(extractPlaceName("Scholen in 's-Hertogenbosch")).toBe("'s-Hertogenbosch");
+    expect(extractPlaceName("Percelen in 't Zand")).toBe("'t Zand");
+  });
+
   it("strips trailing punctuation", () => {
     expect(extractPlaceName("Scholen in Utrecht.")).toBe("Utrecht");
+    expect(extractPlaceName("Luchtkwaliteit in Den Helder!")).toBe("Den Helder");
   });
 
   it("returns undefined without a capitalised place", () => {

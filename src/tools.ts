@@ -135,15 +135,43 @@ function metadataScore(rec: MCPRecord): number {
 }
 
 /**
+ * Lowercase words that bind the parts of a Dutch place name together:
+ * "Alphen aan den Rijn", "Bergen op Zoom", "Berkel en Rodenrijs". They only ever
+ * appear *between* capitalised words, so a match still has to end on one.
+ */
+const PLACE_INFIXES = "aan|bij|de|den|der|en|het|op|ten|ter|van|['’]t";
+
+/**
+ * One place name: a capitalised word followed by any number of further
+ * capitalised words, optionally bound by the infixes above.
+ *
+ * Shaped as `capital (infix* capital)*` rather than `capital (infix capital)*`,
+ * because the second half of a Dutch place name is not always introduced by an
+ * infix: "Den Helder" and "Den Haag" are two capitals in a row, and the earlier
+ * pattern stopped after "Den". That truncation was not harmless — "Den" prefix-
+ * matches the "Den Haag-…" Luchtmeetnet stations and resolves to De Bilt in the
+ * PDOK Locatieserver, so a question about Den Helder came back with Den Haag's
+ * air quality and parcels 89 km away.
+ *
+ * "'s-Hertogenbosch" and "'t Zand" open on an apostrophe, hence the prefix.
+ */
+const PLACE_CORE = `(?:['’]s-|['’]t\\s+)?[A-ZÀ-Þ][\\wÀ-ÿ'’-]*(?:(?:\\s+(?:${PLACE_INFIXES}))*\\s+[A-ZÀ-Þ][\\wÀ-ÿ'’-]*)*`;
+
+const GEMEENTE_PLACE_RE = new RegExp(`\\bgemeente\\s+(${PLACE_CORE})`);
+const IN_PLACE_RE = new RegExp(`\\bin\\s+(${PLACE_CORE})`);
+
+/**
  * Pull a place name out of a raw (non-lowercased) question so bbox- and
  * gemeente-scoped sources can be driven from natural language: "in Tilburg",
  * "gemeente Land van Cuijk". Exported for router-intent tests.
+ *
+ * Over-capturing ("in Amsterdam en Utrecht") is preferred over truncating: an
+ * unresolvable name makes a source answer "not found", which is honest, while a
+ * truncated one silently resolves to a different place.
  */
 export function extractPlaceName(text: string): string | undefined {
-  const gemeenteMatch =
-    /\bgemeente\s+([A-ZÀ-Þ][\wÀ-ÿ'’-]*(?:\s+(?:aan|den|de|van|der|op|het|'t|en)\s+[\wÀ-ÿ'’-]+)*)/.exec(text);
-  const inMatch =
-    /\bin\s+([A-ZÀ-Þ][\wÀ-ÿ'’-]*(?:\s+(?:aan|den|de|van|der|op|het|'t)\s+[\wÀ-ÿ'’-]+)*)/.exec(text);
+  const gemeenteMatch = GEMEENTE_PLACE_RE.exec(text);
+  const inMatch = IN_PLACE_RE.exec(text);
   const raw = (gemeenteMatch?.[1] ?? inMatch?.[1] ?? "").trim().replace(/[?.,;:!]+$/, "");
   return raw.length >= 3 ? raw : undefined;
 }
@@ -1847,11 +1875,19 @@ export function registerTools(server: McpServer): void {
           String(x.timestamp ?? x.timestamp_measured ?? ""),
         ));
         if (records.length) {
+          // Without a recognised place these are stations from all over the
+          // country. Saying so beats letting "luchtkwaliteit Utrecht" read as if
+          // the returned Oude Meer station were Utrecht's.
+          const scopeNote = plaats
+            ? undefined
+            : "Geen plaatsnaam in de vraag herkend; dit zijn landelijke metingen. Noem de plaats expliciet (bijv. 'luchtkwaliteit in Utrecht') voor lokale waarden.";
           return askSuccess({
-            summary: `Router: Luchtmeetnet${plaats ? ` ${plaats}` : ""} (${records.length} metingen)`,
+            summary: `Router: Luchtmeetnet${plaats ? ` ${plaats}` : " — landelijk"} (${records.length} metingen)`,
             records,
             provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total),
-            access_note: (out as { access_note?: string }).access_note,
+            access_note:
+              [scopeNote, (out as { access_note?: string }).access_note].filter(Boolean).join(" ") ||
+              undefined,
             total: out.total,
           });
         }
