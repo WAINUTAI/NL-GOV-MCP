@@ -25,7 +25,12 @@
 - CKAN-compatible search adapter at `/api/3/action/package_search`
 
 ## DUO
-- CKAN datasets adapter on `https://onderwijsdata.duo.nl`
+- CKAN adapter on `https://onderwijsdata.duo.nl`
+  - `datastore_search` (per-row) for `duo_schools` and `duo_exam_results` — every DUO resource is `datastore_active`, so rows are filterable server-side
+  - `package_search` (catalogue) for `duo_datasets_search`
+  - `package_show` resolves the current resource id per dataset by resource name, so a DUO re-upload (which mints a new resource id) does not break the connector; the last known id is the fallback
+- Datasets used: `adressen_bo` (vestigingen po), `adressen_vo` (vestigingen vo), `adressen_mbo`, `adressen_ho` (instellingen), `03_voex-v1` (slagingspercentages per vestiging, schooljaren 2013–2017)
+- Filter semantics: `GEMEENTENAAM` / `PLAATSNAAM` / `POSTCODE` match exactly and are stored uppercase (input is uppercased for you); a school name goes through the datastore full-text `q`
 - RIO adapter on `https://lod.onderwijsregistratie.nl/rio-api`
 
 ## API register
@@ -167,3 +172,61 @@
 - **Auth**: KEY-VEREIST. Subscription key via HTTP-header `Ocp-Apim-Subscription-Key`. Gratis: maak een My DNB-account op https://api.portal.dnb.nl/, abonneer op het product **'Public'** en genereer de key op de productpagina (self-service, geen goedkeuring; rate limit 30 calls/min). Kopieer de primary key naar `DNB_API_KEY`.
 - **Data**: Engelstalige datasets o.a. rente, wisselkoersen, hypotheken, balansen pensioenfondsen/verzekeraars, betalingsbalans. Respons is `{ records: [...], lastReleaseDate, _metadata }`; per datapunt periode/waarde (+ dataset-specifieke velden zoals currency/typeOfRate).
 - **dataset-argument**: geef het pad `statisticsdata/<versie>/<dataset-slug>` (bijv. `statisticsdata/v2026061000/exchange-rates-of-the-euro-and-gold-price-day`) of een volledige URL. De dataset-slugs staan in de API-docs op het portaal (APIs → DNB Statistics API). De datapunt-parser is defensief (accepteert records/observations/data/value/results-containers en period/value/unit in diverse casings).
+
+
+## Nieuwe bronnen (v0.3)
+
+## TenderNed (aanbestedingen)
+
+- **Connector**: `tenderned` (category `semi_live`)
+- **Tools**: `tenderned_aanbestedingen_search`, `tenderned_aanbesteding_get`
+- **Endpoints**: `https://www.tenderned.nl/papi/tenderned-rs-tns/v2/publicaties` (lijst), `/publicaties/{id}` (detail), `/publicaties/{id}/pdf` (officiële aankondiging als PDF)
+- **Auth**: geen (publieke `papi`-API)
+- **Geverifieerde queryparameters**: `search` (vrije tekst), `typeOpdracht` (`L`=leveringen, `D`=diensten, `W`=werken), `procedure` (o.a. `OPE`, `NOP`, `MAC`, `OZB`, `CCD`), `publicatieDatumVanaf`, `publicatieDatumTot` (JJJJ-MM-DD), `page` (0-based), `size` (max **100**, hoger geeft HTTP 400).
+- **Belangrijk**: onbekende parameters worden stil genegeerd (geen 400). Een niet-ondersteund filter lijkt dus te werken terwijl het álles teruggeeft — daarom stuurt de connector uitsluitend bovenstaande, live geverifieerde parameters mee.
+- **Detail**: CPV-codes, NUTS-regio, juridisch kader, procedure, aanvang/voltooiing opdracht, gunningsstatus en gerelateerde publicaties. Met `include_text` wordt de tekstlaag van de aankondigings-PDF geëxtraheerd (`utils/pdf-text.ts`).
+- **Sortering**: de API levert standaard nieuwste publicatiedatum eerst; een `sort`-parameter wordt genegeerd.
+
+## Tuchtrecht (KOOP SRU)
+
+- **Connector**: `tuchtrecht` (category `static`)
+- **Tool**: `tuchtrecht_search`
+- **Endpoint**: `https://repository.overheid.nl/sru` met `c.product-area==tuchtrecht` (~48k uitspraken)
+- **Auth**: geen
+- **Dekking**: tuchtcolleges gezondheidszorg (regionaal + centraal), advocatuur, notariaat, accountants, diergeneeskunde, gerechtsdeurwaarders. **Rechtspraak.nl bevat deze uitspraken niet** — `nl_gov_ask` routeert tuchtrechtvragen daarom vóór de Rechtspraak-route.
+- **Velden**: ECLI, college, instantiedomein/-plaats, zaaknummer, beslissing, uitspraakdatum, onderwerp, samenvatting, `tuchtrecht.overheid.nl`-link en de PDF-manifestatie uit `enrichedData/itemUrl`.
+- **Filters**: `dt.creator=="<college>"` (exact) en `dt.modified>=/<=` (ISO-datum).
+
+## Samenwerkende Catalogi (KOOP SRU)
+
+- **Connector**: `samenwerkende_catalogi` (category `static`)
+- **Tool**: `samenwerkende_catalogi_search`
+- **Endpoint**: `https://repository.overheid.nl/sru` met `c.product-area==samenwerkendecatalogi` (~55k productbeschrijvingen)
+- **Auth**: geen
+- **Inhoud**: welk product/dienst een gemeente, provincie of waterschap aanbiedt (paspoort, gehandicaptenparkeerkaart, schuldhulpverlening …), met organisatie, organisatietype, gebied, doelgroep en samenvatting.
+- **Filters**: `dt.creator=="<organisatie>"` (exact) en `dt.modified>=/<=`.
+
+### CQL-let op (geldt voor alle KOOP SRU-collecties)
+
+Meerdere woorden vrije tekst moeten als losse termen met `AND` worden verbonden: `... AND tuchtklachten huisarts` is een **CQL-syntaxfout** die het endpoint beantwoordt met een diagnostic zónder records (stil nul-resultaat), en een phrase (`"tuchtklachten huisarts"`) matcht niets omdat deze indexen geen phrase-search hebben. `src/utils/sru-cql.ts` doet die splitsing centraal; dit repareerde meteen dezelfde latente bug in `officiele_bekendmakingen_search`.
+
+## BRP Gewaspercelen (RVO, PDOK WFS)
+
+- **Connector**: `brp_gewaspercelen` (category `static`)
+- **Tool**: `brp_gewaspercelen_search`
+- **Endpoint**: `https://service.pdok.nl/rvo/brpgewaspercelen/wfs/v1_0`, featuretype `brpgewaspercelen:BrpGewas`
+- **Let op de host**: `api.pdok.nl/rvo/brpgewaspercelen/...` (OGC API Features) bestaat **niet** voor deze dataset (HTTP 404); alleen de `service.pdok.nl` WFS.
+- **Auth**: geen
+- **Velden**: gewas, gewascode, category (Bouwland/Grasland/Natuurterrein/Landschapselement/Braakland), jaar, status + polygon. Oppervlakte wordt lokaal berekend (shoelace, inclusief aftrek van binnenringen) omdat de bron geen oppervlakteveld levert.
+- **Filtering**: de service is MapServer-based en negeert `cql_filter`; bbox is dus de enige server-side selector en gewas/categorie/jaar filteren client-side. Gemeentenaam wordt via de gedeelde geo-primitive (`utils/geo.ts`, ±8 km) naar een bbox omgezet.
+- **Totaal**: het GeoJSON-antwoord bevat geen `numberMatched`; het totaal komt uit een aparte `resultType=hits`-call (kleine XML-respons) die parallel loopt en bij falen simpelweg het aantal opgehaalde features gebruikt.
+
+## Kiesraad — Databank Verkiezingsuitslagen
+
+- **Connector**: `verkiezingsuitslagen` (category `static`)
+- **Tool**: `verkiezingsuitslagen_search`
+- **Endpoints**: `https://www.verkiezingsuitslagen.nl/verkiezingen/detailJson/{code}` (landelijk + regio-index) en `/detailJson/{code}/{stemregioId}` (provincie/gemeente). De verkiezingenlijst wordt uit de server-rendered overzichtspagina `/verkiezingen` geparsed; een JSON-lijstendpoint bestaat niet.
+- **Auth**: geen
+- **Codes**: `TK`, `EK`, `EP`, `GR`, `PS`, `WS`, `ER`, `KC` + datum, bv. `TK20251029`.
+- **Velden**: per partij stemmen, percentage en zetels; per gebied kiesgerechtigden, opkomst(percentage), geldige/blanco/ongeldige stemmen. Kiesraad levert Nederlandse getalnotatie (`1.790.634`, `16,94%`); de connector zet die om naar echte getallen.
+- **Beperking**: de databank gaat tot gemeenteniveau. Uitslagen per stembureau en voorkeurstemmen per kandidaat staan als bestanden op data.overheid.nl en zitten niet in deze tool.

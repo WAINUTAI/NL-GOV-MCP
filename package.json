@@ -17,7 +17,8 @@
     "test:acceptance": "vitest run -c vitest.acceptance.config.ts",
     "test:questions": "tsx scripts/run-question-suite.ts --profile full",
     "test:live": "tsx scripts/run-question-suite.ts --profile live",
-    "check": "tsc -p tsconfig.json --noEmit"
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test:new-sources": "tsx scripts/live-check-new.ts"
   },
   "repository": {
     "type": "git",
@@ -39,6 +40,7 @@
     "express": "^5.2.1",
     "fast-xml-parser": "^5.4.1",
     "pino": "^10.3.1",
+    "unpdf": "^1.8.1",
     "zod": "^4.3.6"
   },
   "devDependencies": {

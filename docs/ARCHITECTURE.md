@@ -31,7 +31,7 @@ Technical overview of how NL-GOV-MCP is structured internally.
               ▼                   ▼                    ▼
      ┌────────────────┐  ┌────────────────┐  ┌────────────────┐
      │  sources/*.ts   │  │  utils/*.ts     │  │  types.ts      │
-     │  39 connectors  │  │  shared infra   │  │  contracts     │
+     │  44 connectors  │  │  shared infra   │  │  contracts     │
      └───────┬────────┘  └────────────────┘  └────────────────┘
              │
              ▼
@@ -84,7 +84,7 @@ A single tool call flows through these steps:
 | `src/types.ts` | Shared TypeScript interfaces: `MCPRecord`, `Provenance`, `MCPToolResponse`, `MCPErrorResponse`, `AppConfig`. |
 | `src/config.ts` | Loads `config/default.json`, merges env var overrides. |
 
-### Sources (39 connectors)
+### Sources (44 connectors)
 
 Each source is a class with one or more async methods. All methods return a normalized shape:
 
@@ -142,12 +142,16 @@ The tool handler in `tools.ts` maps `items` to `MCPRecord[]` and wraps provenanc
 | `dnb-statistics.ts` | REST (key required) | `dnb` |
 | `ruimtelijke-plannen.ts` | PDOK WMS GetFeatureInfo + Locatieserver | `ruimtelijke_plannen` |
 | `dso-omgevingsdocumenten.ts` | DSO Presenteren API v8 (REST/HAL+JSON, key required) | `dso_omgevingsdocumenten` |
+| `tenderned.ts` | REST JSON (`papi`) + PDF text extraction | `tenderned` |
+| `koop-collecties.ts` | KOOP SRU 2.0, one class per product-area | `tuchtrecht`, `samenwerkende_catalogi` |
+| `brp-gewaspercelen.ts` | PDOK WFS 2.0 (GeoJSON) + Locatieserver | `brp_gewaspercelen` |
+| `verkiezingsuitslagen.ts` | Kiesraad JSON endpoints + HTML overview parse | `verkiezingsuitslagen` |
 
 ### Utilities
 
 | File | Purpose |
 |------|---------|
-| `http.ts` | `getJson()`, `getText()`, `postJson()` — all HTTP goes through here. Adds timeout (10s default), retry with exponential backoff (2 retries default), cache lookup, circuit breaker check, concurrency slot acquisition. Throws typed `SourceRequestError`. |
+| `http.ts` | `getJson()`, `getText()`, `postJson()`, `getBinary()` — all HTTP goes through here. Adds timeout (10s default), retry with exponential backoff (2 retries default), cache lookup, circuit breaker check, concurrency slot acquisition. Throws typed `SourceRequestError`. |
 | `connector-runtime.ts` | Per-connector state machine: health counters, circuit breaker (3 failures → open, 5 min cooldown, probe-on-recovery), concurrency limiter (max 3 in-flight, queue with 30s timeout), HTTP response cache (TTL by source category, max 1000 entries, LRU eviction). |
 | `response.ts` | Factory functions: `successResponse()`, `errorResponse()`, `mapSourceError()` (translates `SourceRequestError` → typed MCP error), `toMcpToolPayload()` (wraps result for MCP transport). |
 | `tool-runner.ts` | `buildFormattedResponse()` — the standard post-processing pipeline: cross-reference enrichment → pagination → output formatting → wrap as success response. Also `dryRunPayload()` and `singleConnectorVerbose()`. |
@@ -158,6 +162,9 @@ The tool handler in `tools.ts` maps `items` to `MCPRecord[]` and wraps provenanc
 | `cbs-trends.ts` | Enriches CBS observations with `previous_period`, `previous_value`, `delta`, `delta_pct` when result shape is unambiguous. |
 | `logger.ts` | Pino JSON logger, level via `LOG_LEVEL` env. |
 | `xml-parser.ts` | `fast-xml-parser` wrapper for SRU/XML sources. |
+| `sru-cql.ts` | Free text → valid CQL for the KOOP SRU endpoints. Multi-word input must be AND-joined: a bare phrase is a CQL syntax error the endpoint answers with zero records, and these indexes have no phrase search. |
+| `geo.ts` | Shared geo primitive for bbox-driven sources: PDOK Locatieserver lookups (gemeente/woonplaats → RD centroid), bbox construction and EPSG:28992 extent validation. Used by `bron-ongevallen`, `ruimtelijke-plannen` and `brp-gewaspercelen`. |
+| `pdf-text.ts` | PDF text-layer extraction (unpdf/pdf.js). `verbosity: 0` is mandatory: on the stdio transport a stray pdf.js console line would corrupt the JSON-RPC stream. Returns typed failures (`no_text_layer`, `encrypted`, `not_a_pdf`, `too_large`, `corrupt`) instead of throwing, and caps both the download (32 MB) and the returned characters. |
 
 ## Resilience stack
 
@@ -235,7 +242,7 @@ The HTTP client, caching, circuit breaker, retry, and concurrency limiting are a
 
 ## Transport modes
 
-All three transports expose the same 64 tools and are created by `server.ts`:
+All three transports expose the same 70 tools and are created by `server.ts`:
 
 | Mode | Protocol | Session model | Use case |
 |------|----------|---------------|----------|

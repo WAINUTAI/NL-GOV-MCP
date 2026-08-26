@@ -1,4 +1,5 @@
 import { getJson, getText } from "../utils/http.js";
+import { fetchPdfText } from "../utils/pdf-text.js";
 import type { AppConfig } from "../types.js";
 
 function toItems(data: unknown): Array<Record<string, unknown>> {
@@ -181,7 +182,22 @@ export class TweedeKamerSource {
       if (!contentType) {
         item.text_preview_unavailable_reason = "missing_content_type";
       } else if (contentType.includes("pdf")) {
-        item.text_preview_unavailable_reason = "pdf_not_extracted_in_lean_mode";
+        // Kamerstukken are overwhelmingly PDF; extract the text layer instead of
+        // handing the caller a link it cannot read.
+        const extracted = await fetchPdfText(resourceUrl, {
+          maxChars,
+          connector: "tweede_kamer",
+        });
+        item.resolved_resource_url = extracted.source_url;
+        if (extracted.ok) {
+          item.text_preview = extracted.text;
+          item.text_preview_chars = extracted.chars;
+          item.text_preview_truncated = extracted.truncated;
+          item.text_preview_source = "pdf_text_layer";
+          item.resource_pages = extracted.pages;
+        } else {
+          item.text_preview_unavailable_reason = `pdf_${extracted.reason}`;
+        }
       } else if (!isTextLikeContentType(contentType)) {
         item.text_preview_unavailable_reason = "content_type_not_text_like";
       } else {

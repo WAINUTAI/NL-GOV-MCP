@@ -52,6 +52,12 @@ export interface RequestOptions {
   disableCache?: boolean;
   /** Cap on the decoded response body in bytes. Defaults to MAX_RESPONSE_BYTES. */
   maxResponseBytes?: number;
+  /**
+   * "binary" returns the raw bytes instead of a UTF-8 string. Binary responses
+   * are never cached: the response cache holds strings and a PDF-sized payload
+   * would evict everything useful in it.
+   */
+  responseType?: "text" | "binary";
 }
 
 export interface HttpMeta {
@@ -154,10 +160,10 @@ async function readBodyCapped(
   timeoutMs: number,
   maxBytes: number,
   endpoint: string,
-): Promise<string> {
+): Promise<Uint8Array> {
   const body = response.body;
   if (!body) {
-    // No readable stream (rare) — guard response.text() with a deadline.
+    // No readable stream (rare) — guard the buffered read with a deadline.
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<never>((_, reject) => {
       timer = setTimeout(
@@ -173,7 +179,16 @@ async function readBodyCapped(
       );
     });
     try {
-      return await Promise.race([response.text(), deadline]);
+      const buffer = await Promise.race([response.arrayBuffer(), deadline]);
+      const bytes = new Uint8Array(buffer);
+      if (bytes.byteLength > maxBytes) {
+        throw new SourceRequestError({
+          message: `Response body exceeded ${maxBytes} bytes`,
+          endpoint,
+          code: "malformed_response",
+        });
+      }
+      return bytes;
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -223,7 +238,7 @@ async function readBodyCapped(
     merged.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return new TextDecoder("utf-8").decode(merged);
+  return merged;
 }
 
 interface CachedHttpPayload {
@@ -234,6 +249,8 @@ interface CachedHttpPayload {
 
 interface RequestOutcome {
   bodyText: string;
+  /** Raw bytes — only populated for responseType: "binary". */
+  bodyBytes?: Uint8Array;
   status: number;
   headers: Headers;
   meta: HttpMeta;
@@ -256,12 +273,13 @@ async function request(
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const retries = options.retries ?? DEFAULT_RETRIES;
   const maxBytes = options.maxResponseBytes ?? MAX_RESPONSE_BYTES;
+  const binary = options.responseType === "binary";
   const fullUrl = withQuery(url, options.query);
   const safeUrl = redactUrl(fullUrl);
   const connector = options.connector ?? inferConnectorName(fullUrl);
 
   const cacheEnabled =
-    !options.disableCache && (method === "GET" || method === "POST");
+    !binary && !options.disableCache && (method === "GET" || method === "POST");
   const cacheTtlMs = options.cacheTtlMs ?? getConnectorCacheTtlMs(connector);
   const cacheKey = cacheEnabled
     ? makeHttpCacheKey({ connector, method, url: fullUrl, body })
@@ -433,7 +451,8 @@ async function request(
         }
 
         // Read the body under a bounded timeout + byte cap (see readBodyCapped).
-        const bodyText = await readBodyCapped(response, timeoutMs, maxBytes, fullUrl);
+        const bodyBytes = await readBodyCapped(response, timeoutMs, maxBytes, fullUrl);
+        const bodyText = binary ? "" : new TextDecoder("utf-8").decode(bodyBytes);
 
         if (cacheEnabled && cacheKey && cacheTtlMs > 0) {
           const headerPairs: Array<[string, string]> = [];
@@ -457,6 +476,7 @@ async function request(
 
         return {
           bodyText,
+          ...(binary ? { bodyBytes } : {}),
           status: response.status,
           headers: response.headers,
           meta: {
@@ -572,6 +592,26 @@ export async function getText(
 ): Promise<{ data: string; meta: HttpMeta }> {
   const { bodyText, meta } = await request("GET", url, options);
   return { data: bodyText, meta };
+}
+
+/**
+ * Fetch a binary resource (PDF, image, archive) with the same resilience stack as
+ * getJson/getText. Never cached — see RequestOptions.responseType.
+ */
+export async function getBinary(
+  url: string,
+  options: RequestOptions = {},
+): Promise<{ data: Uint8Array; contentType: string; meta: HttpMeta }> {
+  const { bodyBytes, headers, meta } = await request("GET", url, {
+    ...options,
+    responseType: "binary",
+  });
+
+  return {
+    data: bodyBytes ?? new Uint8Array(0),
+    contentType: (headers.get("content-type") ?? "").toLowerCase(),
+    meta,
+  };
 }
 
 export async function postJson<T>(

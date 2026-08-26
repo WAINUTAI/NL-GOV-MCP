@@ -177,3 +177,46 @@ Nadat de gratis API-keys waren aangevraagd, zijn de vier key-tools live geverifi
 Key-product-vereisten (gedocumenteerd in `.env.example`, README en SOURCES.md):
 - **NS**: abonneer op het **"Ns-App"**-product (bevat de Reisinformatie API, gratis externe tier ~300 req/5 min). Het "Public-Travel-Information"-product is verouderd en NS keurt daar geen nieuwe abonnementen meer op goed.
 - **DNB**: abonneer op het **"Public"**-product en genereer de key op de productpagina (self-service, geen goedkeuring; 30 calls/min).
+
+
+## Delivered in v0.3 (augustus 2026)
+
+Vijf nieuwe connectors + twee dwarsdoorsnijdende capabilities (39 → 44 connectors; 64 → 70 tools). Elke bron is vóór het bouwen live geverifieerd (bestaan, gratis toegang, echte queryparameters) en na het bouwen end-to-end getest via `scripts/live-check-new.ts` en de question-suite.
+
+**Nieuwe connectors (allemaal keyless):**
+- `tenderned_aanbestedingen_search` + `tenderned_aanbesteding_get` — aanbestedingen/gunningen (TenderNed `papi`)
+- `tuchtrecht_search` — tuchtrechtuitspraken (KOOP SRU, ~48k)
+- `samenwerkende_catalogi_search` — productbeschrijvingen gemeenten/provincies/waterschappen (KOOP SRU, ~55k)
+- `brp_gewaspercelen_search` — landbouwpercelen met gewas (PDOK WFS, RVO)
+- `verkiezingsuitslagen_search` — Kiesraad-databank verkiezingsuitslagen
+
+**Herbouwd:**
+- `duo_schools` / `duo_exam_results` — waren catalogus-zoekopdrachten (leverden datasetbeschrijvingen i.p.v. scholen, terwijl de README per-school antwoorden beloofde). Nu op de CKAN **datastore**: echte per-vestiging records met server-side filters op gemeente/plaats/postcode en full-text op naam; examenresultaten met slagingspercentage en sortering.
+
+**Nieuwe gedeelde capabilities:**
+- `src/utils/pdf-text.ts` — PDF-tekstextractie (unpdf/pdf.js, `verbosity: 0` zodat pdf.js-waarschuwingen de stdio-JSON-RPC-stream niet vervuilen). Hiermee levert `tweede_kamer_document_get` eindelijk Kamerstuk-tekst i.p.v. `pdf_not_extracted_in_lean_mode`, en `tenderned_aanbesteding_get` de tekst van de officiële aankondiging. Typed failure-redenen (`no_text_layer`, `encrypted`, `not_a_pdf`, `too_large`, `corrupt`).
+- `src/utils/geo.ts` — gedeelde geo-primitive (Locatieserver-resolutie, bbox-opbouw, RD-extentvalidatie). `bron_ongevallen` en `ruimtelijke_plannen` hadden hier elk hun eigen kopie van; `brp_gewaspercelen` gebruikt dezelfde.
+- `src/utils/http.ts` — `getBinary()` (binaire responses via dezelfde retry/circuit-breaker/limiter-stack; binaire bodies worden nooit gecachet).
+- `src/utils/sru-cql.ts` — vrije tekst → geldige CQL.
+
+**Onderweg gevonden en meegefixt:**
+- **KOOP SRU multi-word bug** — `officiele_bekendmakingen_search` gaf bij elke zoekopdracht van twee of meer woorden 0 resultaten: `... AND bestemmingsplan Rotterdam` is een CQL-syntaxfout, die het endpoint beantwoordt met een diagnostic zonder records (stil nul-resultaat). De tool-beschrijving adviseerde nota bene zelf zulke queries. Nu AND-combineert `utils/sru-cql.ts` de termen; phrase-quoting is géén alternatief (deze indexen hebben geen phrase-search).
+- **Router routeerde tuchtrecht naar Rechtspraak** — "tuchtrecht" stond in `rechtspraakTerms`, terwijl rechtspraak.nl deze uitspraken niet bevat. De tuchtrecht-route staat nu vóór de Rechtspraak-route.
+- **Meervoudsvormen in de routerintent** — de router matcht op woordgrenzen, dus "basisscholen" matchte `basisschool` niet; onderwijsvragen in het meervoud vielen door naar de generieke fallback.
+
+### Bewust uitgesloten in v0.3
+
+- **Woo-index / open.overheid.nl** — niet haalbaar gebleken, en dat is geverifieerd, niet aangenomen:
+  - De KOOP SRU-collectie `plooi` bestaat niet meer: een `scan` op `c.product-area` (`operation=scan&scanClause=c.product-area=a`) geeft exact zeven product areas — `datacollecties` (66k), `lokalebekendmakingen` (6k), `officielepublicaties` (6,6M), `samenwerkendecatalogi` (55k), `sgd` (455k), `tuchtrecht` (48k), `vd` (23k). `plooi`, `woo` en varianten geven 0 records.
+  - De enige machine-leesbare route is de API achter de zoekportaal-SPA (`https://open.overheid.nl/overheid/openbaarmakingen/api/v0/zoeken`, gevonden in de front-end bundle). Die geeft **HTTP 401** op elke aanroep — met en zonder browser-UA, met Referer/Origin, met sessie-cookie, en zowel GET als POST. De front-end bundle bevat geen sleutel, dus het is een IP-/omgevingsgebonden blokkade, geen ontbrekende credential.
+  - Conclusie: pas oppakken als KOOP een gedocumenteerde publieke API of een SRU-product-area voor Woo-openbaarmakingen levert. Een connector bouwen op een endpoint dat we niet kunnen aanroepen zou een tool opleveren die alleen `http_error` teruggeeft.
+- **Uitslagen per stembureau / voorkeurstemmen** — de Kiesraad-databank gaat tot gemeenteniveau; stembureau-EML's staan als bestanden op data.overheid.nl (geen query-API).
+- **Recentere VO-examencijfers per vestiging** — de CKAN-portal van DUO bevat exact één per-vestiging examendataset (`03_voex-v1`, t/m schooljaar 2017); nieuwere examencijfers publiceert DUO alleen als losse CSV-downloads op duo.nl zonder stabiele, ontdekbare URL's.
+
+### Volgende kandidaten (uit hetzelfde bronnenonderzoek)
+
+1. Gemeentelijke open-dataportalen (Rotterdam ~1.400, Groningen ~540, Utrecht ~310, Den Haag ~250, Amsterdam ~140 datasets; Amsterdam heeft een eigen API)
+2. Klimaatmonitor (RWS) — energieverbruik/CO₂ per gemeente
+3. AHN / BGT / BRT via PDOK (staat sinds priority A in deze backlog, nog niet afgerond)
+4. TED (EU-aanbestedingen) als Europese tegenhanger van TenderNed
+5. Entity-resolutielaag: gemeentecode ↔ TOOI ↔ BAG ↔ kadastrale gemeente ↔ politie-regiocode
