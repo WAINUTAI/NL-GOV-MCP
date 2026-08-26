@@ -35,7 +35,7 @@
   },
   "homepage": "https://github.com/WAINUTAI/NL-GOV-MCP#readme",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "fast-xml-parser": "^5.4.1",

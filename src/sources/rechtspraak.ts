@@ -107,27 +107,12 @@ function mapResult(item: RechtspraakApiResult): RechtspraakItem {
   };
 }
 
-function noMatchItem(query: string): RechtspraakItem {
+/** Where a human can continue the search themselves when this server found nothing. */
+function searchPageUrl(query: string): string {
   const explicitEcli = extractEcli(query);
-  const fallbackLink = explicitEcli
+  return explicitEcli
     ? `${RECHTSPRAAK_CONTENT}?id=${encodeURIComponent(explicitEcli)}`
     : `${RECHTSPRAAK_SEARCH_PAGE}?zoekterm=${encodeURIComponent(query)}&inhoudsindicatie=zt0&sort=Relevance&publicatiestatus=ps1`;
-
-  return {
-    id:
-      explicitEcli ??
-      `rechtspraak-no-match-${query.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "query"}`,
-    title: explicitEcli
-      ? `Fallback uitspraak voor ${explicitEcli}`
-      : `Geen passende Rechtspraak-uitspraak gevonden voor '${query}'`,
-    summary: explicitEcli
-      ? "Geen live resultaat; expliciete ECLI als deterministic fallback gebruikt."
-      : "De Rechtspraak-zoekservice gaf geen inhoudelijke ECLI-match voor deze zoekterm.",
-    updated: new Date(0).toISOString(),
-    link: fallbackLink,
-    ecli: explicitEcli,
-    mode: "deterministic-no-match",
-  };
 }
 
 function facetCount(
@@ -246,9 +231,13 @@ export class RechtspraakSource {
     }
 
     if (!items.length) {
+      // A search that matched nothing returns nothing. This used to answer with
+      // a synthesised record titled "Geen passende Rechtspraak-uitspraak
+      // gevonden voor '<query>'", which a caller counting records read as one
+      // ruling found.
       return {
-        items: [noMatchItem(searchTerm)].slice(0, args.rows),
-        total: 1,
+        items: [],
+        total: 0,
         endpoint: meta.url,
         params: {
           term: searchTerm,
@@ -256,9 +245,12 @@ export class RechtspraakSource {
           sortOrder,
           ...(filterIdentifier ? { publicatieFilter: filterIdentifier } : {}),
         },
-        access_note:
-          accessNotes.join(" ") ||
-          "Geen passende ECLI-match gevonden voor deze zoekterm.",
+        access_note: [
+          accessNotes.join(" ") || "Geen passende ECLI-match gevonden voor deze zoekterm.",
+          `Zoek handmatig verder op ${searchPageUrl(searchTerm)}.`,
+        ]
+          .filter(Boolean)
+          .join(" "),
       };
     }
 
@@ -276,19 +268,23 @@ export class RechtspraakSource {
     };
   }
 
+  /**
+   * The search service was unreachable.
+   *
+   * Returns nothing rather than a synthesised "fallback uitspraak" record: an
+   * invented ruling is the last thing a legal question should get back, and the
+   * note carries a working search link instead.
+   */
   fallback(args: { query: string; rows: number }) {
-    const item = noMatchItem(args.query);
     return {
-      items: [item].slice(0, args.rows),
-      total: 1,
-      endpoint: `${RECHTSPRAAK_SEARCH_API} (fallback)`,
+      items: [] as RechtspraakItem[],
+      total: 0,
+      endpoint: `${RECHTSPRAAK_SEARCH_API} (niet bereikbaar)`,
       params: {
         term: args.query,
         rows: String(args.rows),
-        mode: "deterministic-fallback",
       },
-      access_note:
-        "Rechtspraak zoekservice tijdelijk niet bereikbaar; no-match fallbackrecord gebruikt.",
+      access_note: `De Rechtspraak-zoekservice was niet bereikbaar, dus er zijn geen uitspraken opgehaald voor '${args.query}'. Probeer het later opnieuw of zoek op ${searchPageUrl(args.query)}.`,
     };
   }
 }
