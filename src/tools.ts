@@ -99,8 +99,23 @@ function record(source: string, title: string, canonical_url: string, data: Reco
   return { source_name: source, title, canonical_url, data, snippet, date };
 }
 
-function prov(tool: string, endpoint: string, query_params: Record<string, string>, returned_results: number, total_results?: number) {
-  return { tool, endpoint, query_params, timestamp: nowIso(), returned_results, total_results };
+/**
+ * `total_results` is omitted when a source cannot know it.
+ *
+ * Sources pass `null` for "upstream gives no count". Echoing the page size there
+ * — which several connectors used to do — makes a client render "10 of 10" for a
+ * query holding thousands, so a null is dropped from the payload instead of
+ * being coerced to a number.
+ */
+function prov(tool: string, endpoint: string, query_params: Record<string, string>, returned_results: number, total_results?: number | null) {
+  return {
+    tool,
+    endpoint,
+    query_params,
+    timestamp: nowIso(),
+    returned_results,
+    total_results: total_results ?? undefined,
+  };
 }
 
 const outputFormatSchema = z.enum(["json", "csv", "geojson", "markdown_table"]).default("json");
@@ -546,7 +561,7 @@ export function registerTools(server: McpServer): void {
       return toMcpToolPayload(successResponse({
         summary: `${records.length} Tweede Kamer records`,
         records,
-        provenance: prov("tweede_kamer_search", out.endpoint, out.params, records.length, records.length),
+        provenance: prov("tweede_kamer_search", out.endpoint, out.params, records.length, out.total),
         output_format: formatted.output_format,
         formatted_output: formatted.formatted_output,
         access_note: mergeAccessNotes(
@@ -613,7 +628,7 @@ export function registerTools(server: McpServer): void {
   });
 
   server.registerTool("tweede_kamer_members", { description: "List current or former Tweede Kamer members. Optionally filter by parliamentary group (fractie).", inputSchema: { fractie: z.string().optional(), active: z.boolean().default(true), top: z.number().int().min(1).max(config.limits.maxRows).default(50) }, annotations: TOOL_ANNOTATIONS }, async ({ fractie, active, top }) => {
-    try { const out = await tk.getMembers({ fractie, active, top }); const records = out.items.map((x)=>record("tweedekamer", String(x.name ?? x.id ?? "Kamerlid"), String(x.persoon_url ?? "https://www.tweedekamer.nl"), x, String(x.fractie ?? ""), String(x.start_date ?? ""))); return toMcpToolPayload(successResponse({ summary: `${records.length} Kamerleden`, records, provenance: prov("tweede_kamer_members", out.endpoint, out.params, records.length, records.length) })); } catch(e){ return toMcpToolPayload(mapSourceError(e, "Tweede Kamer", "https://www.tweedekamer.nl")); }
+    try { const out = await tk.getMembers({ fractie, active, top }); const records = out.items.map((x)=>record("tweedekamer", String(x.name ?? x.id ?? "Kamerlid"), String(x.persoon_url ?? "https://www.tweedekamer.nl"), x, String(x.fractie ?? ""), String(x.start_date ?? ""))); return toMcpToolPayload(successResponse({ summary: `${records.length} Kamerleden`, records, provenance: prov("tweede_kamer_members", out.endpoint, out.params, records.length, null) })); } catch(e){ return toMcpToolPayload(mapSourceError(e, "Tweede Kamer", "https://www.tweedekamer.nl")); }
   });
 
   server.registerTool("officiele_bekendmakingen_search", { description: "Search Officiële Bekendmakingen (Dutch official publications: Staatscourant, Staatsblad, Kamerstukken, gemeenteblad). Use legal/policy topic keywords. Optionally filter by type, authority, and date range.", inputSchema: { query: z.string().describe("Legal or policy topic keywords. Examples: 'bestemmingsplan Rotterdam', 'subsidieregeling', 'omgevingsvergunning'. Do NOT pass full questions."), top: z.number().int().min(1).max(100).default(20), startRecord: z.number().int().min(1).default(1), type: z.string().optional(), authority: z.string().optional(), date_from: z.string().optional(), date_to: z.string().optional(), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) }, annotations: TOOL_ANNOTATIONS }, async ({ query, top, startRecord, type, authority, date_from, date_to, offset, limit, outputFormat, verbose, dryRun }) => {
@@ -1012,12 +1027,12 @@ export function registerTools(server: McpServer): void {
     }
   });
 
-  server.registerTool("ori_search", { inputSchema: { query: z.string().describe("Municipal governance topic keywords. Examples: 'parkeerbeleid', 'bestemmingsplan', 'raadsvergadering woningbouw'. Do NOT pass full questions."), sort: z.enum(["relevance", "date_newest"]).default("relevance").describe("Use 'date_newest' when user asks for recent/latest council documents. Use 'relevance' for general searches."), rows: z.number().int().min(1).max(config.limits.maxRows).default(20), bestuurslaag: z.string().optional() }, description: "Search Open Raadsinformatie (ORI) — Dutch municipal council documents, motions, and decisions. Use policy topic keywords. Use 'sort' parameter for recency.", annotations: TOOL_ANNOTATIONS }, async ({ query, sort, rows, bestuurslaag }) => {
+  server.registerTool("ori_search", { inputSchema: { query: z.string().describe("Municipal governance topic keywords. Examples: 'parkeerbeleid', 'bestemmingsplan', 'raadsvergadering woningbouw'. Do NOT pass full questions."), sort: z.enum(["relevance", "date_newest"]).default("relevance").describe("Use 'date_newest' when user asks for recent/latest council documents. Use 'relevance' for general searches."), rows: z.number().int().min(1).max(config.limits.maxRows).default(20), bestuurslaag: z.string().optional(), gemeente: z.string().optional().describe("Scope the search to one municipality, e.g. 'Delft' or 'Den Haag'. ORI keeps a separate index per municipality, so this is a real filter — without it a search runs across all 310 and returns other municipalities' documents.") }, description: "Search Open Raadsinformatie (ORI) — Dutch municipal council documents, motions, and decisions. Use policy topic keywords. Set 'gemeente' to answer 'what did the council of X discuss'. Use 'sort' parameter for recency.", annotations: TOOL_ANNOTATIONS }, async ({ query, sort, rows, bestuurslaag, gemeente }) => {
     const rw = rewriteQuery(query, "moderate");
     try {
-      const out = await ori.search({ query: rw.rewritten, rows, sort, bestuurslaag });
+      const out = await ori.search({ query: rw.rewritten, rows, sort, bestuurslaag, gemeente });
       const records = out.items.map((x) => record("ori", String(x.title ?? x.id ?? "ORI item"), String(x.url ?? "https://www.openraadsinformatie.nl"), x, String(x.type ?? ""), String(x.publishedAt ?? "")));
-      return toMcpToolPayload(successResponse({ summary: `${records.length} ORI resultaten`, records, provenance: prov("ori_search", out.endpoint, out.params, records.length, out.total), access_note: (out as { access_note?: string }).access_note }));
+      return toMcpToolPayload(successResponse({ summary: `${records.length} ORI resultaten${gemeente ? ` — ${gemeente}` : ""}`, records, provenance: prov("ori_search", out.endpoint, out.params, records.length, out.total ?? undefined), access_note: out.access_note }));
     } catch (e) {
       return toMcpToolPayload(mapSourceError(e, "ORI", "https://www.openraadsinformatie.nl"));
     }
@@ -2309,6 +2324,8 @@ export function registerTools(server: McpServer): void {
         limit: effectiveLimit,
         // dataderden OData levert hier geen betrouwbare totaal-count; null laat has_more op de records-heuristiek vallen.
         total: null,
+        // Een volle pagina betekent hier vrijwel zeker meer rijen upstream.
+        hasMore: out.hasMore,
         access_note: out.access_note,
         verbose: singleConnectorVerbose({ enabled: verbose, connector: "cbs_iv3", endpoint: out.endpoint, responseTimeMs }),
       });
@@ -2439,6 +2456,8 @@ export function registerTools(server: McpServer): void {
         offset,
         limit: effectiveLimit,
         total: out.total,
+        // PDOK omits numberMatched, so "is there more" comes from the next link.
+        hasMore: out.hasMore,
         access_note: out.access_note,
         verbose: singleConnectorVerbose({ enabled: verbose, connector: "brk_kadastrale_kaart", endpoint: out.endpoint, responseTimeMs }),
       });

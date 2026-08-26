@@ -195,7 +195,9 @@ export class RijkswaterstaatWaterdataSource {
 
     return {
       items,
-      total: items.length,
+      // Upstream levert geen count; null i.p.v. de paginagrootte, zodat een
+      // consument "x van y" niet met een verzonnen y toont.
+      total: null,
       endpoint: meta.url,
       params: { q: args.query, rows: String(args.rows) },
       ...(items.length

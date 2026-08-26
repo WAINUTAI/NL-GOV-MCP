@@ -42,15 +42,32 @@ function normalizeTextPreview(input: string, maxChars: number): { text: string; 
 export class TweedeKamerSource {
   constructor(private readonly config: AppConfig) {}
 
+  /**
+   * `$count=true` makes the service report how many rows match the filter,
+   * not just how many were returned. Without it the only number available is
+   * the page size, and reporting that as the total told every caller their
+   * 25 results were all there was. Verified present on Document, Zaak, Persoon,
+   * Fractie, Besluit and Stemming; `null` when a response omits it.
+   */
   private async fetchEntity(
     entity: string,
     params: Record<string, string>,
-  ): Promise<{ items: Array<Record<string, unknown>>; endpoint: string; params: Record<string, string> }> {
+  ): Promise<{
+    items: Array<Record<string, unknown>>;
+    total: number | null;
+    endpoint: string;
+    params: Record<string, string>;
+  }> {
     const endpoint = `${this.config.endpoints.tweedeKamer}/${entity}`;
-    const { data, meta } = await getJson<Record<string, unknown>>(endpoint, {
-      query: params,
-    });
-    return { items: toItems(data), endpoint: meta.url, params };
+    const query = { $count: "true", ...params };
+    const { data, meta } = await getJson<Record<string, unknown>>(endpoint, { query });
+    const rawCount = Number(data["@odata.count"]);
+    return {
+      items: toItems(data),
+      total: Number.isFinite(rawCount) ? rawCount : null,
+      endpoint: meta.url,
+      params: query,
+    };
   }
 
   async search(args: {

@@ -146,7 +146,7 @@ export class DataPolitieSource {
     skip?: number;
   }): Promise<{
     items: Array<Record<string, unknown>>;
-    total: number;
+    total: number | null;
     endpoint: string;
     params: Record<string, string>;
     access_note?: string;
@@ -178,7 +178,9 @@ export class DataPolitieSource {
 
       return {
         items,
-        total: items.length,
+        // Upstream levert geen count; null i.p.v. de paginagrootte, zodat een
+        // consument "x van y" niet met een verzonnen y toont.
+        total: null,
         endpoint: meta.url,
         params,
         access_note: `Dimensie-verkenning van '${dimension}' in tabel ${tableId}. Gebruik een teruggegeven 'key' als filterwaarde in een vervolg-zoekopdracht.`,
@@ -222,7 +224,9 @@ export class DataPolitieSource {
 
     return {
       items,
-      total: items.length,
+      // Upstream levert geen count; null i.p.v. de paginagrootte, zodat een
+      // consument "x van y" niet met een verzonnen y toont.
+      total: null,
       endpoint: meta.url,
       params,
       access_note:

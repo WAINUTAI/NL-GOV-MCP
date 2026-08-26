@@ -79,7 +79,9 @@ export class EurostatSource {
         url: `https://ec.europa.eu/eurostat/databrowser/view/${x.code}/default/table?lang=en`,
         score: x.score,
       })),
-      total: scored.length,
+      // The catalogue is what was searched; `scored` is already sliced to the
+      // requested page, so counting it would report the page size as the total.
+      total: catalog.length,
       endpoint: "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/{dataset} (fallback catalog)",
       params: { q: args.query, rows: String(args.rows) },
       access_note: "Eurostat heeft geen stabiele open search endpoint; deterministische catalog fallback gebruikt.",

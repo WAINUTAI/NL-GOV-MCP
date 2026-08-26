@@ -17,6 +17,13 @@ export function buildFormattedResponse(args: {
   offset: number;
   limit: number;
   total?: number | null;
+  /**
+   * Override for sources that cannot count their results but can still tell
+   * whether more exist — PDOK's OGC services omit `numberMatched` yet still
+   * publish a `next` link. Without this, an unknown total makes `has_more` fall
+   * back to a records heuristic that reports `false` on a full page.
+   */
+  hasMore?: boolean;
   access_note?: string;
   failures?: NonNullable<MCPToolResponse["failures"]>;
   verbose?: Record<string, unknown>;
@@ -28,6 +35,10 @@ export function buildFormattedResponse(args: {
     limit: args.limit,
     total: args.total === undefined ? args.records.length : args.total,
   });
+
+  if (args.hasMore !== undefined) {
+    paged.pagination.has_more = args.hasMore || paged.pagination.has_more;
+  }
 
   const formatted = applyOutputFormat({
     records: paged.page,

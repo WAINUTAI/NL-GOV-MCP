@@ -118,6 +118,7 @@ describe("CbsIv3Source", () => {
     const out = await src.search({ gemeente: "GM9999", rows: 20 });
 
     expect(out.items).toHaveLength(0);
-    expect(out.total).toBe(0);
+    // Upstream levert geen count, dus het totaal is onbekend — niet 0 en niet de paginagrootte.
+    expect(out.total).toBeNull();
   });
 });

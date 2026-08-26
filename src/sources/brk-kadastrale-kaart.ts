@@ -50,6 +50,7 @@ interface OgcFeatureCollection {
   features?: OgcFeature[];
   numberReturned?: number;
   numberMatched?: number;
+  links?: Array<{ rel?: string; href?: string }>;
 }
 
 // Valideer een RD New (EPSG:28992) bbox; geporteerd uit ruimtelijke-plannen.ts.
@@ -160,7 +161,8 @@ export class BrkKadastraleKaartSource {
 
   async search(args: BrkKadastraleKaartSearchArgs): Promise<{
     items: BrkKadastraleKaartItem[];
-    total: number;
+    total: number | null;
+    hasMore: boolean;
     endpoint: string;
     params: Record<string, string>;
     access_note?: string;
@@ -172,6 +174,7 @@ export class BrkKadastraleKaartSource {
       return {
         items: [],
         total: 0,
+        hasMore: false,
         endpoint: endpointBase,
         params: { collectie },
         access_note:
@@ -184,6 +187,7 @@ export class BrkKadastraleKaartSource {
       return {
         items: [],
         total: 0,
+        hasMore: false,
         endpoint: endpointBase,
         params: { collectie, bbox: args.bbox },
         access_note: `Ongeldige bbox: ${v.reason}.`,
@@ -205,7 +209,13 @@ export class BrkKadastraleKaartSource {
 
     const features = data.features ?? [];
     const items = features.map((f) => toItem(collectie, f, args.includeGeometry));
-    const total = data.numberMatched ?? data.numberReturned ?? items.length;
+
+    // PDOK's BRK OGC service omits `numberMatched` entirely — only
+    // `numberReturned` comes back, which is the page size. Falling back to it
+    // reported "10 of 10" for a bbox holding thousands, so an absent count is
+    // now reported as unknown. The `next` link still says whether more exist.
+    const total = typeof data.numberMatched === "number" ? data.numberMatched : null;
+    const hasMore = (data.links ?? []).some((link) => link.rel === "next");
 
     const access_note = items.length
       ? "Bron: PDOK BRK Kadastrale Kaart (dagelijks bijgewerkt). Geen persoonsgegevens; alleen geometrie en kadastrale aanduiding."
@@ -214,6 +224,7 @@ export class BrkKadastraleKaartSource {
     return {
       items,
       total,
+      hasMore,
       endpoint: meta.url,
       params: query,
       access_note,
