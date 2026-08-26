@@ -141,7 +141,8 @@ export class CbsIv3Source {
     skip?: number;
   }): Promise<{
     items: Array<Record<string, unknown>>;
-    total: number;
+    total: number | null;
+    hasMore?: boolean;
     endpoint: string;
     params: Record<string, string>;
     access_note?: string;
@@ -173,7 +174,9 @@ export class CbsIv3Source {
 
       return {
         items,
-        total: items.length,
+        // Upstream levert geen count; null i.p.v. de paginagrootte, zodat een
+        // consument "x van y" niet met een verzonnen y toont.
+        total: null,
         endpoint: meta.url,
         params,
         access_note: `Dimensie-verkenning van '${dimension}' in tabel ${tableId}. Gebruik een teruggegeven 'key' als filterwaarde in een vervolg-zoekopdracht.`,
@@ -214,13 +217,30 @@ export class CbsIv3Source {
 
     const items = asItems(data).map((r) => this.toDataItem(r, tableId));
 
+    const notes = [
+      "CBS Iv3 gemeente-/provinciefinanciën via OData (dataderden.cbs.nl). Gemeenten, TaakveldBalanspost, Categorie en Verslagsoort accepteren zowel een code als een naam (naam wordt via de dimensie-lijst omgezet). Verslagsoort onderscheidt o.a. begroting vs. jaarrekening. Zet 'dimension' om geldige filterwaarden te verkennen.",
+    ];
+
+    // The table is indexed taakveld-major, so a municipality filter alone fills
+    // an entire page with the first few of its 145 task fields — looking, to a
+    // caller that sums what it got, like a budget an order of magnitude too low.
+    // Narrowing to one Categorie + Verslagsoort returns all 145 in a single call.
+    const pageFull = items.length >= rows;
+    if (pageFull && args.gemeente && !(args.categorie && args.verslagsoort)) {
+      notes.push(
+        `Let op: dit is één pagina van ${rows} rijen, geen volledige gemeente. De tabel is taakveld-major geordend, dus deze rijen beslaan slechts de eerste van circa 145 taakvelden — optellen geeft een veel te laag totaal. Filter op één 'categorie' én 'verslagsoort' om alle taakvelden van deze gemeente in één aanroep te krijgen.`,
+      );
+    }
+
     return {
       items,
-      total: items.length,
+      // Upstream levert geen count; null i.p.v. de paginagrootte, zodat een
+      // consument "x van y" niet met een verzonnen y toont.
+      total: null,
+      hasMore: pageFull,
       endpoint: meta.url,
       params,
-      access_note:
-        "CBS Iv3 gemeente-/provinciefinanciën via OData (dataderden.cbs.nl). Gemeenten, TaakveldBalanspost, Categorie en Verslagsoort accepteren zowel een code als een naam (naam wordt via de dimensie-lijst omgezet). Verslagsoort onderscheidt o.a. begroting vs. jaarrekening. Zet 'dimension' om geldige filterwaarden te verkennen.",
+      access_note: notes.join(" "),
     };
   }
 }

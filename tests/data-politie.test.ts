@@ -63,7 +63,8 @@ describe("DataPolitieSource", () => {
     expect(out.items[0].soortMisdrijf).toBe("0.0.0");
     expect(out.items[0].GeregistreerdeMisdrijven_1).toBe(8636);
     expect(out.items[0].url).toContain("data.politie.nl");
-    expect(out.total).toBe(2);
+    // Upstream levert geen count; het aantal records is niet het totaal.
+    expect(out.total).toBeNull();
   });
 
   it("treats a bare year period as a startswith prefix match", async () => {
@@ -120,6 +121,6 @@ describe("DataPolitieSource", () => {
     const out = await src.search({ regio: "GM9999", rows: 20 });
 
     expect(out.items).toHaveLength(0);
-    expect(out.total).toBe(0);
+    expect(out.total).toBeNull();
   });
 });

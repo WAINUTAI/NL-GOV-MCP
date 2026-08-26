@@ -204,7 +204,9 @@ export class LuchtmeetnetSource {
       if (items.length) {
         return {
           items,
-          total: items.length,
+          // Upstream levert geen count; null i.p.v. de paginagrootte, zodat een
+          // consument "x van y" niet met een verzonnen y toont.
+          total: null,
           endpoint: responses[0].meta.url,
           params,
           access_note: place
@@ -306,7 +308,9 @@ export class LuchtmeetnetSource {
 
     return {
       items,
-      total: items.length,
+      // Upstream levert geen count; null i.p.v. de paginagrootte, zodat een
+      // consument "x van y" niet met een verzonnen y toont.
+      total: null,
       endpoint: metaUrl,
       params: lkiParams,
       access_note: `Luchtmeetnet /measurements endpoint onbereikbaar; LKI (Lucht Kwaliteits Index) data gebruikt. Schaal 1 (goed) t/m 11 (zeer slecht).${placeNote}`,

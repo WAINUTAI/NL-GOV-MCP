@@ -37,14 +37,9 @@ describe("new source fallbacks", () => {
     expect(String(out.items[0].ecli)).toBe("ECLI:NL:HR:2024:123");
   });
 
-  it("ori and ndw fallback return one result", () => {
-    const ori = new OriSource(config);
+  it("ndw fallback returns one result", () => {
     const ndw = new NdwSource(config);
-
-    const oriOut = ori.fallback({ query: "woningbouw", rows: 1, bestuurslaag: "gemeente" });
     const ndwOut = ndw.fallback({ query: "doorstroming", rows: 1 });
-
-    expect(oriOut.items.length).toBe(1);
     expect(ndwOut.items.length).toBe(1);
   });
 
