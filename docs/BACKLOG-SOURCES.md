@@ -216,6 +216,11 @@ Vijf nieuwe connectors + twee dwarsdoorsnijdende capabilities (39 → 44 connect
 - **Uitslagen per stembureau / voorkeurstemmen** — de Kiesraad-databank gaat tot gemeenteniveau; stembureau-EML's staan als bestanden op data.overheid.nl (geen query-API).
 - **Recentere VO-examencijfers per vestiging** — de CKAN-portal van DUO bevat exact één per-vestiging examendataset (`03_voex-v1`, t/m schooljaar 2017); nieuwere examencijfers publiceert DUO alleen als losse CSV-downloads op duo.nl zonder stabiele, ontdekbare URL's.
 
+### EUR-Lex en LiDO (toegevoegd) — bewuste keuzes
+
+- **EUR-Lex** loopt via het keyless CELLAR SPARQL-endpoint. De EUR-Lex SOAP-webservice is niet gebruikt omdat die een account vereist; `eur-lex.europa.eu` zelf zit achter een WAF en is ongeschikt voor server-side calls (we linken er alleen naar). Alleen het Publicatieblad is authentiek; hergebruik met bronvermelding.
+- **LiDO** gebruikt alleen de publiek gedocumenteerde services (`get-id`, `get-aantal-per-informatietype`). `get-links`, `/sparql` en portal-scraping zijn officieel niet-publiek en bewust niet gebruikt; daarom levert de tool tellingen plus een portaallink in plaats van de volledige verwijzingslijst. Data CC0.
+
 ### Volgende kandidaten (uit hetzelfde bronnenonderzoek)
 
 1. Gemeentelijke open-dataportalen (Rotterdam ~1.400, Groningen ~540, Utrecht ~310, Den Haag ~250, Amsterdam ~140 datasets; Amsterdam heeft een eigen API)

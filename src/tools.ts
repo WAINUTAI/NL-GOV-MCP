@@ -43,6 +43,8 @@ import { TenderNedSource } from "./sources/tenderned.js";
 import { KoopCollectieSource } from "./sources/koop-collecties.js";
 import { BrpGewasperceelSource } from "./sources/brp-gewaspercelen.js";
 import { VerkiezingsuitslagenSource } from "./sources/verkiezingsuitslagen.js";
+import { EuCellarSource, normalizeCelex } from "./sources/eu-cellar.js";
+import { LidoSource, parseLidoId } from "./sources/lido.js";
 import { mapSourceError, nowIso, successResponse, toMcpToolPayload, errorResponse } from "./utils/response.js";
 import { parseTemporalRange } from "./utils/temporal.js";
 import { applyOutputFormat } from "./utils/output-format.js";
@@ -94,6 +96,8 @@ const tuchtrecht = new KoopCollectieSource(config, "tuchtrecht");
 const samenwerkendeCatalogi = new KoopCollectieSource(config, "samenwerkendecatalogi");
 const brpGewaspercelen = new BrpGewasperceelSource(config);
 const verkiezingsuitslagen = new VerkiezingsuitslagenSource(config);
+const euCellar = new EuCellarSource(config);
+const lido = new LidoSource(config);
 
 function record(source: string, title: string, canonical_url: string, data: Record<string, unknown>, snippet?: string, date?: string): MCPRecord {
   return { source_name: source, title, canonical_url, data, snippet, date };
@@ -250,6 +254,40 @@ export function extractVerkiezingHint(lowered: string): string | undefined {
   if (/waterschap/.test(lowered)) return "WS";
   const code = /\b([a-z]{2})\s?(\d{8})\b/.exec(lowered);
   return code ? `${code[1].toUpperCase()}${code[2]}` : undefined;
+}
+
+export type EuIntent =
+  | { kind: "document"; celex: string }
+  | { kind: "transposition"; celex: string }
+  | { kind: "search"; query: string };
+
+const EU_CELEX_TOKEN = /(?:^|[^\p{L}\d])(?:celex\s*:?\s*)?(3\d{4}[RLD]\d{4})(?=$|[^\p{L}\d])/iu;
+// Tight citation shape: a bare "verordening 2024/12" can be a municipal bylaw, so
+// regulations and decisions need an EU/EG/EEG marker; directives are EU-only.
+const EU_CITATION = /(?:uitvoerings|gedelegeerde\s+)?(verordening|richtlijn|besluit)\s*(\((?:eu|eg|eeg|euratom)\)|\b(?:eu|eg|eeg)\b)?\s*(?:nr\.?\s*)?\d{1,4}\s*\/\s*\d{1,4}(\s*\/\s*(?:eu|eg|eeg)\b)?/iu;
+const EU_SEARCH_TRIGGER = /(?:^|[^\p{L}\d-])(?:eur-?lex|eu-(?:richtlijn|verordening|wetgeving)(?:en)?|europese\s+(?:richtlijn|verordening|wetgeving)(?:en)?|omzetting\s+(?:van\s+(?:de\s+|een\s+)?)?(?:eu-)?richtlijn(?:en)?)(?=$|[^\p{L}\d-])/iu;
+const EU_STRIP_WORDS = /(?:^|[^\p{L}\d-])(?:eur-?lex|eu|eu-richtlijn(?:en)?|eu-verordening(?:en)?|eu-wetgeving|europese|europees|richtlijn(?:en)?|verordening(?:en)?|wetgeving|omzetting|welke|zijn|er|over|op|het|gebied|van|de|een|in)(?=$|[^\p{L}\d-])/giu;
+
+/**
+ * Narrow EU-legislation intent for nl_gov_ask. Runs on the RAW question: the
+ * query rewriter strips '/', which would destroy citations like "2016/679".
+ */
+export function detectEuIntent(question: string): EuIntent | undefined {
+  const raw = String(question ?? "");
+  let celex: string | null = null;
+  const token = EU_CELEX_TOKEN.exec(raw);
+  if (token) celex = normalizeCelex(token[1]);
+  if (!celex) {
+    const cit = EU_CITATION.exec(raw);
+    if (cit && (cit[2] || cit[3] || cit[1].toLowerCase() === "richtlijn")) celex = normalizeCelex(cit[0]);
+  }
+  if (celex) {
+    const isDirective = celex.charAt(5) === "L";
+    return isDirective && /omzet|omgezet|implementatie|ge[iï]mplementeerd|transpos/i.test(raw) ? { kind: "transposition", celex } : { kind: "document", celex };
+  }
+  if (!EU_SEARCH_TRIGGER.test(raw)) return undefined;
+  const query = raw.replace(/[?!.,;:]/g, " ").replace(EU_STRIP_WORDS, " ").replace(/\s+/g, " ").trim();
+  return query ? { kind: "search", query } : undefined;
 }
 
 export function shouldDeepenTweedeKamerQuery(question: string): boolean {
@@ -1476,6 +1514,8 @@ export function registerTools(server: McpServer): void {
 
       const uniquePlannerCandidates = Array.from(new Set(plannerCandidates));
       const multiIntentSignal = explicitMulti || implicitMulti || uniquePlannerCandidates.length >= 2;
+      // EU legislation goes first: "Verordening (EU) 2016/679" would otherwise hit obTerms.
+      const euIntent = detectEuIntent(decodedQuestion);
 
       if (dryRun) {
         const endpointByCandidate: Record<string, string> = {
@@ -1487,11 +1527,14 @@ export function registerTools(server: McpServer): void {
           duo: config.endpoints.duoDatasets,
           api: config.endpoints.apiRegister,
           rechtspraak: "https://uitspraken.rechtspraak.nl/api/zoek",
+          eu_cellar: "https://publications.europa.eu/webapi/rdf/sparql",
         };
 
-        const estimatedSources = uniquePlannerCandidates.length
-          ? uniquePlannerCandidates
-          : ["data_overheid"];
+        const estimatedSources: string[] = euIntent
+          ? ["eu_cellar"]
+          : uniquePlannerCandidates.length
+            ? uniquePlannerCandidates
+            : ["data_overheid"];
 
         const plannedRequests = estimatedSources.map((candidate) => ({
           connector: candidate,
@@ -1532,6 +1575,32 @@ export function registerTools(server: McpServer): void {
           content: [{ type: "text", text: JSON.stringify(dryRunPayload, null, 2) }],
           structuredContent: dryRunPayload,
         };
+      }
+
+      if (euIntent) try {
+        if (euIntent.kind === "search") {
+          const euQuery = makeKeywordQuery(euIntent.query) || euIntent.query;
+          const out = await timed("eu_cellar", () => euCellar.search({ query: euQuery, limit: top }));
+          const records = out.items.map((x) => record("eu-cellar", String(x.title ?? x.celex ?? "EU-handeling"), String(x.eurlex_url ?? "https://eur-lex.europa.eu"), x, String(x.document_type_label ?? ""), String(x.date ?? "")));
+          if (records.length) {
+            return askSuccess({ summary: `Router: EUR-Lex (${records.length} EU-handelingen)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), access_note: out.access_note, total: out.total });
+          }
+        } else if (euIntent.kind === "transposition") {
+          const out = await timed("eu_cellar", () => euCellar.nlTransposition({ id: euIntent.celex, limit: top }));
+          const records = out.items.map((x) => record("eu-cellar", String(x.title ?? x.identifier ?? "Omzettingsmaatregel"), String(x.canonical_url ?? `https://eur-lex.europa.eu/legal-content/NL/TXT/?uri=CELEX:${euIntent.celex}`), x, [x.measure_type, x.official_journal].filter(Boolean).join(" — "), String(x.publication_date ?? "")));
+          if (records.length) {
+            return askSuccess({ summary: `Router: EUR-Lex NL-omzetting ${euIntent.celex} (${records.length} maatregelen)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), access_note: out.access_note, total: out.total });
+          }
+        } else {
+          const out = await timed("eu_cellar", () => euCellar.document({ id: euIntent.celex }));
+          const records = out.items.map((x) => record("eu-cellar", String(x.title ?? x.celex ?? "EU-handeling"), String(x.eurlex_url ?? "https://eur-lex.europa.eu"), x, String(x.document_type_label ?? ""), String(x.date ?? "")));
+          if (records.length) {
+            return askSuccess({ summary: `Router: EUR-Lex ${euIntent.celex}`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), access_note: out.access_note, total: out.total });
+          }
+        }
+        fallbackSteps.push(`eu_cellar:${euIntent.kind}:no_results`);
+      } catch {
+        fallbackSteps.push(`eu_cellar:${euIntent.kind}:failed`);
       }
 
       if (multiIntentSignal && uniquePlannerCandidates.length >= 2) {
@@ -2367,6 +2436,87 @@ export function registerTools(server: McpServer): void {
       const response = buildFormattedResponse({ summary: `${records.length} CVDR regelingen`, records, provenance: prov("cvdr_search", out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), out.total), outputFormat, offset, limit: effectiveLimit, total: out.total, access_note: out.access_note, verbose: singleConnectorVerbose({ enabled: verbose, connector: "cvdr", endpoint: out.endpoint, responseTimeMs }) });
       return toMcpToolPayload(response);
     } catch (e) { return toMcpToolPayload(mapSourceError(e, "CVDR lokale regelgeving", "https://lokaleregelgeving.overheid.nl")); }
+  });
+
+  const celexSuggestion = "Use a CELEX number (32016R0679) or an EU citation ('Verordening (EU) 2016/679', 'Richtlijn (EU) 2016/680', 'Richtlijn 95/46/EG').";
+  const toEuRecord = (x: Record<string, unknown>) => record("eu-cellar", String(x.title ?? x.celex ?? "EU-handeling"), String(x.eurlex_url ?? "https://eur-lex.europa.eu"), x, String(x.document_type_label ?? ""), String(x.date ?? ""));
+
+  server.registerTool("eurlex_search", {
+    description: "Search EU legislation (EUR-Lex/CELLAR) by keywords in the Dutch title. Returns CELEX, Dutch title, type, date, in-force status and EUR-Lex link. Titles use official EU terminology (e.g. 'artificiële intelligentie', not 'kunstmatige intelligentie'): if results are few or irrelevant, search again with official or alternative terms, or with fewer words.",
+    inputSchema: { query: z.string().describe("Dutch title keywords, e.g. 'artificiële intelligentie', 'gegevensbescherming'. Matched against titles only."), type: z.enum(["REG", "DIR", "DEC"]).optional().describe("REG=regulation, DIR=directive, DEC=decision."), top: z.number().int().min(1).max(config.limits.maxRows).default(20), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ query, type, top, offset, limit, outputFormat, verbose, dryRun }) => {
+    try {
+      const effectiveLimit = limit ?? top;
+      const fetchRows = Math.min(config.limits.maxRows, Math.max(top, offset + effectiveLimit));
+      if (dryRun) return dryRunPayload({ connector: "eu_cellar", url: "https://publications.europa.eu/webapi/rdf/sparql", params: { query, type, limit: fetchRows } });
+      const started = Date.now();
+      const out = await euCellar.search({ query, type, limit: fetchRows });
+      const responseTimeMs = Date.now() - started;
+      const records = out.items.map(toEuRecord);
+      const response = buildFormattedResponse({ summary: `${records.length} EU-handelingen`, records, provenance: prov("eurlex_search", out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), out.total), outputFormat, offset, limit: effectiveLimit, total: out.total, access_note: out.access_note, verbose: singleConnectorVerbose({ enabled: verbose, connector: "eu_cellar", endpoint: out.endpoint, responseTimeMs }) });
+      return toMcpToolPayload(response);
+    } catch (e) { return toMcpToolPayload(mapSourceError(e, "EUR-Lex/CELLAR", "https://eur-lex.europa.eu")); }
+  });
+
+  server.registerTool("eurlex_document", {
+    description: "Fetch metadata of one EU legal act (EUR-Lex/CELLAR) by CELEX number or citation: Dutch title, type, date, in-force status, ELI and EUR-Lex link, plus the newest CJEU rulings interpreting it (hvj_arresten, hvj_arresten_total).",
+    inputSchema: { id: z.string().describe("CELEX (32016R0679) or citation ('Richtlijn (EU) 2016/680')."), outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ id, outputFormat, verbose, dryRun }) => {
+    const celex = normalizeCelex(id);
+    if (!celex) return toMcpToolPayload(errorResponse({ error: "unexpected", message: `Ongeldig CELEX-nummer of EU-citaat: ${id.slice(0, 100)}`, suggestion: celexSuggestion }));
+    try {
+      if (dryRun) return dryRunPayload({ connector: "eu_cellar", url: "https://publications.europa.eu/webapi/rdf/sparql", params: { celex } });
+      const started = Date.now();
+      const out = await euCellar.document({ id: celex });
+      const responseTimeMs = Date.now() - started;
+      const records = out.items.map(toEuRecord);
+      const response = buildFormattedResponse({ summary: `${records.length} EU-handeling ${celex}`, records, provenance: prov("eurlex_document", out.endpoint, out.params, records.length, out.total), outputFormat, offset: 0, limit: Math.max(1, records.length), total: out.total, access_note: out.access_note, verbose: singleConnectorVerbose({ enabled: verbose, connector: "eu_cellar", endpoint: out.endpoint, responseTimeMs }) });
+      return toMcpToolPayload(response);
+    } catch (e) { return toMcpToolPayload(mapSourceError(e, "EUR-Lex/CELLAR", "https://eur-lex.europa.eu")); }
+  });
+
+  server.registerTool("eurlex_nl_omzetting", {
+    description: "List Dutch national transposition measures (act/decree with Staatsblad/Staatscourant reference) for an EU directive, via CELLAR.",
+    inputSchema: { id: z.string().describe("Directive CELEX (32016L0680) or citation ('Richtlijn (EU) 2016/680')."), top: z.number().int().min(1).max(config.limits.maxRows).default(20), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ id, top, offset, limit, outputFormat, verbose, dryRun }) => {
+    const celex = normalizeCelex(id);
+    if (!celex) return toMcpToolPayload(errorResponse({ error: "unexpected", message: `Ongeldig CELEX-nummer of EU-citaat: ${id.slice(0, 100)}`, suggestion: celexSuggestion }));
+    try {
+      const effectiveLimit = limit ?? top;
+      const fetchRows = Math.min(config.limits.maxRows, Math.max(top, offset + effectiveLimit));
+      if (dryRun) return dryRunPayload({ connector: "eu_cellar", url: "https://publications.europa.eu/webapi/rdf/sparql", params: { celex, limit: fetchRows } });
+      const started = Date.now();
+      const out = await euCellar.nlTransposition({ id: celex, limit: fetchRows });
+      const responseTimeMs = Date.now() - started;
+      const records = out.items.map((x) => record("eu-cellar", String(x.title ?? x.identifier ?? "Omzettingsmaatregel"), String(x.canonical_url ?? `https://eur-lex.europa.eu/legal-content/NL/TXT/?uri=CELEX:${celex}`), x, [x.measure_type, x.official_journal].filter(Boolean).join(" — "), String(x.publication_date ?? "")));
+      const response = buildFormattedResponse({ summary: `${records.length} NL-omzettingsmaatregelen bij ${celex}`, records, provenance: prov("eurlex_nl_omzetting", out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), out.total), outputFormat, offset, limit: effectiveLimit, total: out.total, access_note: out.access_note, verbose: singleConnectorVerbose({ enabled: verbose, connector: "eu_cellar", endpoint: out.endpoint, responseTimeMs }) });
+      return toMcpToolPayload(response);
+    } catch (e) { return toMcpToolPayload(mapSourceError(e, "EUR-Lex/CELLAR", "https://eur-lex.europa.eu")); }
+  });
+
+  server.registerTool("lido_verwijzingen", {
+    description: "Count references per document type in LiDO (Linked Data Overheid) to a ruling (ECLI), law article (BWBR + artikel), EU act (CELEX) or Staatsblad/Staatscourant publication; includes a portal link to the list.",
+    inputSchema: { id: z.string().describe("ECLI:NL:HR:2019:2006, BWBR0011823, 32016L0680 or stb-2018-401."), artikel: z.string().optional().describe("Article number, only with a BWBR id, e.g. '7:658'."), outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ id, artikel, outputFormat, verbose, dryRun }) => {
+    const parsed = parseLidoId(id);
+    if (!parsed) return toMcpToolPayload(errorResponse({ error: "unexpected", message: `Onbekend LiDO-identifier: ${id.slice(0, 100)}`, suggestion: "Use an ECLI (ECLI:NL:HR:2019:2006), BWB id (BWBR0011823, optionally with artikel), CELEX (32016L0680) or OEP publication (stb-2018-401)." }));
+    try {
+      if (dryRun) return dryRunPayload({ connector: "lido", url: "https://linkeddata.overheid.nl/service/get-aantal-per-informatietype", params: { kind: parsed.kind, id: parsed.value, artikel } });
+      const started = Date.now();
+      const out = await lido.references({ id, artikel });
+      const responseTimeMs = Date.now() - started;
+      const records = out.items.map((x) => {
+        const perType = Array.isArray(x.per_type) ? (x.per_type as Array<{ type: string; count: number }>) : [];
+        const snippet = perType.slice(0, 5).map((p) => `${p.type}: ${p.count}`).join(", ");
+        return record("lido", String(x.title ?? `LiDO-verwijzingen naar ${id}`), String(x.portal_url ?? "https://linkeddata.overheid.nl"), x, `${String(x.total_references ?? "?")} verwijzingen${snippet ? ` (${snippet})` : ""}`);
+      });
+      const response = buildFormattedResponse({ summary: `LiDO-verwijzingen naar ${parsed.value}${artikel ? ` art. ${artikel}` : ""}`, records, provenance: prov("lido_verwijzingen", out.endpoint, out.params, records.length, out.total), outputFormat, offset: 0, limit: Math.max(1, records.length), total: out.total, access_note: out.access_note, verbose: singleConnectorVerbose({ enabled: verbose, connector: "lido", endpoint: out.endpoint, responseTimeMs }) });
+      return toMcpToolPayload(response);
+    } catch (e) { return toMcpToolPayload(mapSourceError(e, "LiDO Linked Data Overheid", "https://linkeddata.overheid.nl")); }
   });
 
   server.registerTool("bestuurlijke_gebieden_search", {

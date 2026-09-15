@@ -179,6 +179,7 @@
   - prioritizes school holiday queries to `rijksoverheid_schoolholidays` with fallback attempts
   - improved CBS ranking for municipality/education phrasing
   - specific-source routes run **before** the broad CBS/Tweede Kamer ones: elections, procurement, disciplinary law, agricultural parcels and per-school education
+  - EU legislation runs before everything else: a CELEX number or EU citation (detected on the raw question, since the query rewriter strips `/`) goes to `eurlex_document` (or `eurlex_nl_omzetting` for a directive plus "omzetting"/"omgezet"); explicit terms like "EU-richtlijn", "europese verordening", "EUR-Lex" go to `eurlex_search`. A bare "verordening 2024/12" without an EU/EG marker is not treated as EU
   - extracts a place name from the question ("in Tilburg", "gemeente Land van Cuijk") to drive gemeente-scoped sources; falls back with an explanatory `access_note` when the name does not resolve
   - education questions prefer real per-school records (`duo_schools` / `duo_exam_results`) and fall back to the DUO dataset catalogue only when those return nothing
   - air-quality questions route to Luchtmeetnet for the place named in the question; only unambiguous terms trigger it, so bare "stikstof" keeps routing to Tweede Kamer / CBS
@@ -349,3 +350,33 @@ Verkiezingsuitslagen per partij uit de Kiesraad-databank.
 - **Inputs**: `verkiezing` (code `TK20251029`, soort `TK`/`gemeenteraad`/`Europees Parlement`, of leeg = meest recente), `gebied` (gemeente of provincie; leeg = landelijk), `list_elections` (lijst beschikbare verkiezingen), `top`, pagination/outputFormat/verbose/dryRun.
 - **Output**: één record per partij met stemmen, percentage en zetels, plus gebiedscontext (kiesgerechtigden, opkomst, geldige/blanco/ongeldige stemmen) in elk record en in `access_note`.
 - **Gedrag**: een onbekend gebied levert de landelijke uitslag mét uitleg in `access_note`; een onbekende verkiezingsnaam levert de lijst met beschikbare verkiezingen in plaats van een lege respons.
+
+## `eurlex_search`
+
+EU-wetgeving zoeken via EUR-Lex/CELLAR (SPARQL, geen key).
+
+- **Inputs**: `query` (trefwoorden, alleen in titels gezocht), `type` (`REG`|`DIR`|`DEC`, optioneel), `top`, pagination/outputFormat/verbose/dryRun.
+- **Output**: `celex`, `title` (NL, anders EN) + `title_language`, `document_type` + `document_type_label`, `date`, `in_force`, `eli`, `eurlex_url`, `cellar_url`.
+
+## `eurlex_document`
+
+Metadata van één EU-handeling.
+
+- **Inputs**: `id` = CELEX (`32016R0679`) of citaat (`Verordening (EU) 2016/679`, `Richtlijn 95/46/EG`), outputFormat/verbose/dryRun.
+- **Gedrag**: ongeldige invoer wordt vóór de request geweigerd, met voorbeeldformaten in `suggestion`.
+
+## `eurlex_nl_omzetting`
+
+Nederlandse nationale omzettingsmaatregelen bij een EU-richtlijn.
+
+- **Inputs**: `id` = CELEX of citaat van een richtlijn, `top`, pagination/outputFormat/verbose/dryRun.
+- **Output**: `directive_celex`, `title`, `measure_type`, `official_journal`, `identifier` (bv. `stb-2018-401`), `publication_date`, `notification_date`, `canonical_url` (Officiële Bekendmakingen als de identifier bekend is, anders EUR-Lex).
+- **Let op**: alleen het Publicatieblad van de EU is authentiek; EUR-Lex-inhoud is herbruikbaar met bronvermelding.
+
+## `lido_verwijzingen`
+
+Tellingen van verwijzingen in LiDO (Linked Data Overheid, CC0).
+
+- **Inputs**: `id` = ECLI (`ECLI:NL:HR:2019:2006`), BWB-id (`BWBR0011823`, optioneel met `artikel`), CELEX (`32016L0680`) of OEP-publicatie (`stb-2018-401`), outputFormat/verbose/dryRun.
+- **Output**: één record met `input_id`, `kind`, `artikel`, `lido_id`, `total_references`, `per_type` (aflopend op aantal) en `portal_url` naar de lijstweergave in het LiDO-portaal.
+- **Let op**: bij BWB tellen de aantallen voor de meest recente versie van de regeling of het artikel; verwijzingen naar oudere versies tellen niet mee.

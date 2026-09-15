@@ -1023,5 +1023,43 @@
       "top": 5
     },
     "minRecords": 1
+  },
+  {
+    "id": "eurlex_document_avg",
+    "description": "EUR-Lex: AVG op CELEX",
+    "tool": "eurlex_document",
+    "args": {
+      "id": "32016R0679"
+    },
+    "minRecords": 1
+  },
+  {
+    "id": "eurlex_search_ai",
+    "description": "EUR-Lex: titelzoektocht artificiële intelligentie (EU-titels gebruiken niet \"kunstmatige\")",
+    "tool": "eurlex_search",
+    "args": {
+      "query": "artificiële intelligentie",
+      "top": 5
+    },
+    "minRecords": 1
+  },
+  {
+    "id": "eurlex_nl_omzetting_richtlijn_politie",
+    "description": "EUR-Lex: NL-omzetting Richtlijn (EU) 2016/680",
+    "tool": "eurlex_nl_omzetting",
+    "args": {
+      "id": "32016L0680",
+      "top": 5
+    },
+    "minRecords": 1
+  },
+  {
+    "id": "lido_verwijzingen_ecli",
+    "description": "LiDO: verwijzingen naar een Hoge Raad-arrest",
+    "tool": "lido_verwijzingen",
+    "args": {
+      "id": "ECLI:NL:HR:2019:2006"
+    },
+    "minRecords": 1
   }
 ]

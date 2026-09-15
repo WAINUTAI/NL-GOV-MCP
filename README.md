@@ -20,6 +20,7 @@ Examples:
 - *"Toon alle rechtspraak over huurrecht dit jaar"* → Rechtspraak search with date-aware mapping
 - *"Wat is de luchtkwaliteit in Utrecht?"* → live Luchtmeetnet measurements from that city’s own stations
 - *"Geef me de rijksbegroting voor onderwijs"* → Rijksbegroting search + chapter navigation
+- *"Hoe is Richtlijn (EU) 2016/680 omgezet in Nederland?"* → EUR-Lex/CELLAR: the Dutch transposition measures with their Staatsblad reference
 
 ## How is this different from data.overheid.nl?
 
@@ -27,7 +28,7 @@ Examples:
 
 `NL-GOV-MCP` actively retrieves and normalizes data across many sources, can combine cross-source results, and returns a consistent MCP response contract ready for assistants and automations.
 
-## Sources (44 connectors, 70 tools)
+## Sources (46 connectors, 74 tools)
 
 | Source | What it covers |
 |---|---|
@@ -75,6 +76,8 @@ Examples:
 | Samenwerkende Catalogi | National index of products/services offered by municipalities, provinces and water authorities (KOOP SRU) |
 | BRP Gewaspercelen (RVO) | Agricultural parcels with crop, category, area and polygon (PDOK WFS) |
 | Kiesraad Verkiezingsuitslagen | Election results per party, nationally and per province/municipality, incl. turnout |
+| EUR-Lex / CELLAR (EU) | EU legislation by CELEX or citation, title search, and Dutch national transposition measures per directive (keyless SPARQL; only the Official Journal is authentic, reuse with attribution) |
+| LiDO (Linked Data Overheid) | Reference counts per document type to a ruling (ECLI), law article (BWB), EU act (CELEX) or Staatsblad/Staatscourant publication, with portal link (CC0) |
 
 ## Key features
 
@@ -172,7 +175,7 @@ npm run test:live    # integration test suite (live API calls)
 
 ### Transport modes
 
-Three transport modes are supported. All expose the same 70 tools.
+Three transport modes are supported. All expose the same 74 tools.
 
 #### stdio (Claude Desktop, Claude Code)
 
@@ -311,6 +314,12 @@ Uses structured parameters instead of natural-language parsing:
 The LLM interprets user intent and maps it to these parameters. A lightweight server-side query rewriter strips residual question framing as a safety net.
 
 Responses include facet-driven context in `access_note` when filters are applied.
+
+### EUR-Lex and LiDO details
+
+`eurlex_search`, `eurlex_document` and `eurlex_nl_omzetting` query the keyless CELLAR SPARQL endpoint of the EU Publications Office. `id` accepts a CELEX number (`32016R0679`) or a citation (`Verordening (EU) 2016/679`, `Richtlijn 95/46/EG`); invalid input is rejected before any request. Search matches title words only. Only the electronic Official Journal of the EU is authentic; EUR-Lex content may be reused with attribution. `nl_gov_ask` routes a CELEX number or EU citation (and explicit terms such as "EU-richtlijn", "EUR-Lex") to these tools before the Officiële Bekendmakingen route.
+
+`lido_verwijzingen` returns how often a ruling, law (article), EU act or Staatsblad/Staatscourant publication is referenced in LiDO, per document type, plus a link to the full list on the LiDO portal. It uses only the services LiDO documents as public (`get-id`, `get-aantal-per-informatietype`); LiDO data is CC0.
 
 **Tuchtrecht is a separate source.** Disciplinary rulings against doctors, lawyers, notaries, accountants, vets and bailiffs are published on `tuchtrecht.overheid.nl`, not on Rechtspraak.nl. Use `tuchtrecht_search` for those; `nl_gov_ask` routes disciplinary questions there before it considers Rechtspraak.
 

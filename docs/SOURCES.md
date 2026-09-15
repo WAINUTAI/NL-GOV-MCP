@@ -230,3 +230,23 @@ Meerdere woorden vrije tekst moeten als losse termen met `AND` worden verbonden:
 - **Codes**: `TK`, `EK`, `EP`, `GR`, `PS`, `WS`, `ER`, `KC` + datum, bv. `TK20251029`.
 - **Velden**: per partij stemmen, percentage en zetels; per gebied kiesgerechtigden, opkomst(percentage), geldige/blanco/ongeldige stemmen. Kiesraad levert Nederlandse getalnotatie (`1.790.634`, `16,94%`); de connector zet die om naar echte getallen.
 - **Beperking**: de databank gaat tot gemeenteniveau. Uitslagen per stembureau en voorkeurstemmen per kandidaat staan als bestanden op data.overheid.nl en zitten niet in deze tool.
+
+## EUR-Lex / CELLAR (EU-wetgeving)
+
+- **Connector**: `eu_cellar` (category `static`)
+- **Tools**: `eurlex_search`, `eurlex_document`, `eurlex_nl_omzetting`
+- **Endpoint**: `https://publications.europa.eu/webapi/rdf/sparql` (CELLAR, Publicatiebureau van de EU)
+- **Auth**: geen
+- **Gedrag**: exacte CELEX-lookups en Virtuoso free-text (`bif:contains`) op titels; `FILTER(CONTAINS/REGEX)` scant het hele corpus (>10 s) en wordt niet gebruikt. Citaten (`Verordening (EU) 2016/679`, `Richtlijn 95/46/EG`) worden lokaal naar CELEX genormaliseerd. Omzettingsmaatregelen komen uit de CELLAR-metadata van de richtlijn, gefilterd op Nederland.
+- **Links**: `eurlex_url` (`https://eur-lex.europa.eu/legal-content/NL/TXT/?uri=CELEX:<celex>`) en `cellar_url` (`https://publications.europa.eu/resource/celex/<celex>`).
+- **Licentie/bronvermelding**: EUR-Lex-inhoud is herbruikbaar met bronvermelding; alleen de elektronische editie van het Publicatieblad van de EU is authentiek.
+
+## LiDO — Linked Data Overheid (verwijzingen)
+
+- **Connector**: `lido` (category `semi_live`)
+- **Tool**: `lido_verwijzingen`
+- **Endpoints**: `https://linkeddata.overheid.nl/service/get-id` en `/service/get-aantal-per-informatietype` (KOOP/Logius, XML)
+- **Auth**: geen
+- **Invoer**: ECLI, BWB-id (+ artikel), CELEX of OEP-publicatie (`stb-2018-401`, `stcrt-2024-20264`).
+- **Gedrag**: alleen de als publiek gedocumenteerde services; de volledige lijst verwijzingen staat op de LiDO-portaalpagina (`portal_url`). Bij BWB gelden de tellingen voor de meest recente versie.
+- **Licentie**: CC0.

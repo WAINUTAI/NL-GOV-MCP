@@ -67,6 +67,8 @@ const CONNECTOR_CATEGORY: Record<string, ConnectorCategory> = {
   samenwerkende_catalogi: "static",
   brp_gewaspercelen: "static",
   verkiezingsuitslagen: "static",
+  eu_cellar: "static",
+  lido: "semi_live",
 };
 
 const FAILURE_THRESHOLD = 3;
