@@ -526,6 +526,34 @@ describe("LidoSource.links", () => {
     expect(out.items.map((i) => i.direction)).toEqual(["uitgaand", "inkomend", "beide"]);
   });
 
+  it("decodes XML entities exactly once (parseXml decodes; no second pass here)", async () => {
+    const OTHER_ID = "http://linkeddata.overheid.nl/terms/jurisprudentie/id/ECLI:NL:RBDHA:2020:1";
+    const other =
+      `<subject id="${OTHER_ID}"><dcterms:identifier ${DC} type="extern">ECLI:NL:RBDHA:2020:1</dcterms:identifier>` +
+      `<dcterms:type ${DC}>Jurisprudentie</dcterms:type>` +
+      `<dcterms:title ${DC}>Escaped: &amp;lt;b&amp;gt; &amp;amp; &amp;#39;</dcterms:title>` +
+      `<dcterms:creator ${DC}>Rechtbank &#39;s-Gravenhage &amp; co</dcterms:creator>` +
+      `<dcterms:hasVersion ${DC}>http://wetten.overheid.nl/1.0:c:BWBR0001&amp;g=2020-01-01</dcterms:hasVersion>` +
+      `<inkomende-links></inkomende-links><uitgaande-links></uitgaande-links></subject>`;
+    const xml =
+      `${HEAD}<lido service="get-links" ext-id="ECLI:NL:HR:2019:2006" lido-id="${SELF_ID}">` +
+      selfSubject(SELF_ID, ref(OTHER_ID, "R&amp;D-label"), "") +
+      other +
+      `</lido>`;
+    vi.stubGlobal("fetch", vi.fn(async () => xmlResponse(xml)));
+
+    const out = await new LidoSource(testConfig).links({ id: "ECLI:NL:HR:2019:2006" });
+
+    expect(out.items).toHaveLength(1);
+    expect(out.items[0]).toMatchObject({
+      title: "Escaped: &lt;b&gt; &amp; &#39;",
+      creator: "Rechtbank 's-Gravenhage & co",
+      url: "http://wetten.overheid.nl/1.0:c:BWBR0001&g=2020-01-01",
+      direction: "inkomend",
+      link_labels: ["R&D-label"],
+    });
+  });
+
   it("uses LiDO's default rows and clamps offset/limit before calling get-links", async () => {
     const fetchMock = vi.fn(async () => xmlResponse(LINKS_XML));
     vi.stubGlobal("fetch", fetchMock);

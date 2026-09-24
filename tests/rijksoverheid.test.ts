@@ -175,6 +175,28 @@ describe("RijksoverheidSource.search", () => {
     expect(out.items).toHaveLength(1);
     expect(out.items[0].id).toBe("doc-solo");
   });
+
+  it("decodes XML entities in titles, links and descriptions", async () => {
+    mockFetchOnce(
+      rss(
+        `<item>
+          <title>Q&amp;A over de R&amp;D-regeling</title>
+          <link>https://www.rijksoverheid.nl/zoeken?trefwoord=wbso&amp;type=nieuws</link>
+          <description>Minister: &quot;Dit helpt&quot; &#8211; ook in &apos;s-Hertogenbosch.</description>
+          <pubDate>Fri, 03 Jul 2026 15:34:00 GMT</pubDate>
+          <guid isPermaLink="false">doc-entities</guid>
+        </item>`,
+      ),
+    );
+    const src = new RijksoverheidSource(config);
+    const out = await src.search({ query: "R&D", top: 20 });
+
+    expect(out.items[0]).toMatchObject({
+      title: "Q&A over de R&D-regeling",
+      url: "https://www.rijksoverheid.nl/zoeken?trefwoord=wbso&type=nieuws",
+      snippet: "Minister: \"Dit helpt\" – ook in 's-Hertogenbosch.",
+    });
+  });
 });
 
 /** Stub fetch with a JSON (200, application/json) body the test controls. */

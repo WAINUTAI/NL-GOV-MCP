@@ -162,29 +162,14 @@ function textOf(value: unknown): string | undefined {
   return undefined;
 }
 
-const XML_NAMED_ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
-
 /**
- * parseXml draait met processEntities:false, dus "&amp;" en "&#39;" komen letterlijk
- * mee (bv. in hasVersion-URL's en organisatienamen). In één pass decoderen, zodat
- * "&amp;lt;" "&lt;" wordt en niet "<".
+ * Eerste niet-lege tekst van een (mogelijk herhaald) element. parseXml heeft XML-
+ * entities en tekenreferenties al gedecodeerd; hier niet nog eens decoderen.
  */
-function decodeXmlEntities(s: string): string {
-  if (!s.includes("&")) return s;
-  return s.replace(/&(#x[0-9a-fA-F]{1,6}|#[0-9]{1,7}|amp|lt|gt|quot|apos);/g, (match, entity: string) => {
-    if (entity.startsWith("#")) {
-      const cp = entity[1] === "x" ? Number.parseInt(entity.slice(2), 16) : Number.parseInt(entity.slice(1), 10);
-      return cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : match;
-    }
-    return XML_NAMED_ENTITIES[entity] ?? match;
-  });
-}
-
-/** Eerste niet-lege tekst van een (mogelijk herhaald) element, entity-gedecodeerd. */
 function firstText(value: unknown): string | undefined {
   for (const node of asArray(value)) {
     const t = textOf(node)?.trim();
-    if (t) return decodeXmlEntities(t);
+    if (t) return t;
   }
   return undefined;
 }
@@ -194,7 +179,7 @@ function attrOf(node: unknown, name: string): string | undefined {
   const v = (node as Record<string, unknown>)[name];
   if (typeof v !== "string") return undefined;
   const t = v.trim();
-  return t ? decodeXmlEntities(t) : undefined;
+  return t ? t : undefined;
 }
 
 function objects(value: unknown): Array<Record<string, unknown>> {
