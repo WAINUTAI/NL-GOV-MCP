@@ -1,4 +1,5 @@
 import type { AppConfig } from "../types.js";
+import { htmlToText } from "../utils/html-text.js";
 import { getText } from "../utils/http.js";
 import {
   extractSruNumberOfRecords,
@@ -157,9 +158,15 @@ function extractSamenwerkendeCatalogi(
       ? String((authority as Record<string, unknown>).scheme ?? "").replace(/^overheid:/, "")
       : "";
 
+  // Municipalities publish their product texts as HTML, which the feed escapes
+  // into the XML: after XML decoding the abstract is real "<p>…</p>" with
+  // "&nbsp;"/"&hellip;", and a few titles carry "&amp;" or "&#039;". Both are
+  // turned into plain text here — before compact() cuts the abstract at 600
+  // characters, so the cut lands on clean text. (Tuchtrecht descriptions are
+  // plain text and are left alone.)
   return {
     identifier,
-    title: toStringValue(owmskern.title) || identifier,
+    title: htmlToText(toStringValue(owmskern.title)) || identifier,
     organisatie: toStringValue(owmskern.creator) || toStringValue(owmskern.authority),
     organisatietype,
     gebied: toStringValue(owmskern.spatial),
@@ -167,7 +174,7 @@ function extractSamenwerkendeCatalogi(
     doelgroep: toJoined(owmsmantel.audience),
     gewijzigd: toStringValue(owmskern.modified),
     samenvatting: compact(
-      toStringValue(owmsmantel.abstract) || toStringValue(owmsmantel.description),
+      htmlToText(toStringValue(owmsmantel.abstract) || toStringValue(owmsmantel.description)),
     ),
     canonical_url:
       toStringValue(enriched.preferredUrl) ||

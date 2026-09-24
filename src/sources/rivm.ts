@@ -1,6 +1,6 @@
 import type { AppConfig } from "../types.js";
 import { getJson, getText } from "../utils/http.js";
-import { XMLParser } from "fast-xml-parser";
+import { parseXml } from "../utils/xml-parser.js";
 
 interface RIVMItem {
   id: string;
@@ -96,8 +96,10 @@ export class RivmSource {
       retries: 1,
     });
 
-    const parser = new XMLParser({ ignoreAttributes: false, removeNSPrefix: true });
-    const parsed = parser.parse(data);
+    // The shared parser: no DOCTYPE entity expansion, a size cap, and no number
+    // coercion of codes with leading zeros. Only element paths are read below, so
+    // its unprefixed attribute names ("" instead of "@_") change nothing here.
+    const parsed = parseXml(data) as Record<string, any> | undefined;
 
     const searchResults = parsed?.GetRecordsResponse?.SearchResults;
     if (!searchResults) return [];

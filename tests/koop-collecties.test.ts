@@ -76,6 +76,30 @@ const catalogiRecord = `
   </gzd:enrichedData>
 </gzd:gzd></sru:recordData></sru:record>`;
 
+// As the live feed ships it: the product text is HTML, escaped into the XML, so
+// after XML decoding it is real markup with HTML entities. The long style
+// attributes push the raw HTML past compact()'s 600-character cut while the text
+// itself stays well under it.
+const padding = Array.from({ length: 12 }, () => `&lt;span style=&quot;font-family: Verdana, Arial, sans-serif; font-size: 10pt&quot;&gt;&lt;/span&gt;`).join("");
+const catalogiHtmlRecord = `
+<sru:record><sru:recordData><gzd:gzd>
+  <gzd:originalData><overheidwetgeving:meta>
+    <overheidwetgeving:owmskern>
+      <dcterms:identifier>b0f3c1d2e4a5968778695a4b3c2d1e0f</dcterms:identifier>
+      <dcterms:title>Schuldhulp &amp;amp; budgetbeheer</dcterms:title>
+      <dcterms:type scheme="overheid:Informatietype">productbeschrijving</dcterms:type>
+      <dcterms:creator scheme="overheid:Gemeente">Heerlen</dcterms:creator>
+      <dcterms:modified>2025-03-04</dcterms:modified>
+    </overheidwetgeving:owmskern>
+    <overheidwetgeving:owmsmantel>
+      <dcterms:abstract>&lt;p&gt;Heeft u schulden?&amp;nbsp;Wij helpen u gratis&amp;hellip;&lt;/p&gt;${padding}&lt;p&gt;Wij werken samen met co&amp;ouml;peraties.&lt;br&gt;Typ &amp;lt;b&amp;gt; niet&amp;#39;.&lt;/p&gt;</dcterms:abstract>
+    </overheidwetgeving:owmsmantel>
+  </overheidwetgeving:meta></gzd:originalData>
+  <gzd:enrichedData>
+    <gzd:url>https://repository.overheid.nl/frbr/samenwerkendecatalogi/y/1/metadata/metadata.xml</gzd:url>
+  </gzd:enrichedData>
+</gzd:gzd></sru:recordData></sru:record>`;
+
 function stubSru(body: string) {
   const fetchMock = vi.fn(async () => xmlResponse(body));
   vi.stubGlobal("fetch", fetchMock);
@@ -169,6 +193,20 @@ describe("KoopCollectieSource — samenwerkende catalogi", () => {
     });
     expect(item.samenvatting).toBe("Maakt u zich zorgen over een buurtbewoner?");
     expect(item.canonical_url).toContain("repository.overheid.nl");
+  });
+
+  it("turns an HTML product text into plain text before truncating it", async () => {
+    stubSru(sruEnvelope(catalogiHtmlRecord, 1));
+    const source = new KoopCollectieSource(testConfig, "samenwerkendecatalogi");
+    const out = await source.search({ query: "schuldhulpverlening", maximumRecords: 10 });
+
+    const item = out.items[0] as SamenwerkendeCatalogiItem;
+    // Tags gone, paragraphs separated, entities decoded; the escaped "<b>" stays
+    // literal, and the text is not cut off although the raw HTML exceeds 600 chars.
+    expect(item.samenvatting).toBe(
+      "Heeft u schulden? Wij helpen u gratis… Wij werken samen met coöperaties. Typ <b> niet'.",
+    );
+    expect(item.title).toBe("Schuldhulp & budgetbeheer");
   });
 
   it("reports zero hits with a usable hint", async () => {
