@@ -244,9 +244,9 @@ Meerdere woorden vrije tekst moeten als losse termen met `AND` worden verbonden:
 ## LiDO — Linked Data Overheid (verwijzingen)
 
 - **Connector**: `lido` (category `semi_live`)
-- **Tool**: `lido_verwijzingen`
-- **Endpoints**: `https://linkeddata.overheid.nl/service/get-id` en `/service/get-aantal-per-informatietype` (KOOP/Logius, XML)
-- **Auth**: geen
+- **Tools**: `lido_verwijzingen` (tellingen), `lido_verwijzingen_lijst` (de gekoppelde documenten)
+- **Endpoints**: `https://linkeddata.overheid.nl/service/get-id` en `/service/get-aantal-per-informatietype` (publieke services), plus `/service/get-links?output=xml` voor de lijst (KOOP/Logius, XML)
+- **Auth**: geen voor de publieke services. `get-links` staat bij LiDO onder "Niet-publieke services", maar LiDO dwingt geen account af (sept. 2026: zonder, met juiste en met onjuiste inloggegevens allemaal HTTP 200). Optioneel `LIDO_USERNAME` + `LIDO_PASSWORD`: alleen als beide gezet zijn gaat HTTP Basic auth mee, en uitsluitend op `get-links`. `/sparql` wordt niet gebruikt (weigert Basic auth).
 - **Invoer**: ECLI, BWB-id (+ artikel), CELEX of OEP-publicatie (`stb-2018-401`, `stcrt-2024-20264`).
-- **Gedrag**: alleen de als publiek gedocumenteerde services; de volledige lijst verwijzingen staat op de LiDO-portaalpagina (`portal_url`). Bij BWB gelden de tellingen voor de meest recente versie.
+- **Gedrag**: tellingen komen uit `get-aantal-per-informatietype`; de lijst uit `get-links` met `start` (0-based offset) en `rows` (max. 100; LiDO valt daarboven stil terug op 20). Het totaal is de som van de `obj_type`-facetten; LiDO telt en pagineert per verwijzing, dus een document met meerdere verwijzingen staat meermaals in de upstream-lijst (de tool toont het per pagina één keer). Het typefilter gebruikt LiDO's eigen syntax `fq={!tag=obj_type}obj_type:"<type>"` (ongedocumenteerd voor `get-links`, wel door LiDO zelf gebruikt in portaal-URL's). Een onbekend ext-id geeft bij `get-links` een lege HTTP 400; dat wordt pas als "onbekend" gelezen na bevestiging via `get-aantal-per-informatietype`. Bij BWB gelden tellingen en lijst voor de meest recente versie.
 - **Licentie**: CC0.

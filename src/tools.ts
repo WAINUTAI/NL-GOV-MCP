@@ -44,7 +44,7 @@ import { KoopCollectieSource } from "./sources/koop-collecties.js";
 import { BrpGewasperceelSource } from "./sources/brp-gewaspercelen.js";
 import { VerkiezingsuitslagenSource } from "./sources/verkiezingsuitslagen.js";
 import { EuCellarSource, normalizeCelex } from "./sources/eu-cellar.js";
-import { LidoSource, parseLidoId } from "./sources/lido.js";
+import { LidoSource, parseLidoId, normalizeLidoType, clampLidoRows } from "./sources/lido.js";
 import { mapSourceError, nowIso, successResponse, toMcpToolPayload, errorResponse } from "./utils/response.js";
 import { parseTemporalRange } from "./utils/temporal.js";
 import { applyOutputFormat } from "./utils/output-format.js";
@@ -2498,7 +2498,7 @@ export function registerTools(server: McpServer): void {
   });
 
   server.registerTool("lido_verwijzingen", {
-    description: "Count references per document type in LiDO (Linked Data Overheid) to a ruling (ECLI), law article (BWBR + artikel), EU act (CELEX) or Staatsblad/Staatscourant publication; includes a portal link to the list.",
+    description: "Count references per document type in LiDO (Linked Data Overheid) to a ruling (ECLI), law article (BWBR + artikel), EU act (CELEX) or Staatsblad/Staatscourant publication; includes a portal link to the list. The list itself (titles, direction, URLs) is available via lido_verwijzingen_lijst.",
     inputSchema: { id: z.string().describe("ECLI:NL:HR:2019:2006, BWBR0011823, 32016L0680 or stb-2018-401."), artikel: z.string().optional().describe("Article number, only with a BWBR id, e.g. '7:658'."), outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) },
     annotations: TOOL_ANNOTATIONS,
   }, async ({ id, artikel, outputFormat, verbose, dryRun }) => {
@@ -2516,6 +2516,60 @@ export function registerTools(server: McpServer): void {
       });
       const response = buildFormattedResponse({ summary: `LiDO-verwijzingen naar ${parsed.value}${artikel ? ` art. ${artikel}` : ""}`, records, provenance: prov("lido_verwijzingen", out.endpoint, out.params, records.length, out.total), outputFormat, offset: 0, limit: Math.max(1, records.length), total: out.total, access_note: out.access_note, verbose: singleConnectorVerbose({ enabled: verbose, connector: "lido", endpoint: out.endpoint, responseTimeMs }) });
       return toMcpToolPayload(response);
+    } catch (e) { return toMcpToolPayload(mapSourceError(e, "LiDO Linked Data Overheid", "https://linkeddata.overheid.nl")); }
+  });
+
+  server.registerTool("lido_verwijzingen_lijst", {
+    description: "List the documents LiDO (Linked Data Overheid) links to or from a ruling (ECLI), law article (BWBR + artikel), EU act (CELEX) or Staatsblad/Staatscourant publication: title, document type, direction (uitgaand = the item cites it, inkomend = it cites the item, beide = both), link labels and source URL. Paged upstream with offset/limit (at most 100 per call); total and offset count references (links), and a document linked more than once is listed once per page. Optional 'type' filter on the LiDO document type. Use lido_verwijzingen for counts only.",
+    inputSchema: { id: z.string().describe("ECLI:NL:HR:2019:2006, BWBR0011823, 32016L0680 or stb-2018-401."), artikel: z.string().optional().describe("Article number, only with a BWBR id, e.g. '7:658'."), type: z.string().optional().describe("Optional LiDO document type to filter on, e.g. 'Jurisprudentie', 'Wet', 'Verdrag', 'Amvb', 'Ministeriële-regeling', 'Officiele overheidspublicatie'. Letters, digits, spaces and hyphens only."), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ id, artikel, type, offset, limit, outputFormat, verbose, dryRun }) => {
+    const parsed = parseLidoId(id);
+    if (!parsed) return toMcpToolPayload(errorResponse({ error: "unexpected", message: `Onbekend LiDO-identifier: ${id.slice(0, 100)}`, suggestion: "Use an ECLI (ECLI:NL:HR:2019:2006), BWB id (BWBR0011823, optionally with artikel), CELEX (32016L0680) or OEP publication (stb-2018-401)." }));
+    try {
+      // LiDO pagineert zelf (start = 0-based offset, rows <= 100): records worden
+      // hier niet nog eens lokaal gesliced, vandaar geen buildFormattedResponse.
+      const rows = clampLidoRows(limit);
+      const typeFilter = normalizeLidoType(type);
+      if (dryRun) return dryRunPayload({ connector: "lido", url: "https://linkeddata.overheid.nl/service/get-links", params: { kind: parsed.kind, id: parsed.value, artikel, type: typeFilter ?? undefined, output: "xml", start: offset, rows } });
+      const started = Date.now();
+      const out = await lido.links({ id, artikel, type: typeFilter ?? undefined, offset, limit: rows });
+      const responseTimeMs = Date.now() - started;
+      const records = out.items.map((x) => {
+        const labels = Array.isArray(x.link_labels) ? (x.link_labels as string[]) : [];
+        const snippet = [x.direction, x.type, labels.join(", ")].filter((s) => typeof s === "string" && s).join(" — ");
+        return record("lido", String(x.title ?? x.external_id ?? x.lido_id ?? "LiDO-item"), String(x.url ?? out.portal_url ?? "https://linkeddata.overheid.nl"), x, snippet);
+      });
+      const label = `${parsed.value}${artikel?.trim() ? ` art. ${artikel.trim()}` : ""}`;
+      const typeText = out.type_filter ? ` (type ${out.type_filter})` : "";
+      let summary: string;
+      if (!out.lido_id) {
+        summary = `LiDO kent ${label} niet; geen gekoppelde documenten.`;
+      } else {
+        // offset/total tellen LiDO-verwijzingen; records bevat elk document één keer.
+        const range = out.page_entries
+          ? `getoond ${out.offset + 1}-${out.offset + out.page_entries}${records.length < out.page_entries ? `, ${records.length} unieke documenten` : ""}`
+          : `geen verwijzingen vanaf offset ${out.offset}`;
+        const split = out.per_type.map((p) => `${p.type}: ${p.count}`).join(", ");
+        summary = `${out.total ?? "?"} verwijzingen${typeText} van/naar ${label} (${range})${split ? `; per type: ${split}` : ""}`;
+        if (out.type_filter && out.total === 0) summary += `. Geen treffers voor type '${out.type_filter}': het type is hoofdlettergevoelig, lido_verwijzingen toont welke typen voorkomen.`;
+      }
+      const formatted = applyOutputFormat({ records, outputFormat });
+      return toMcpToolPayload(successResponse({
+        summary,
+        records,
+        provenance: prov("lido_verwijzingen_lijst", out.endpoint, out.params, records.length, out.total),
+        pagination: {
+          offset: out.offset,
+          limit: out.limit,
+          total: out.total,
+          has_more: typeof out.total === "number" ? out.offset + out.page_entries < out.total : out.page_entries >= out.limit,
+        },
+        output_format: formatted.output_format,
+        formatted_output: formatted.formatted_output,
+        access_note: mergeAccessNotes(out.access_note, out.portal_url ? `portal_url: ${out.portal_url}` : undefined, formatted.access_note),
+        verbose: singleConnectorVerbose({ enabled: verbose, connector: "lido", endpoint: out.endpoint, responseTimeMs }),
+      }));
     } catch (e) { return toMcpToolPayload(mapSourceError(e, "LiDO Linked Data Overheid", "https://linkeddata.overheid.nl")); }
   });
 

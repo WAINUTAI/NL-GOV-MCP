@@ -80,7 +80,7 @@ A single tool call flows through these steps:
 |------|------|
 | `src/index.ts` | Entry point. Reads `--sse` / `--streamable-http` flags or `MCP_TRANSPORT` env, starts the matching transport. |
 | `src/server.ts` | Creates `McpServer`, calls `registerTools()`, sets up Express routes for HTTP transports, adds `/health` and `/health/sources` endpoints. |
-| `src/tools.ts` | All 74 tool registrations. Each tool has a Zod input schema and an async handler that calls a source, transforms results, and returns via `toMcpToolPayload()`. |
+| `src/tools.ts` | All 75 tool registrations. Each tool has a Zod input schema and an async handler that calls a source, transforms results, and returns via `toMcpToolPayload()`. |
 | `src/types.ts` | Shared TypeScript interfaces: `MCPRecord`, `Provenance`, `MCPToolResponse`, `MCPErrorResponse`, `AppConfig`. |
 | `src/config.ts` | Loads `config/default.json`, merges env var overrides. |
 
@@ -147,7 +147,7 @@ The tool handler in `tools.ts` maps `items` to `MCPRecord[]` and wraps provenanc
 | `brp-gewaspercelen.ts` | PDOK WFS 2.0 (GeoJSON) + Locatieserver | `brp_gewaspercelen` |
 | `verkiezingsuitslagen.ts` | Kiesraad JSON endpoints + HTML overview parse | `verkiezingsuitslagen` |
 | `eu-cellar.ts` | CELLAR SPARQL (EU Publications Office, keyless) | `eu_cellar` |
-| `lido.ts` | LiDO public REST services (XML) | `lido` |
+| `lido.ts` | LiDO REST services (XML): public counts + `get-links` list | `lido` |
 
 ### Utilities
 
@@ -244,7 +244,7 @@ The HTTP client, caching, circuit breaker, retry, and concurrency limiting are a
 
 ## Transport modes
 
-All three transports expose the same 74 tools and are created by `server.ts`:
+All three transports expose the same 75 tools and are created by `server.ts`:
 
 | Mode | Protocol | Session model | Use case |
 |------|----------|---------------|----------|

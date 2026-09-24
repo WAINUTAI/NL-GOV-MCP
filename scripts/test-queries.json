@@ -1061,5 +1061,37 @@
       "id": "ECLI:NL:HR:2019:2006"
     },
     "minRecords": 1
+  },
+  {
+    "id": "lido_verwijzingen_lijst_ecli",
+    "description": "LiDO: lijst gekoppelde documenten bij een Hoge Raad-arrest (tweede pagina)",
+    "tool": "lido_verwijzingen_lijst",
+    "args": {
+      "id": "ECLI:NL:HR:2019:2006",
+      "offset": 20,
+      "limit": 5
+    },
+    "minRecords": 5
+  },
+  {
+    "id": "lido_verwijzingen_lijst_type_wet",
+    "description": "LiDO: alleen de wetten waarnaar een Hoge Raad-arrest verwijst",
+    "tool": "lido_verwijzingen_lijst",
+    "args": {
+      "id": "ECLI:NL:HR:2019:2006",
+      "type": "Wet"
+    },
+    "minRecords": 1
+  },
+  {
+    "id": "lido_verwijzingen_lijst_bwb_artikel",
+    "description": "LiDO: documenten die verwijzen naar artikel 29 Vreemdelingenwet 2000",
+    "tool": "lido_verwijzingen_lijst",
+    "args": {
+      "id": "BWBR0011823",
+      "artikel": "29",
+      "limit": 10
+    },
+    "minRecords": 1
   }
 ]

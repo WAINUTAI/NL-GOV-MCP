@@ -380,3 +380,14 @@ Tellingen van verwijzingen in LiDO (Linked Data Overheid, CC0).
 - **Inputs**: `id` = ECLI (`ECLI:NL:HR:2019:2006`), BWB-id (`BWBR0011823`, optioneel met `artikel`), CELEX (`32016L0680`) of OEP-publicatie (`stb-2018-401`), outputFormat/verbose/dryRun.
 - **Output**: één record met `input_id`, `kind`, `artikel`, `lido_id`, `total_references`, `per_type` (aflopend op aantal) en `portal_url` naar de lijstweergave in het LiDO-portaal.
 - **Let op**: bij BWB tellen de aantallen voor de meest recente versie van de regeling of het artikel; verwijzingen naar oudere versies tellen niet mee.
+- De lijst zelf: `lido_verwijzingen_lijst`.
+
+## `lido_verwijzingen_lijst`
+
+De gekoppelde documenten zelf (inkomend en uitgaand) uit LiDO, via de LiDO-service `get-links` (CC0).
+
+- **Inputs**: `id` en `artikel` zoals bij `lido_verwijzingen`; optioneel `type` (LiDO-informatietype, bv. `Jurisprudentie`, `Wet`, `Verdrag`, `Amvb`, `Ministeriële-regeling`, `Officiele overheidspublicatie`); `offset`/`limit` (upstream gepagineerd, `limit` standaard 20 en maximaal 100); outputFormat/verbose/dryRun.
+- **Output**: per gekoppeld document `lido_id`, `external_id` (ECLI, CELEX, wetten.overheid.nl-URI, ...), `title`, `type` + `type_uri`, `creator`/`authority`, `modified`, `url` (bron-URL uit `hasVersion`), `direction` (`uitgaand` = het opgevraagde item verwijst ernaar, `inkomend` = het verwijst naar het opgevraagde item, `beide`), `link_labels` en `juriconnect`. `summary` geeft het totaal, het getoonde bereik en de verdeling per type; `pagination.total` is het totaal.
+- **Gedrag**: `total` en `offset` tellen verwijzingen (zelfde telling als `lido_verwijzingen`). Een document met meer dan één verwijzing (beide richtingen, of dezelfde verwijzing twee keer) staat per pagina één keer in `records`; `has_more` rekent op de verwijzingen. Het `type`-filter is strikt gevalideerd (alleen letters, cijfers, spaties, koppeltekens; max. 60 tekens) en bekende typen worden hoofdletter- en accentongevoelig naar de LiDO-spelling gezet (`wet` → `Wet`). Een onbekend item levert 0 records op, geen verzonnen record.
+- **Auth**: LiDO documenteert `get-links` als niet-publieke service, maar dwingt geen account af. Zijn `LIDO_USERNAME` en `LIDO_PASSWORD` allebei gezet, dan gaat HTTP Basic auth mee op `get-links` (niet op `get-id`/`get-aantal-per-informatietype`). Een 401/403 geeft een duidelijke foutmelding die naar die variabelen verwijst.
+- **Let op**: bij BWB gaat het om de meest recente versie van de regeling of het artikel, net als bij `lido_verwijzingen`.

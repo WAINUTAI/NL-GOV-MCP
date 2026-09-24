@@ -28,7 +28,7 @@ Examples:
 
 `NL-GOV-MCP` actively retrieves and normalizes data across many sources, can combine cross-source results, and returns a consistent MCP response contract ready for assistants and automations.
 
-## Sources (46 connectors, 74 tools)
+## Sources (46 connectors, 75 tools)
 
 | Source | What it covers |
 |---|---|
@@ -77,7 +77,7 @@ Examples:
 | BRP Gewaspercelen (RVO) | Agricultural parcels with crop, category, area and polygon (PDOK WFS) |
 | Kiesraad Verkiezingsuitslagen | Election results per party, nationally and per province/municipality, incl. turnout |
 | EUR-Lex / CELLAR (EU) | EU legislation by CELEX or citation, title search, and Dutch national transposition measures per directive (keyless SPARQL; only the Official Journal is authentic, reuse with attribution) |
-| LiDO (Linked Data Overheid) | Reference counts per document type to a ruling (ECLI), law article (BWB), EU act (CELEX) or Staatsblad/Staatscourant publication, with portal link (CC0) |
+| LiDO (Linked Data Overheid) | References to and from a ruling (ECLI), law article (BWB), EU act (CELEX) or Staatsblad/Staatscourant publication: counts per document type, and the paged list of linked documents with direction and source URL (CC0) |
 
 ## Key features
 
@@ -175,7 +175,7 @@ npm run test:live    # integration test suite (live API calls)
 
 ### Transport modes
 
-Three transport modes are supported. All expose the same 74 tools.
+Three transport modes are supported. All expose the same 75 tools.
 
 #### stdio (Claude Desktop, Claude Code)
 
@@ -277,6 +277,7 @@ Restart Claude Desktop after saving.
 | `EP_ONLINE_API_KEY` | — | Required for `ep_online_energielabel` (RVO EP-Online energielabels). Without it the tool returns `not_configured`. ([request access](https://www.ep-online.nl/)) |
 | `NS_API_KEY` | — | Required for `ns_reisinformatie` (NS Reisinformatie API). Subscribe to the **"Ns-App"** product (free external tier ~300 req/5 min) — NOT the deprecated "Public-Travel-Information" product. Without it the tool returns `not_configured`. ([get a free key](https://apiportal.ns.nl/)) |
 | `DNB_API_KEY` | — | Required for `dnb_statistics_search` (DNB Statistics API, gateway `api.dnb.nl`). Subscribe to the free **"Public"** product on the portal and generate the key (self-service). Without it the tool returns `not_configured`. ([get a free key](https://api.portal.dnb.nl)) |
+| `LIDO_USERNAME` / `LIDO_PASSWORD` | — | Optional LiDO account for LiDO's non-public services, used by `lido_verwijzingen_lijst` (`get-links`). LiDO does not enforce it today, so the tool works without it. When both are set they are sent as HTTP Basic auth on `get-links` only. ([request via the LiDO feedback page](https://linkeddata.overheid.nl)) |
 | `MCP_TRANSPORT` | `stdio` | Transport mode: `stdio`, `sse`, or `streamable-http` (alternative to CLI flags) |
 | `LOG_LEVEL` | `info` | Pino log level (`debug`, `info`, `warn`, `error`, `silent`) |
 
@@ -320,6 +321,8 @@ Responses include facet-driven context in `access_note` when filters are applied
 `eurlex_search`, `eurlex_document` and `eurlex_nl_omzetting` query the keyless CELLAR SPARQL endpoint of the EU Publications Office. `id` accepts a CELEX number (`32016R0679`) or a citation (`Verordening (EU) 2016/679`, `Richtlijn 95/46/EG`); invalid input is rejected before any request. Search matches title words only. Only the electronic Official Journal of the EU is authentic; EUR-Lex content may be reused with attribution. `nl_gov_ask` routes a CELEX number or EU citation (and explicit terms such as "EU-richtlijn", "EUR-Lex") to these tools before the Officiële Bekendmakingen route.
 
 `lido_verwijzingen` returns how often a ruling, law (article), EU act or Staatsblad/Staatscourant publication is referenced in LiDO, per document type, plus a link to the full list on the LiDO portal. It uses only the services LiDO documents as public (`get-id`, `get-aantal-per-informatietype`); LiDO data is CC0.
+
+`lido_verwijzingen_lijst` returns that list itself: per linked document its title, type, direction (`uitgaand`: the item cites it, `inkomend`: it cites the item, `beide`), link labels and source URL. It pages upstream (`offset`/`limit`, at most 100 per call) and can filter on a LiDO document type (`type: "Wet"`, `"Jurisprudentie"`, ...), which is validated strictly before it goes into LiDO's filter. `total` counts references, as in `lido_verwijzingen`; a document linked more than once is listed once per page. The tool uses LiDO's `get-links` service, which LiDO lists under its non-public services but currently serves without login. If LiDO starts requiring an account, set `LIDO_USERNAME`/`LIDO_PASSWORD`; a 401/403 yields an error that names those variables.
 
 **Tuchtrecht is a separate source.** Disciplinary rulings against doctors, lawyers, notaries, accountants, vets and bailiffs are published on `tuchtrecht.overheid.nl`, not on Rechtspraak.nl. Use `tuchtrecht_search` for those; `nl_gov_ask` routes disciplinary questions there before it considers Rechtspraak.
 

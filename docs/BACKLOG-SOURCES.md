@@ -219,7 +219,7 @@ Vijf nieuwe connectors + twee dwarsdoorsnijdende capabilities (39 → 44 connect
 ### EUR-Lex en LiDO (toegevoegd) — bewuste keuzes
 
 - **EUR-Lex** loopt via het keyless CELLAR SPARQL-endpoint. De EUR-Lex SOAP-webservice is niet gebruikt omdat die een account vereist; `eur-lex.europa.eu` zelf zit achter een WAF en is ongeschikt voor server-side calls (we linken er alleen naar). Alleen het Publicatieblad is authentiek; hergebruik met bronvermelding.
-- **LiDO** gebruikt alleen de publiek gedocumenteerde services (`get-id`, `get-aantal-per-informatietype`). `get-links`, `/sparql` en portal-scraping zijn officieel niet-publiek en bewust niet gebruikt; daarom levert de tool tellingen plus een portaallink in plaats van de volledige verwijzingslijst. Data CC0.
+- **LiDO**: tellingen (`lido_verwijzingen`) lopen via de publiek gedocumenteerde services (`get-id`, `get-aantal-per-informatietype`). De verwijzingslijst (`lido_verwijzingen_lijst`) gebruikt sinds sept. 2026 `get-links`. LiDO noemt die service niet-publiek (account vereist), maar dwingt dat niet af en valideert het ook niet; met `LIDO_USERNAME`/`LIDO_PASSWORD` gaat Basic auth mee op alleen `get-links`, en een 401/403 geeft een duidelijke fout. `/sparql` (weigert Basic auth) en portal-scraping blijven ongebruikt. Data CC0.
 
 ### Volgende kandidaten (uit hetzelfde bronnenonderzoek)
 
