@@ -21,25 +21,43 @@
 
 ## Tweede Kamer
 - `tweede_kamer_documents`
+  - zoekt in titel en onderwerp (metadata, niet de volledige tekst); alle zoekwoorden moeten voorkomen (AND)
+  - woorden van maximaal 3 tekens en "quoted phrases" matchen als heel woord, langere woorden ook binnen langere woorden ('fietspad' vindt 'fietspaden'); `access_note` noemt de gezochte vormen
+  - `query` is optioneel naast `type` of een datum; `date_from`/`date_to` (YYYY-MM-DD, Nederlandse datum)
+  - records linken naar de documentpagina op tweedekamer.nl; `pagination.total` is het echte aantal treffers
 - `tweede_kamer_search`
+  - OData-zoektocht op elke entiteit van het Gegevensmagazijn (Document, Zaak, Activiteit, Besluit, Stemming, Persoon, Fractie, Kamerstukdossier, ...)
+  - `query` (AND, zelfde woordregels) is optioneel naast `filter` (ruwe OData `$filter`) of een datum; `date_from`/`date_to` filteren op de eigen datum van de entiteit
+  - een onbekende entiteit of een geweigerde expressie geeft een expliciete fout, nooit een ongefilterde fallback
 - `tweede_kamer_document_get`
   - default: lean metadata + resource endpoints
   - optional: `resolve_resource` to expose resolved file metadata/URL
   - optional: `include_text` to fetch a capped preview for text-like resources
   - PDF resources: `include_text` extracts the PDF text layer (`text_preview_source: "pdf_text_layer"`, `resource_pages`); a scan without OCR reports `text_preview_unavailable_reason: "pdf_no_text_layer"`
+  - Word (.docx) resources: `include_text` extracts the document text; other binary formats report `text_preview_unavailable_reason` instead of raw bytes
   - `nl_gov_ask` can auto-deepen the top match on explicit content/summary questions
 - `tweede_kamer_votes`
+  - één rij per fractie (of per Kamerlid bij een hoofdelijke stemming), gekoppeld aan het besluit (`uitslag`, bv. 'Aangenomen.') en aan de zaak waarover gestemd is (nummer, titel, onderwerp, tweedekamer.nl-link)
+  - filters: `query` (titel/onderwerp van de zaak, zelfde woordregels), `zaak_nummer`, `zaak_id`, `besluit_id`, `date` of `date_from`/`date_to` (datum van de stemming); nieuwste stemmingen eerst
 - `tweede_kamer_members`
 
 ## Officiële Bekendmakingen
 - `officiele_bekendmakingen_search`
+  - alle zoekwoorden moeten voorkomen (stopwoorden tellen niet mee); een "quoted phrase" en een citaat als '2016/679' matchen exact; bij een woord met koppelteken ('OV-visie') komen eerst de exacte treffers, daarna stukken met de losse woorden
+  - `authority` normaliseert de uitgever: een voorvoegsel 'Gemeente '/'Provincie ' wordt `authority_type`, 'Den Haag' wordt gezocht als ''s-Gravenhage', een waterschap onder zijn volledige naam; oudere of variante spellingen van dezelfde uitgever ('Utrecht (Utr)', tot 2015) tellen als die uitgever, en `access_note` noemt de uitgevers als een pagina er meerdere mengt
+  - `publicatieblad` filtert op het blad (Gemeenteblad, Staatscourant, Staatsblad, Provinciaal blad, Waterschapsblad, ...; ook `gmb`, `stcrt`, `stb`, ...); een bladnaam in `type` wordt als publicatieblad toegepast, met een melding
+  - `sort` (`relevance`, `date_newest`, `date_oldest`) en `date_from`/`date_to` werken op `date_field` (`dagtekening` of `publicatiedatum`)
+  - elk record heeft dagtekening, publicatiedatum, vindplaats en directe PDF/HTML/XML-links; alleen de eerste ~10.000 treffers zijn te pagineren
 - `officiele_bekendmakingen_record_get`
+  - één publicatie op identifier (bv. `stcrt-2026-10001`) of zoek.officielebekendmakingen.nl-URL: volledige metadata (dagtekening, publicatiedatum, blad en vindplaats, onderwerpen, juridische grondslag, dossier en indieners bij Kamerstukken) plus directe PDF/HTML/XML-links
+  - `include_text` haalt de tekst op (uit de XML-versie, of uit de PDF bij oudere publicaties en bijlagen), begrensd door `max_chars`
 
 ## Rijksoverheid
 - `rijksoverheid_search`
   - Zoekt nieuws/documenten via het Rijksoverheid.nl RSS-platform (`https://www.rijksoverheid.nl/api/rss`), met **server-side** keyword-zoek (`resultSearchTerm`)
-  - `type`: `news` (default, alleen nieuwsberichten) of `all` (alle content: nieuws + documenten + persberichten); `date_from`/`date_to` filteren client-side op publicatiedatum
-  - Levert ~20 resultaten per query (het RSS-platform biedt geen eenvoudige paginatie); records bevatten titel, canonieke URL, samenvatting en datum
+  - `type`: `news` (default, alleen nieuwsberichten) of `all` (nieuws + documenten + overige pagina's); `date_from`/`date_to` (YYYY-MM-DD, of YYYY-MM / YYYY voor een hele maand of een heel jaar) filteren **server-side**, vóór de limiet van 20, op de datum die Rijksoverheid.nl zelf toont; een onleesbare datum wordt genegeerd met een melding in `access_note`
+  - Maximaal 20 resultaten per query, zonder paginatie; is de feed vol, dan is het echte aantal onbekend en blijft `total` leeg
+  - Records: `date` (de getoonde datum als Amsterdamse kalenderdag: bij nieuws de publicatiedatum, bij documenten de documentdatum of die van de laatste versie), `issued` (volledige tijdstempel), `url_date` (alleen documenten: de datum uit het URL-pad, waarop de pagina is aangemaakt) en `type` (uit het URL-pad: news, document, video, ...); een herschreven zoekterm staat in `access_note`
 - `rijksoverheid_schoolholidays`
   - Schoolvakanties per schooljaar/regio via de nog actieve `opendata.rijksoverheid.nl`-dataset
 
@@ -87,9 +105,13 @@
 
 ## ORI / Open Raadsinformatie
 - `ori_search`
-  - endpoint discovery via ORI Elastic `_search`
-  - extractie van live hits naar `id/title/type/organization/publishedAt/url`
-  - bij instabiele endpointtoegang: deterministische fallback met `access_note`
+  - raadsdocumenten, agendapunten, vergaderingen en besluiten van gemeenten, provincies en waterschappen via ORI Elastic `_search`
+  - standaard moeten alle woorden voorkomen (`match: "all"`), `match: "any"` vraagt minstens één; de query accepteert "phrases", OR/AND/NOT in hoofdletters, -term en prefix*
+  - `gemeente` beperkt tot één orgaan, ook een provincie of waterschap (exact tegen de live indexlijst; een naam zonder ORI-index levert 0 records en zegt dat); `bestuurslaag` (`gemeente`, `provincie`, `waterschap`) is een filter
+  - `date_from`/`date_to` filteren op de vergaderdatum; `sort: "date_newest"` sorteert op vergaderdatum en laat datums na vandaag weg tenzij `date_to` gezet is
+  - documenten linken naar hun bestand; waar de ORI-link bekend kapot is, gaat de link naar het bronsysteem (`link_note`), elders is `data.original_url` (ook per bijlage) de uitwijk; agendapunten en vergaderingen linken naar hun ORI-record (`link_type`) met hun documenten onder `attachments`
+  - `data.date_type` zegt wat de datum is (vergaderdatum, documentdatum, ...); totalen boven 10.000 zijn een ondergrens; `access_note` waarschuwt bij een verouderde index en meldt een herschreven zoekterm
+  - faalt ORI, dan volgt een foutmelding en geen leeg resultaat
 
 ## NDW
 - `ndw_search`
@@ -184,6 +206,12 @@
   - education questions prefer real per-school records (`duo_schools` / `duo_exam_results`) and fall back to the DUO dataset catalogue only when those return nothing
   - air-quality questions route to Luchtmeetnet for the place named in the question; only unambiguous terms trigger it, so bare "stikstof" keeps routing to Tweede Kamer / CBS
   - CBS questions that find nothing with the full sentence retry with progressively narrower topic terms (municipality and quantity words removed - CBS table titles carry neither)
+  - organisation and policy questions ("Wat doet de Belastingdienst met de BTW?", "GGZ-beleid gemeente Utrecht") are searched in documents: the council records (ORI) of a named municipality, otherwise official publications, Tweede Kamer and Rijksoverheid in parallel; a source that does not answer within 10 s is left out and named in `access_note`
+  - guards: case-law, API-register and budget questions keep their own routes; "uitspraken" means court rulings only when no office holder is its speaker ("uitspraken van de minister" are statements); when a national actor comes before "gemeente X", the national sources answer instead of that council's records
+  - each route searches the topic keywords of the question, without question frames and route words (such as "moties" for Tweede Kamer, which becomes a document-type filter); the terms used are reported in `access_note`. Time phrases without a date filter ("deze week", "onlangs") are left out of the terms, and `access_note` says no date filter was applied
+  - the Officiële Bekendmakingen route turns a journal named in the question (Staatscourant, Gemeenteblad, Provinciaal blad, `stcrt`, `gmb`, ...) into the `publicatieblad` filter instead of a required search word; a question with a journal and no topic gets that journal's newest publications
+  - the EUR-Lex search route passes a document number ("2016/679") on whole, so `eurlex_search` looks it up as that act
+  - when no route answers, the data.overheid.nl catalogue fallback names the routes that were tried and whether they found nothing or failed
 
 ## Known limits / behavior notes
 - KNMI `knmi_warnings` (`waarschuwingen_nederland_48h`) and `knmi_earthquakes` (`aardbevingen_nederland`) try multiple dataset candidates and return a clear `access_note` if none currently resolves.
@@ -219,7 +247,7 @@ Search consolidated Dutch national legislation (BWB) via the KOOP SRU service. K
 
 ## cvdr_search
 
-Search Dutch decentralised/local regulations (CVDR) via the KOOP SRU service. Keywords match the `keyword` index. Full-pattern tool: supports `offset`/`limit`/`top`, `outputFormat`, `verbose` and `dryRun`. Returns CVDR id, title, issuing municipality/authority, date and a lokaleregelgeving.overheid.nl link.
+Search Dutch decentralised/local regulations (CVDR) via the KOOP SRU service. All query words must occur (AND) in a regulation's title or text; uppercase `OR` and `NOT` between words are operators (AND binds tighter than OR). A place name in the query also finds other authorities' regulations that mention it, so restrict to the issuer with `organization` (whole words of the issuer name, case-insensitive; a leading 'Gemeente'/'Provincie' becomes `organization_type`; 'Den Haag' and 'Den Bosch' also match their official names) and/or `organization_type` (`Gemeente`, `Provincie`, `Waterschap`, ...). `query` may be empty when one of these is set. `offset`/`limit` page server-side through the whole result set and `total` is the real hit count. Returns CVDR id, title, `organization` and `organization_type` (the older `gemeente` field holds the same issuer), date and a lokaleregelgeving.overheid.nl link. A query CVDR refuses returns an error with the SRU diagnostic instead of an empty result.
 
 ## bestuurlijke_gebieden_search
 
@@ -250,11 +278,13 @@ Search current NZa Zorgbeeld waiting times for Dutch hospital / medical-speciali
 
 ## overheidsorganisaties_search
 
-Zoek in het Register van Overheidsorganisaties (ROO/TOOI) op naam.
+Zoek in het Register van Overheidsorganisaties (ROO/TOOI) op naam of afkorting.
 
-**Parameters:** `query` (naam-substring), `type` (optionele TOOI type-URI, bv. `https://identifier.overheid.nl/tooi/def/ont/Gemeente`), `enrich` (default true; verrijk met contact/adres, auto-uit boven 15 treffers), plus standaard `top`, `offset`, `limit`, `outputFormat`, `verbose`, `dryRun`.
+**Parameters:** `query` (deel van de naam of een afkorting; leeg = bladeren door het hele register, te combineren met `type`), `type` (optionele TOOI type-URI, bv. `https://identifier.overheid.nl/tooi/def/ont/Gemeente`), `enrich` (default true; verrijk de eerste 15 treffers van de getoonde pagina met contact/adres), `active_only` (alleen organisaties zonder einddatum; faalt liever dan ongefilterd te antwoorden als TOOI onbereikbaar is), plus standaard `top`, `offset`, `limit`, `outputFormat`, `verbose`, `dryRun`.
 
-**Levert per organisatie:** `title` (label), `organisatietype` (afgeleid uit type-URI), `tooi_uri` / `type_uri`, `website`, `telefoon`, `bezoekadres`, canonieke `url` (website indien verrijkt, anders de TOOI-URI). Records zijn lean.
+**Matching:** ongevoelig voor hoofdletters, accenten, apostroffen en koppeltekens; vindt ook registerafkortingen (UWV, RIVM, in elke schrijfwijze), officiële namen (''s-Gravenhage' voor Den Haag) en een paar generieke aliassen (GGD = gezondheidsdienst). Namen die de zoekterm zelf bevatten staan vóór treffers op alleen een alias. Opgeheven organisaties staan ook in het register en zijn gemarkeerd (`einddatum`/`opgeheven`).
+
+**Levert per organisatie:** `title` (label), `organisatietype` (afgeleid uit type-URI), `tooi_uri` / `type_uri`, afkorting, `website`, `telefoon`, `bezoekadres`. De canonieke URL is de website (https), of de registerpagina van de organisatie als er geen website is, de verrijking is overgeslagen of de organisatie is opgeheven.
 
 **Voorbeeld:** `query="Amsterdam"` -> gemeente Amsterdam met TOOI-URI `.../gemeente/gm0363`, website amsterdam.nl, telefoon 14 020, bezoekadres Amstel 1.
 
@@ -309,16 +339,19 @@ Haalt datapunten op uit de DNB Statistics API (De Nederlandsche Bank).
 
 Zoekt aanbestedingspublicaties op TenderNed (aankondigingen, gunningen, marktconsultaties, vroegtijdige beëindigingen).
 
-- **Inputs**: `query` (vrije tekst over naam/beschrijving/opdrachtgever), `typeOpdracht` (`leveringen`|`diensten`|`werken`|`all`), `procedure` (code, bv. `OPE`), `date_from`/`date_to` (JJJJ-MM-DD, publicatiedatum), `page` (0-based), `top` (max 100), pagination/outputFormat/verbose/dryRun.
+- **Inputs**: `query` (vrije tekst over naam/beschrijving/opdrachtgever), `opdrachtgever` (aanbestedende dienst, server-side via het TenderNed-register; alle diensten met die woorden in hun naam tellen mee, `access_note` noemt ze, een te brede naam zoals alleen 'Gemeente' wordt geweigerd), `typeOpdracht` (`leveringen`|`diensten`|`werken`|`all`), `procedure` (code, bv. `OPE`), `date_from`/`date_to` (JJJJ-MM-DD, publicatiedatum), `sort` (`relevance` of `date_newest`; standaard relevance met een query, anders nieuwste eerst), `page` (0-based), `top` (max 100), pagination/outputFormat/verbose/dryRun.
+- **Zoeksyntax**: TenderNed combineert meerdere woorden met OR; zet de héle query tussen dubbele aanhalingstekens voor een exacte frase (één frase per query). AND/OR/NOT, + en - zijn geen operators.
 - **Output**: publicatie_id, opdrachtgever, publicatie-/sluitingsdatum, type publicatie (+code), procedure, type opdracht, europees, kenmerk, beschrijving; canonical url is de TenderNed-aankondigingspagina.
-- **Let op**: TenderNed levert maximaal 100 publicaties per pagina (`size>100` → HTTP 400) — gebruik `page`. Een ongeldig datumformaat wordt genegeerd en gemeld in `access_note` in plaats van stil mis te filteren.
+- **Sluitingsdatum**: de zoekindex houdt de deadline van de oorspronkelijke aankondiging, ook na een rectificatie. Voor aankondigingen met een deadline in de toekomst of hooguit 180 dagen oud (max. 50 per aanroep, binnen ongeveer 3 seconden, eerder gestopt als de detailrecords traag of niet antwoorden) leest de tool het detailrecord: `sluitings_datum_gecontroleerd: true` en `sluitings_datum_oorspronkelijk` als die afweek; andere sluitingsdata komen ongecontroleerd uit de index.
+- **Let op**: TenderNed levert maximaal 100 publicaties per aanroep en alleen de eerste 10.000 resultaten van een query; `offset`/`page` worden daarnaar vertaald. Een ongeldig datumformaat wordt genegeerd en gemeld in `access_note` in plaats van stil mis te filteren.
 
 ## `tenderned_aanbesteding_get`
 
-Detail van één publicatie op `publicatieId`.
+Detail van één publicatie op `publicatieId` (of `publicatie_id` uit de zoektool).
 
-- **Inputs**: `publicatieId`, `include_text` (tekstlaag van de officiële aankondigings-PDF), `max_chars`.
-- **Output**: alle zoekvelden + CPV-codes, NUTS-codes, juridisch kader, opdrachtaard, aanbestedingsstatus, aanvang/voltooiing opdracht, `isGegund`, gerelateerde publicaties en `pdfUrl`. Met `include_text`: `pdf_text`, `pdf_text_chars`, `pdf_text_truncated`, `pdf_pages` — of `pdf_text_unavailable_reason` met een typed reden.
+- **Inputs**: `publicatieId`/`publicatie_id`, `include_award` (default true), `include_text` (tekstlaag van de officiële aankondigings-PDF), `max_chars`.
+- **Output**: dezelfde snake_case-velden als de zoektool (`publicatie_datum`, `sluitings_datum`, `type_publicatie`, ...) naast de oorspronkelijke camelCase-velden, plus CPV-codes, NUTS-codes, juridisch kader, opdrachtaard, aanbestedingsstatus, aanvang/voltooiing opdracht, `isGegund`, gerelateerde publicaties van dezelfde procedure en `pdfUrl`. De sluitingsdatum is de actuele deadline na een eventuele rectificatie (`sluitings_datum_bron` noemt het veld). Met `include_text`: `pdf_text`, `pdf_text_chars`, `pdf_text_truncated`, `pdf_pages` — of `pdf_text_unavailable_reason` met een typed reden.
+- **Gunning** (`include_award`, één extra request naar de HTML-weergave): geraamde waarde (`geraamdeWaarde`) en bij gunningen de winnaar(s), gegunde waarden en contractdata in `gunning`. `gunning.totaleWaarde` is de waarde van alle gegunde opdrachten, `winnaars[].waarde` die van één winnaar; bij een raamovereenkomst is `raamovereenkomstMaximum` een plafond, geen gegund bedrag. Bedragen onder € 1.000 (bv. '1 Euro') en sluitingsdata in 2090 of later worden als placeholder gemarkeerd.
 
 ## `tuchtrecht_search`
 
@@ -355,14 +388,17 @@ Verkiezingsuitslagen per partij uit de Kiesraad-databank.
 
 EU-wetgeving zoeken via EUR-Lex/CELLAR (SPARQL, geen key).
 
-- **Inputs**: `query` (trefwoorden, alleen in titels gezocht), `type` (`REG`|`DIR`|`DEC`, optioneel), `top`, pagination/outputFormat/verbose/dryRun.
-- **Output**: `celex`, `title` (NL, anders EN) + `title_language`, `document_type` + `document_type_label`, `date`, `in_force`, `eli`, `eurlex_url`, `cellar_url`.
+- **Inputs**: `query` (trefwoorden, alleen in titels gezocht, of een documentnummer), `type` (`REG`|`DIR`|`DEC`, optioneel), `top`, pagination/outputFormat/verbose/dryRun.
+- **Output**: `celex`, `title` (NL, anders EN) + `title_language`, `document_type` + `document_type_label`, `date`, `in_force`, `eli`, `eurlex_url`, `cellar_url`, `match` (`title`, `title_partial` of `document_number`).
+- **Woorden**: maximaal zes woorden van minstens twee tekens, met AND ('5G' werkt; stopwoorden en 'EU'/'EG'/'nr' tellen niet mee). Vindt de AND met tweeletterwoorden minder dan `top` handelingen, dan volgen titels met de overige woorden als `title_partial`.
+- **Documentnummer**: een query die alleen een nummer is ('2016/679', 'Verordening (EU) 2016/679', 'Richtlijn 95/46/EG') geeft eerst die handeling, daarna handelingen waarvan de titel precies dat nummer noemt. Verordeningen van vóór 2015 lezen nummer/jaar ('Verordening (EG) 1998/2006' is 32006R1998, ook zonder 'nr.'); een nummer dat in beide vormen past ('2018/1999') geeft beide handelingen, tenzij '(EU)' of '(EG) nr.' kiest.
 
 ## `eurlex_document`
 
 Metadata van één EU-handeling.
 
 - **Inputs**: `id` = CELEX (`32016R0679`) of citaat (`Verordening (EU) 2016/679`, `Richtlijn 95/46/EG`), outputFormat/verbose/dryRun.
+- **Output**: titel, type, datum, geldigheid, ELI en EUR-Lex-link, plus de nieuwste HvJ-arresten die de handeling uitleggen (`hvj_arresten`, `hvj_arresten_total`), de nieuwste wijzigingshandelingen met CELEX en datum (`amended_by`, max. 20; `amended_by_total`; rectificaties tellen niet mee) en de handelingen die haar intrekken (`repealed_by`).
 - **Gedrag**: ongeldige invoer wordt vóór de request geweigerd, met voorbeeldformaten in `suggestion`.
 
 ## `eurlex_nl_omzetting`
@@ -391,3 +427,13 @@ De gekoppelde documenten zelf (inkomend en uitgaand) uit LiDO, via de LiDO-servi
 - **Gedrag**: `total` en `offset` tellen verwijzingen (zelfde telling als `lido_verwijzingen`). Een document met meer dan één verwijzing (beide richtingen, of dezelfde verwijzing twee keer) staat per pagina één keer in `records`; `has_more` rekent op de verwijzingen. Het `type`-filter is strikt gevalideerd (alleen letters, cijfers, spaties, koppeltekens; max. 60 tekens) en bekende typen worden hoofdletter- en accentongevoelig naar de LiDO-spelling gezet (`wet` → `Wet`). Een onbekend item levert 0 records op, geen verzonnen record.
 - **Auth**: LiDO documenteert `get-links` als niet-publieke service, maar dwingt geen account af. Zijn `LIDO_USERNAME` en `LIDO_PASSWORD` allebei gezet, dan gaat HTTP Basic auth mee op `get-links` (niet op `get-id`/`get-aantal-per-informatietype`). Een 401/403 geeft een duidelijke foutmelding die naar die variabelen verwijst.
 - **Let op**: bij BWB gaat het om de meest recente versie van de regeling of het artikel, net als bij `lido_verwijzingen`.
+
+## `algoritmeregister_search`
+
+Algoritmes en AI-systemen die overheidsorganisaties hebben gepubliceerd in het Algoritmeregister (algoritmes.overheid.nl, ministerie van BZK; open JSON-API, geen key).
+
+- **Inputs**: `query` (trefwoorden, bv. 'parkeervergunning', 'afvalinzameling'), `organisatie` (naam, plaatsnaam, afkorting zoals 'UWV' of 'IenW' in elke schrijfwijze, register-`org_id` of registercode), `include_children` (default true: ook onderliggende organisaties), `status` (`In gebruik`, `In ontwikkeling`, `Buiten gebruik`), `publicatiecategorie` (`Hoog-risico AI-systeem`, `Impactvolle algoritmes`, `Overige algoritmes`), `categorie` (thema), `organisatietype`, `top`/`offset`/`limit` (max. 100 per aanroep, upstream gepagineerd), outputFormat/verbose/dryRun.
+- **Zoeken**: trefwoorden worden in alle velden gezocht met Nederlandse woordstammen en moeten allemaal voorkomen; "aanhalingstekens" zoeken een frase, 'of' geeft alternatieven en -woord sluit uit. Zonder exacte treffers antwoordt het register met vergelijkbare woorden (fuzzy); de samenvatting meldt dat ('Geen exacte treffers', of 'Vermoedelijk geen' als het is afgeleid). Met een organisatie of filter controleert de tool dat met de exacte zoekfunctie van het register (enkele extra requests).
+- **Organisatie**: een kale plaatsnaam kiest de gemeente; de gekozen organisatie en andere kandidaten staan in `access_note`. Een niet-eenduidige naam levert geen algoritmes maar de passende organisaties; een onbekende naam geeft 0 resultaten en de samenvatting noemt gelijkende organisaties die wel publiceren.
+- **Output**: per algoritme naam, organisatie, korte omschrijving, status, publicatiecategorie, thema's, leverancier, impact assessments, publicatiedatum en een link naar de pagina op algoritmes.overheid.nl; nieuwste publicatie eerst.
+- **Let op**: het register bevat alleen wat organisaties zelf publiceren en is dus niet volledig. Omgevingsdiensten, veiligheidsregio's, GGD's en andere regionale samenwerkingsverbanden staan onder `organisatietype` 'veiligheidsregio'; zoek zo'n organisatie liever op naam.

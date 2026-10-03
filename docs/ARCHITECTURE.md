@@ -23,7 +23,7 @@ Technical overview of how NL-GOV-MCP is structured internally.
                                    │
                      ┌─────────────┴─────────────┐
                      │   tools.ts                 │
-                     │   64 tool handlers         │
+                     │   76 tool handlers         │
                      │   Zod schemas + logic      │
                      └───┬────────┬────────┬─────┘
                          │        │        │
@@ -31,7 +31,7 @@ Technical overview of how NL-GOV-MCP is structured internally.
               ▼                   ▼                    ▼
      ┌────────────────┐  ┌────────────────┐  ┌────────────────┐
      │  sources/*.ts   │  │  utils/*.ts     │  │  types.ts      │
-     │  46 connectors  │  │  shared infra   │  │  contracts     │
+     │  47 connectors  │  │  shared infra   │  │  contracts     │
      └───────┬────────┘  └────────────────┘  └────────────────┘
              │
              ▼
@@ -80,11 +80,11 @@ A single tool call flows through these steps:
 |------|------|
 | `src/index.ts` | Entry point. Reads `--sse` / `--streamable-http` flags or `MCP_TRANSPORT` env, starts the matching transport. |
 | `src/server.ts` | Creates `McpServer`, calls `registerTools()`, sets up Express routes for HTTP transports, adds `/health` and `/health/sources` endpoints. |
-| `src/tools.ts` | All 75 tool registrations. Each tool has a Zod input schema and an async handler that calls a source, transforms results, and returns via `toMcpToolPayload()`. |
+| `src/tools.ts` | All 76 tool registrations. Each tool has a Zod input schema and an async handler that calls a source, transforms results, and returns via `toMcpToolPayload()`. |
 | `src/types.ts` | Shared TypeScript interfaces: `MCPRecord`, `Provenance`, `MCPToolResponse`, `MCPErrorResponse`, `AppConfig`. |
 | `src/config.ts` | Loads `config/default.json`, merges env var overrides. |
 
-### Sources (46 connectors)
+### Sources (47 connectors)
 
 Each source is a class with one or more async methods. All methods return a normalized shape:
 
@@ -133,7 +133,7 @@ The tool handler in `tools.ts` maps `items` to `MCPRecord[]` and wraps provenanc
 | `brk-kadastrale-kaart.ts` | OGC API Features | `brk_kadastrale_kaart` |
 | `bron-ongevallen.ts` | OGC WFS (GeoJSON) | `bron_ongevallen` |
 | `nza-zorgbeeld.ts` | REST | `nza_zorgbeeld` |
-| `overheidsorganisaties.ts` | REST (ROO) | `overheidsorganisaties` |
+| `overheidsorganisaties.ts` | REST (ROO) + TOOI SPARQL | `overheidsorganisaties`, `tooi_sparql` |
 | `ovapi.ts` | REST | `ovapi` |
 | `bro-ondergrond.ts` | REST (XML/JSON) | `bro` |
 | `ned.ts` | REST (key required) | `ned` |
@@ -142,12 +142,13 @@ The tool handler in `tools.ts` maps `items` to `MCPRecord[]` and wraps provenanc
 | `dnb-statistics.ts` | REST (key required) | `dnb` |
 | `ruimtelijke-plannen.ts` | PDOK WMS GetFeatureInfo + Locatieserver | `ruimtelijke_plannen` |
 | `dso-omgevingsdocumenten.ts` | DSO Presenteren API v8 (REST/HAL+JSON, key required) | `dso_omgevingsdocumenten` |
-| `tenderned.ts` | REST JSON (`papi`) + PDF text extraction | `tenderned` |
+| `tenderned.ts` | REST JSON (`papi`) + HTML award parse + PDF text extraction | `tenderned`, `tenderned_recheck` |
 | `koop-collecties.ts` | KOOP SRU 2.0, one class per product-area | `tuchtrecht`, `samenwerkende_catalogi` |
 | `brp-gewaspercelen.ts` | PDOK WFS 2.0 (GeoJSON) + Locatieserver | `brp_gewaspercelen` |
 | `verkiezingsuitslagen.ts` | Kiesraad JSON endpoints + HTML overview parse | `verkiezingsuitslagen` |
 | `eu-cellar.ts` | CELLAR SPARQL (EU Publications Office, keyless) | `eu_cellar` |
 | `lido.ts` | LiDO REST services (XML): public counts + `get-links` list | `lido` |
+| `algoritmeregister.ts` | REST JSON (POST search, keyless) | `algoritmeregister` |
 
 ### Utilities
 
@@ -244,7 +245,7 @@ The HTTP client, caching, circuit breaker, retry, and concurrency limiting are a
 
 ## Transport modes
 
-All three transports expose the same 75 tools and are created by `server.ts`:
+All three transports expose the same 76 tools and are created by `server.ts`:
 
 | Mode | Protocol | Session model | Use case |
 |------|----------|---------------|----------|

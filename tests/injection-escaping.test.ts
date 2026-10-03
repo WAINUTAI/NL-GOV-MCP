@@ -88,14 +88,14 @@ describe("bekendmakingen SRU escaping", () => {
   it("fallbackGet handles normal identifiers", () => {
     const result = source.fallbackGet("kst-12345-6");
     expect(result.params.query).toBe(
-      'dt.identifier="kst-12345-6" AND c.product-area="officielepublicaties"'
+      'dt.identifier=="kst-12345-6" AND c.product-area="officielepublicaties"'
     );
   });
 
-  it("fallbackSearch handles normal queries", () => {
+  it("fallbackSearch handles normal queries without inventing a record", () => {
     const result = source.fallbackSearch({ query: "woningbouw", maximumRecords: 5 });
     expect(result.params.query).toBe("woningbouw");
-    expect(result.items.length).toBeGreaterThan(0);
+    expect(result.items).toEqual([]);
   });
 });
 

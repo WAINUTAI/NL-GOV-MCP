@@ -11,14 +11,18 @@
 
 ## Tweede Kamer
 - `https://gegevensmagazijn.tweedekamer.nl/OData/v4/2.0`
-- entities used: `Document`, `Zaak`
+- entities used: `Document`, `Zaak`, `Besluit`, `Stemming`, `Persoon`, `FractieZetelPersoon`; `tweede_kamer_search` accepts every entity set of the service
+- keyword search is an AND of `contains()` filters on title and subject; a search is sent once with a 40 s timeout and retried only after a 5xx or a dropped connection
+- document files via `Document({id})/Resource`; text is extracted from PDF text layers and Word (.docx) files
 
 ## Officiële Bekendmakingen
 - SRU endpoint `https://repository.overheid.nl/sru`
 - connection: `officielepublicaties`
+- filters: `w.publicatienaam` (journal), `dt.type` (document kind), `dt.creator` + `w.organisatietype` (publisher; place names are matched in their official spelling, e.g. 's-Gravenhage), `dt.date` (dagtekening) or `dt.available` (publication date); `sortBy` on the same date for `date_newest`/`date_oldest`
+- free text goes through `src/utils/sru-cql.ts` (stopwords dropped, phrases and citations kept whole)
 
 ## Rijksoverheid
-- News/document search: `https://www.rijksoverheid.nl/api/rss?query=<JSON>` — the RSS platform that replaced the retired `opendata.rijksoverheid.nl/v1/documents` API (migration 2 June 2026). `query` carries `filters` (content_type) + `resultSearchTerm` (server-side keyword). Keyless, returns RSS 2.0 XML.
+- News/document search: `https://www.rijksoverheid.nl/api/rss?query=<JSON>` — the RSS platform that replaced the retired `opendata.rijksoverheid.nl/v1/documents` API (migration 2 June 2026). `query` carries `filters` (content_type, and `sort_date` for date_from/date_to, the field the site's own period filter uses) + `resultSearchTerm` (server-side keyword). Keyless, returns RSS 2.0 XML, at most 20 items per query.
 - School holidays: `https://opendata.rijksoverheid.nl/v1/infotypes/schoolholidays` — still live on the old host; queried per schoolyear.
 
 ## Rijksbegroting
@@ -83,7 +87,7 @@
 - Auth: geen (keyless).
 - Categorie: static.
 - Bron: Centrale Voorziening Decentrale Regelgeving — verordeningen en regelingen van gemeenten, provincies en waterschappen.
-- Gedrag: CVDR ondersteunt de default cql.serverChoice niet; vrije zoektermen lopen via de `keyword`-index (meerwoords termen als CQL-phrase gequote). Records worden genarmaliseerd naar CVDR-identifier, titel, uitvaardigende gemeente/organisatie (creator), datum (issued/modified) en een canonieke `lokaleregelgeving.overheid.nl`-link (preferredUrl uit enrichedData, met opbouw uit de identifier als fallback).
+- Gedrag: CVDR ondersteunt de default cql.serverChoice niet; vrije zoektermen lopen via de `keyword`-index, één `keyword=`-clause per woord met AND (de index kent geen phrase search); hoofdletter-OR en -NOT tussen woorden worden CQL-operators. `organization` gaat naar de `creator`-index (hele woorden, ook de officiële spelling van Den Haag en Den Bosch), `organization_type` naar `organisatieType`. `startRecord`/`maximumRecords` pagineren server-side en `numberOfRecords` is het echte totaal. Records worden genarmaliseerd naar CVDR-identifier, titel, uitvaardigende gemeente/organisatie (creator), datum (issued/modified) en een canonieke `lokaleregelgeving.overheid.nl`-link (preferredUrl uit enrichedData, met opbouw uit de identifier als fallback).
 
 ## PDOK Bestuurlijke Gebieden (bestuurlijke_gebieden)
 
@@ -123,7 +127,7 @@
 - **Endpoint:** `https://api-organisaties.overheid.nl/v1/overheidsorganisaties` (lijst) en `.../{organisatieUri}/contact`, `.../{organisatieUri}/adressen` (verrijking)
 - **Auth:** geen sleutel nodig. Fair use: 100 req/s.
 - **OpenAPI:** https://api-organisaties.overheid.nl/v1/openapi.json
-- **Gedrag:** De lijst-endpoint levert een platte JSON-array van `{ label, type, uri }` zonder server-side naamfilter of paginering. De connector haalt de volledige lijst op en filtert client-side op naam (case-insensitive substring). Optioneel `type`-filter (TOOI-ontologie-URI) wordt wel server-side meegegeven. Teruggegeven treffers worden (tot 15) verrijkt met website + telefoon (`/contact`) en bezoekadres (`/adressen`); verrijking is best-effort en breekt de zoekopdracht niet bij fouten. Nuttig als utility voor cross-source koppeling: naam -> canonieke TOOI-URI.
+- **Gedrag:** De lijst-endpoint levert een platte JSON-array van `{ label, type, uri }` zonder server-side naamfilter of paginering. De connector haalt de volledige lijst op en filtert client-side op naam (ongevoelig voor hoofdletters, accenten, apostroffen en koppeltekens). Afkortingen, afwijkende officiële namen en einddatums komen in één gecachete query uit het TOOI SPARQL-endpoint (`https://standaarden.overheid.nl/tooi/sparql`, eigen connector `tooi_sparql`, zodat een TOOI-storing het register zelf niet blokkeert). Optioneel `type`-filter (TOOI-ontologie-URI) wordt wel server-side meegegeven. Teruggegeven treffers worden (tot 15) verrijkt met website + telefoon (`/contact`) en bezoekadres (`/adressen`); verrijking is best-effort en breekt de zoekopdracht niet bij fouten. Nuttig als utility voor cross-source koppeling: naam -> canonieke TOOI-URI.
 
 ## OVapi (realtime openbaar vervoer)
 
@@ -178,14 +182,14 @@
 
 ## TenderNed (aanbestedingen)
 
-- **Connector**: `tenderned` (category `semi_live`)
+- **Connector**: `tenderned` (category `semi_live`), plus `tenderned_recheck` voor de controle van sluitingsdata in de zoektool (eigen circuit breaker en slots, category `other` met dezelfde cache-TTL van 10 minuten)
 - **Tools**: `tenderned_aanbestedingen_search`, `tenderned_aanbesteding_get`
-- **Endpoints**: `https://www.tenderned.nl/papi/tenderned-rs-tns/v2/publicaties` (lijst), `/publicaties/{id}` (detail), `/publicaties/{id}/pdf` (officiële aankondiging als PDF)
+- **Endpoints**: `https://www.tenderned.nl/papi/tenderned-rs-tns/v2/publicaties` (lijst), `/publicaties/{id}` (detail), `/publicaties/{id}/gerelateerd` (andere publicaties van dezelfde procedure), `/publicaties/{id}/html` (weergave met waarden, winnaars en contractdata), `/publicaties/{id}/pdf` (officiële aankondiging als PDF), `/aanbestedendediensten` (register van aanbestedende diensten)
 - **Auth**: geen (publieke `papi`-API)
-- **Geverifieerde queryparameters**: `search` (vrije tekst), `typeOpdracht` (`L`=leveringen, `D`=diensten, `W`=werken), `procedure` (o.a. `OPE`, `NOP`, `MAC`, `OZB`, `CCD`), `publicatieDatumVanaf`, `publicatieDatumTot` (JJJJ-MM-DD), `page` (0-based), `size` (max **100**, hoger geeft HTTP 400).
+- **Geverifieerde queryparameters**: `search` (vrije tekst, woorden met OR), `typeOpdracht` (`L`=leveringen, `D`=diensten, `W`=werken), `procedure` (o.a. `OPE`, `NOP`, `MAC`, `OZB`, `CCD`), `publicatieDatumVanaf`, `publicatieDatumTot` (JJJJ-MM-DD), `aanbestedendeDienstId` (herhaalbaar; ids uit `/aanbestedendediensten`), `sort` (`relevantie` of `tappublicatiedatum`), `page` (0-based, max 99), `size` (max **100**, hoger geeft HTTP 400). Alleen de eerste 10.000 resultaten van een query zijn dus bereikbaar.
 - **Belangrijk**: onbekende parameters worden stil genegeerd (geen 400). Een niet-ondersteund filter lijkt dus te werken terwijl het álles teruggeeft — daarom stuurt de connector uitsluitend bovenstaande, live geverifieerde parameters mee.
 - **Detail**: CPV-codes, NUTS-regio, juridisch kader, procedure, aanvang/voltooiing opdracht, gunningsstatus en gerelateerde publicaties. Met `include_text` wordt de tekstlaag van de aankondigings-PDF geëxtraheerd (`utils/pdf-text.ts`).
-- **Sortering**: de API levert standaard nieuwste publicatiedatum eerst; een `sort`-parameter wordt genegeerd.
+- **Sortering**: `sort=relevantie` of `sort=tappublicatiedatum` (nieuwste eerst); de tool kiest relevantie bij een zoekterm en anders nieuwste eerst.
 
 ## Tuchtrecht (KOOP SRU)
 
@@ -237,7 +241,7 @@ Meerdere woorden vrije tekst moeten als losse termen met `AND` worden verbonden:
 - **Tools**: `eurlex_search`, `eurlex_document`, `eurlex_nl_omzetting`
 - **Endpoint**: `https://publications.europa.eu/webapi/rdf/sparql` (CELLAR, Publicatiebureau van de EU)
 - **Auth**: geen
-- **Gedrag**: exacte CELEX-lookups en Virtuoso free-text (`bif:contains`) op titels; `FILTER(CONTAINS/REGEX)` scant het hele corpus (>10 s) en wordt niet gebruikt. Citaten (`Verordening (EU) 2016/679`, `Richtlijn 95/46/EG`) worden lokaal naar CELEX genormaliseerd. Omzettingsmaatregelen komen uit de CELLAR-metadata van de richtlijn, gefilterd op Nederland.
+- **Gedrag**: exacte CELEX-lookups en Virtuoso free-text (`bif:contains`) op titels; `FILTER(CONTAINS/REGEX)` scant het hele corpus (>10 s) en wordt niet gebruikt. Citaten (`Verordening (EU) 2016/679`, `Richtlijn 95/46/EG`) worden lokaal naar CELEX genormaliseerd; een zoekterm die alleen een documentnummer is ('2016/679') wordt een `VALUES`-lookup op de kandidaat-CELEX-nummers (verordening, richtlijn en besluit; vóór 2015 nummer/jaar), aangevuld met titels die dat nummer citeren. Wijzigings- en intrekkingshandelingen en HvJ-arresten komen uit de CELLAR-relaties van de handeling. Omzettingsmaatregelen komen uit de CELLAR-metadata van de richtlijn, gefilterd op Nederland.
 - **Links**: `eurlex_url` (`https://eur-lex.europa.eu/legal-content/NL/TXT/?uri=CELEX:<celex>`) en `cellar_url` (`https://publications.europa.eu/resource/celex/<celex>`).
 - **Licentie/bronvermelding**: EUR-Lex-inhoud is herbruikbaar met bronvermelding; alleen de elektronische editie van het Publicatieblad van de EU is authentiek.
 
@@ -250,3 +254,11 @@ Meerdere woorden vrije tekst moeten als losse termen met `AND` worden verbonden:
 - **Invoer**: ECLI, BWB-id (+ artikel), CELEX of OEP-publicatie (`stb-2018-401`, `stcrt-2024-20264`).
 - **Gedrag**: tellingen komen uit `get-aantal-per-informatietype`; de lijst uit `get-links` met `start` (0-based offset) en `rows` (max. 100; LiDO valt daarboven stil terug op 20). Het totaal is de som van de `obj_type`-facetten; LiDO telt en pagineert per verwijzing, dus een document met meerdere verwijzingen staat meermaals in de upstream-lijst (de tool toont het per pagina één keer). Het typefilter gebruikt LiDO's eigen syntax `fq={!tag=obj_type}obj_type:"<type>"` (ongedocumenteerd voor `get-links`, wel door LiDO zelf gebruikt in portaal-URL's). Een onbekend ext-id geeft bij `get-links` een lege HTTP 400; dat wordt pas als "onbekend" gelezen na bevestiging via `get-aantal-per-informatietype`. Bij BWB gelden tellingen en lijst voor de meest recente versie.
 - **Licentie**: CC0.
+
+## Algoritmeregister (algoritmes.overheid.nl)
+
+- **Connector**: `algoritmeregister` (category `other`, cache-TTL 10 minuten)
+- **Tool**: `algoritmeregister_search`
+- **Endpoints**: `POST https://algoritmes.overheid.nl/api/algoritme/NLD` (zoeken, JSON-body met `searchtext`, `organisation`, `include_children`, `status`, `publicationcategory`, `category`, `organisationtype`, `page`, `limit`), `/api/organisation/NLD` (organisaties op naam), `/api/organisation-relation/{org_id}` en `/api/organisation/{code}`, `/api/suggestion/NLD/{tekst}` (exacte treffers, om fuzzy resultaten te herkennen)
+- **Auth**: geen (open API van het ministerie van BZK; OpenAPI op `https://algoritmes.overheid.nl/api/openapi.json`)
+- **Gedrag**: het `organisation`-filter accepteert alleen het eigen `org_id` van het register (`gm0344`), dus een organisatienaam wordt eerst opgezocht; een niet-eenduidige naam levert kandidaten in plaats van resultaten. `limit` is maximaal 100 (hoger geeft HTTP 422). Zonder exacte treffers antwoordt het register met een fuzzy zoekopdracht die dat niet aangeeft; de connector stelt dat vast met de suggestie-endpoint en meldt het. Het register bevat alleen wat organisaties zelf publiceren.

@@ -28,14 +28,14 @@ Examples:
 
 `NL-GOV-MCP` actively retrieves and normalizes data across many sources, can combine cross-source results, and returns a consistent MCP response contract ready for assistants and automations.
 
-## Sources (46 connectors, 75 tools)
+## Sources (47 connectors, 76 tools)
 
 | Source | What it covers |
 |---|---|
 | CBS | Statistics Netherlands (demographics, economy, housing, labour; v4/v3 + fallback) |
-| Tweede Kamer | Parliamentary documents, search, voting records, member info; single-document retrieval can optionally resolve resource URLs and include capped text previews for text-like formats |
-| Officiële Bekendmakingen | Official publications (SRU/XML search + lookup) |
-| Rijksoverheid | National government news/document search via the Rijksoverheid.nl RSS platform (server-side keyword) + school holidays |
+| Tweede Kamer | Parliamentary documents (AND keyword search on title and subject), OData search on every entity, votes linked to their decision and zaak, member info; single-document retrieval can resolve resource URLs and extract text from PDF and Word files |
+| Officiële Bekendmakingen | Official publications (SRU/XML): search by topic, publisher, journal (publicatieblad) and date, sorted by relevance or date; lookup with PDF/HTML/XML links and optional text |
+| Rijksoverheid | National government news/document search via the Rijksoverheid.nl RSS platform (server-side keyword and date filter) + school holidays |
 | Rijksbegroting | National budget data + chapter helper |
 | DUO | Per-school records (po/vo/mbo/ho addresses), per-location exam results, education dataset catalogue + RIO adapter |
 | data.overheid.nl | National open data catalog (CKAN) |
@@ -47,7 +47,7 @@ Examples:
 | Luchtmeetnet | Live air quality measurements per city/station (NO2, PM10, PM2.5, O3) |
 | Rijkswaterstaat | Water data catalog + real-time measurements |
 | NDW | Traffic discovery/metadata |
-| ORI | Open Raadsinformatie discovery |
+| ORI | Open Raadsinformatie: council documents, agenda items, meetings and decisions of municipalities, provinces and water boards |
 | NGR | National Geo Register (CSW metadata) |
 | Ruimtelijkeplannen.nl (Wro/Bro) | Vigerende, ontwerp en vervallen ruimtelijke plannen via PDOK WMS, met status- en gemeentefilter |
 | RIVM | Public-health discovery |
@@ -61,7 +61,7 @@ Examples:
 | PDOK Bestuurlijke Gebieden | Official municipality/province boundaries and codes (OGC API Features) |
 | PDOK Kadastrale Kaart (BRK) | Cadastral parcels, boundaries and designations (OGC API Features) |
 | wetten.overheid.nl (BWB) | Consolidated texts of all national laws, decrees and regulations (KOOP SRU) |
-| CVDR | Local & regional regulations of municipalities, provinces and water authorities (KOOP SRU) |
+| CVDR | Local & regional regulations of municipalities, provinces and water authorities, filterable by issuing organisation (KOOP SRU) |
 | NED | National Energy Dashboard — generation/consumption per source + forecasts (requires `NED_API_KEY`) |
 | EP-Online | Building energy labels per address / BAG id (RVO, requires `EP_ONLINE_API_KEY`) |
 | BRO | Basisregistratie Ondergrond — groundwater, CPT soundings, borings (keyless REST) |
@@ -70,14 +70,15 @@ Examples:
 | BRON verkeersongevallen | Registered road-traffic accidents with location & severity (Rijkswaterstaat WFS) |
 | DNB Statistics | Interest rates, mortgages, pensions, insurers, balance of payments (requires `DNB_API_KEY`) |
 | NZa Zorgbeeld | Current waiting times for medical-specialist care per institution |
-| Register Overheidsorganisaties | All Dutch government organisations + TOOI identifiers (KOOP) |
-| TenderNed | Public procurement — tender notices, awards, market consultations; detail with CPV/NUTS codes and PDF text |
+| Register Overheidsorganisaties | All Dutch government organisations + TOOI identifiers, searchable by name or abbreviation (KOOP) |
+| TenderNed | Public procurement — tender notices, awards, market consultations, filterable by contracting authority; detail with CPV/NUTS codes, winners and award values, and PDF text |
 | Tuchtrecht | Disciplinary rulings for regulated professions (healthcare, bar, notaries, accountants, vets) — not on Rechtspraak.nl |
 | Samenwerkende Catalogi | National index of products/services offered by municipalities, provinces and water authorities (KOOP SRU) |
 | BRP Gewaspercelen (RVO) | Agricultural parcels with crop, category, area and polygon (PDOK WFS) |
 | Kiesraad Verkiezingsuitslagen | Election results per party, nationally and per province/municipality, incl. turnout |
-| EUR-Lex / CELLAR (EU) | EU legislation by CELEX or citation, title search, and Dutch national transposition measures per directive (keyless SPARQL; only the Official Journal is authentic, reuse with attribution) |
+| EUR-Lex / CELLAR (EU) | EU legislation by CELEX or citation, title and document-number search, amending acts, and Dutch national transposition measures per directive (keyless SPARQL; only the Official Journal is authentic, reuse with attribution) |
 | LiDO (Linked Data Overheid) | References to and from a ruling (ECLI), law article (BWB), EU act (CELEX) or Staatsblad/Staatscourant publication: counts per document type, and the paged list of linked documents with direction and source URL (CC0) |
+| Algoritmeregister | Algorithms and AI systems published by government organisations (algoritmes.overheid.nl, BZK): search by keywords, organisation, status, publication category and theme |
 
 ## Key features
 
@@ -93,7 +94,7 @@ Every tool returns the same shape:
 
 ### PDF text extraction
 Most Dutch government "data" is text inside a PDF. Tools that reach a PDF resource extract its text layer instead of handing back a link only:
-- `tweede_kamer_document_get` with `include_text: true` returns the text of a Kamerstuk PDF (`text_preview_source: "pdf_text_layer"`, plus page count)
+- `tweede_kamer_document_get` with `include_text: true` returns the text of a Kamerstuk PDF (`text_preview_source: "pdf_text_layer"`, plus page count), or of a Word (.docx) file
 - `tenderned_aanbesteding_get` with `include_text: true` returns the text of the official tender notice PDF
 
 Extraction is capped (`max_chars`, default 12 000) and fails typed rather than hard: a scan without OCR reports `no_text_layer`, an encrypted file `encrypted`, an HTML error page `not_a_pdf`.
@@ -138,7 +139,9 @@ Available on `nl_gov_ask` and major individual tools: `cbs_tables_search`, `cbs_
 
 ### Smart routing + temporal parsing
 - `nl_gov_ask` routes by intent, and can run multi-source queries in parallel.
-- Natural date expressions in NL/EN are currently parsed in `nl_gov_ask` and mapped to source filters (`vorige week`, `sinds 2020`, `between 2018 and 2022`, etc.).
+- Natural date expressions in NL/EN are currently parsed in `nl_gov_ask` and mapped to source filters (`vorige week`, `sinds 2020`, `between 2018 and 2022`, etc.). Vaguer phrases such as `deze week` or `onlangs` are not turned into a date filter; they are left out of the search terms and `access_note` says so.
+- Organisation and policy questions ("Wat doet de Belastingdienst met de BTW?", "GGZ-beleid gemeente Utrecht") are answered from documents: the council records (ORI) of a named municipality, otherwise official publications, Tweede Kamer and Rijksoverheid in parallel. Case-law, API-register and budget questions keep their own routes.
+- Each route searches the topic keywords of the question, not the sentence; the terms used are reported in `access_note`. A journal named in the question ("in de Staatscourant") becomes the Officiële Bekendmakingen `publicatieblad` filter.
 - Temporal parsing is resolved server-side with a real reference timestamp, cross-platform via Node runtime APIs (Windows/macOS/Linux).
 - Default timezone: `Europe/Amsterdam`.
 - Override options for `nl_gov_ask`:
@@ -175,7 +178,7 @@ npm run test:live    # integration test suite (live API calls)
 
 ### Transport modes
 
-Three transport modes are supported. All expose the same 75 tools.
+Three transport modes are supported. All expose the same 76 tools.
 
 #### stdio (Claude Desktop, Claude Code)
 
@@ -303,6 +306,7 @@ Node ≥ 22 prints an "experimental" warning for this flag; it works. Symptom to
   - include a capped text preview for text-like resources
   - extract the text layer of PDF resources (`include_text: true`), reported as `text_preview_source: "pdf_text_layer"` with `resource_pages`
 - `nl_gov_ask` may automatically deepen the top Tweede Kamer match when the user explicitly asks for content/summary rather than only discovery.
+- Keyword search in `tweede_kamer_documents`, `tweede_kamer_search` and `tweede_kamer_votes` requires every keyword (AND) and looks in titles and subjects, not the full text. Keywords of up to three characters and "quoted phrases" match as whole words; longer keywords also match inside longer words. `tweede_kamer_documents` reports the real number of matches in `pagination.total`.
 
 ### Rechtspraak details
 
@@ -318,7 +322,7 @@ Responses include facet-driven context in `access_note` when filters are applied
 
 ### EUR-Lex and LiDO details
 
-`eurlex_search`, `eurlex_document` and `eurlex_nl_omzetting` query the keyless CELLAR SPARQL endpoint of the EU Publications Office. `id` accepts a CELEX number (`32016R0679`) or a citation (`Verordening (EU) 2016/679`, `Richtlijn 95/46/EG`); invalid input is rejected before any request. Search matches title words only. Only the electronic Official Journal of the EU is authentic; EUR-Lex content may be reused with attribution. `nl_gov_ask` routes a CELEX number or EU citation (and explicit terms such as "EU-richtlijn", "EUR-Lex") to these tools before the Officiële Bekendmakingen route.
+`eurlex_search`, `eurlex_document` and `eurlex_nl_omzetting` query the keyless CELLAR SPARQL endpoint of the EU Publications Office. `id` accepts a CELEX number (`32016R0679`) or a citation (`Verordening (EU) 2016/679`, `Richtlijn 95/46/EG`); invalid input is rejected before any request. Search matches title words only. `eurlex_search` also takes a document number (`2016/679`) and returns that act first; regulations before 2015 are read number/year, so `Verordening (EG) 1998/2006` (also without `nr.`) is 32006R1998. Only the electronic Official Journal of the EU is authentic; EUR-Lex content may be reused with attribution. `nl_gov_ask` routes a CELEX number or EU citation (and explicit terms such as "EU-richtlijn", "EUR-Lex") to these tools before the Officiële Bekendmakingen route.
 
 `lido_verwijzingen` returns how often a ruling, law (article), EU act or Staatsblad/Staatscourant publication is referenced in LiDO, per document type, plus a link to the full list on the LiDO portal. It uses only the services LiDO documents as public (`get-id`, `get-aantal-per-informatietype`); LiDO data is CC0.
 
@@ -328,7 +332,7 @@ Responses include facet-driven context in `access_note` when filters are applied
 
 ### TenderNed details
 
-`tenderned_aanbestedingen_search` sends only parameters that are verified to filter server-side (`search`, `typeOpdracht`, `procedure`, `publicatieDatumVanaf`, `publicatieDatumTot`, `page`, `size`). The upstream silently ignores unknown parameters, so an unsupported filter would look applied while returning everything — hence the deliberately small parameter surface. Page size is capped at 100 by the API; use `page` for more.
+`tenderned_aanbestedingen_search` sends only parameters that are verified to filter server-side (`search`, `typeOpdracht`, `procedure`, `publicatieDatumVanaf`, `publicatieDatumTot`, `aanbestedendeDienstId`, `sort`, `page`, `size`). The upstream silently ignores unknown parameters, so an unsupported filter would look applied while returning everything — hence the deliberately small parameter surface. `opdrachtgever` is resolved to `aanbestedendeDienstId` through TenderNed's register of contracting authorities; `sort` is `relevance` or `date_newest`. `offset`/`page` are translated to upstream pages of at most 100, up to the 10,000-result cap. `tenderned_aanbesteding_get` adds the winners, award values and contract dates of award notices.
 
 ### DUO per-school data
 

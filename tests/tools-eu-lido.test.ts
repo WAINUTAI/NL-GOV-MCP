@@ -11,6 +11,8 @@ describe("detectEuIntent", () => {
     expect(detectEuIntent("Wat regelt Verordening (EU) 2016/679?")).toEqual({ kind: "document", celex: "32016R0679" });
     expect(detectEuIntent("Is Richtlijn 95/46/EG nog van kracht?")).toEqual({ kind: "document", celex: "31995L0046" });
     expect(detectEuIntent("Uitvoeringsverordening (EU) 2023/1234")).toEqual({ kind: "document", celex: "32023R1234" });
+    // A pre-2015 regulation is number/year, also without 'nr.'.
+    expect(detectEuIntent("Wat regelt Verordening (EG) 1998/2006?")).toEqual({ kind: "document", celex: "32006R1998" });
   });
 
   it("routes a directive plus 'omzetting' to the transposition lookup", () => {

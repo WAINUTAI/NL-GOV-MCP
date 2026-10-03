@@ -33,6 +33,8 @@ export interface PdfTextResult {
   ok: true;
   text: string;
   chars: number;
+  /** Length of the full extracted text before `maxChars` was applied. */
+  total_chars: number;
   truncated: boolean;
   pages: number;
   bytes: number;
@@ -50,14 +52,106 @@ export function looksLikePdf(bytes: Uint8Array): boolean {
   return head.includes("%PDF-");
 }
 
+/**
+ * U+2010 (hyphen) and U+2011 (non-breaking hyphen) render exactly like "-" but
+ * do not match it, so a reader searching the text for "GFT-inzameling" would
+ * miss the same word written with U+2011. The line-breaking hint is meaningless in extracted text.
+ */
+function normalizeHyphens(value: string): string {
+  return value.replace(/[\u2010\u2011]/g, "-");
+}
+
 /** Collapse pdf.js' per-item spacing into readable prose without losing paragraphs. */
 export function normalizePdfText(raw: string): string {
-  return raw
+  return normalizeHyphens(raw)
     .replace(/\r\n?/g, "\n")
     .replace(/[ \t ]+/g, " ")
     .replace(/ ?\n ?/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+const WORD_CHAR = /[\p{L}\p{N}]/u;
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Undo a PDF generator's placeholder glyph, using another copy of the same text.
+ *
+ * Some generators draw a character that their embedded font lacks as a visible
+ * placeholder glyph. TenderNed's notice PDFs do this with "#": the non-breaking
+ * hyphen in "GFT-inzameling" (U+2011, absent from the embedded Open Sans
+ * subset) is drawn as the font's number-sign glyph, and the PDF's ToUnicode map
+ * says U+0023. The PDF really shows "GFT#inzameling", so the extraction is
+ * faithful and no PDF-level fix can recover the character; only another copy of
+ * the text can.
+ *
+ * A placeholder is restored only when it sits inside a word (a letter or digit
+ * on both sides) and a reference text (e.g. the notice description from the
+ * API) contains that same word with exactly one non-ASCII character in each
+ * placeholder position, consistently across all references. The substituted
+ * character is by definition one the font lacks, so plain ASCII never
+ * qualifies; anything ambiguous stays as it is. `unresolved` counts the
+ * word-internal placeholders that remain, so a caller can say so.
+ */
+export function restoreSubstitutedGlyphs(
+  text: string,
+  references: string[],
+  placeholder = "#",
+): { text: string; restored: number; unresolved: number } {
+  if (!placeholder || !text.includes(placeholder)) return { text, restored: 0, unresolved: 0 };
+  const refs = references.filter((r) => typeof r === "string" && r.length > 0);
+  const cache = new Map<string, string | null>();
+  let restored = 0;
+  let unresolved = 0;
+
+  const out = text.replace(/\S+/g, (token) => {
+    if (!token.includes(placeholder)) return token;
+    // Trim punctuation around the word; the placeholder itself is not a word
+    // character, so a leading or trailing "#" ("#tag", "C#") falls away here.
+    const lead = token.match(/^[^\p{L}\p{N}]*/u)?.[0] ?? "";
+    const trail = token.slice(lead.length).match(/[^\p{L}\p{N}]*$/u)?.[0] ?? "";
+    const core = token.slice(lead.length, token.length - trail.length);
+    const parts = core.split(placeholder);
+    if (parts.length < 2) return token;
+    // Every placeholder needs a letter or digit directly on both sides.
+    const internal = parts.every((part, i) => {
+      if (!part) return false;
+      const okStart = i === 0 || WORD_CHAR.test(part[0]);
+      const okEnd = i === parts.length - 1 || WORD_CHAR.test(part[part.length - 1]);
+      return okStart && okEnd;
+    });
+    if (!internal) return token;
+
+    if (!cache.has(core)) {
+      const pattern = new RegExp(
+        `(?<![\\p{L}\\p{N}])${parts.map(escapeRegExp).join("([^\\s\\x00-\\x7F])")}(?![\\p{L}\\p{N}])`,
+        "gu",
+      );
+      const found = new Set<string>();
+      for (const ref of refs) {
+        for (const match of ref.matchAll(pattern)) found.add(match.slice(1).join("\u0000"));
+      }
+      if (found.size === 1) {
+        const chars = [...found][0].split("\u0000");
+        cache.set(core, parts.reduce((acc, part, i) => (i === 0 ? part : acc + chars[i - 1] + part), ""));
+      } else {
+        cache.set(core, null);
+      }
+    }
+
+    const fixed = cache.get(core);
+    if (fixed === null || fixed === undefined) {
+      unresolved += parts.length - 1;
+      return token;
+    }
+    restored += parts.length - 1;
+    return lead + normalizeHyphens(fixed) + trail;
+  });
+
+  return { text: out, restored, unresolved };
 }
 
 function classifyError(error: unknown): { reason: PdfTextFailure; message: string } {
@@ -118,6 +212,7 @@ export async function extractPdfText(
       ok: true,
       text: truncated ? normalized.slice(0, maxChars) : normalized,
       chars: truncated ? maxChars : normalized.length,
+      total_chars: normalized.length,
       truncated,
       pages: totalPages,
       bytes: bytes.byteLength,
