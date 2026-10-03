@@ -402,8 +402,10 @@ describe("query plans", () => {
     expect(tk.planSearch({ entity: "Stemming", top: 3, date_to: "2026-06-30" }).params.$filter).toBe(
       "(Verwijderd eq false) and (Besluit/Agendapunt/Activiteit/Datum lt 2026-07-01T00:00:00+02:00)",
     );
-    // The record shows GewijzigdOp, not the session date it was filtered on.
-    expect(agendapunt.notes.join(" ")).toContain("de datum bij elk record is de wijzigingsdatum (GewijzigdOp)");
+    // The plan says what the filter is on; which date a record shows is only said once
+    // the meeting dates have been looked up (withSessionDates).
+    expect(agendapunt.notes.join(" ")).toContain("Datumfilter op Agendapunt.Activiteit/Datum (Nederlandse tijd): de datum van de vergadering (vergaderdatum).");
+    expect(agendapunt.notes.join(" ")).not.toContain("bij elk record");
     expect(tk.planSearch({ entity: "Zaak", top: 3, date_from: "2026-06-01" }).notes.join(" ")).not.toContain("wijzigingsdatum");
   });
 

@@ -106,7 +106,40 @@ const QUESTION_FRAMES: RegExp[] = [
   ),
   // EN: "(A) list of / overview of …"
   new RegExp(`^(?:(?:a|an|the)\\s+)?(?:${EN_META_NOUNS})\\s+(?:${EN_PREPOSITIONS})${END}(?:\\s+(?:the|all)${END})?\\s*`, "i"),
+  // Comparison: "Vergelijk (de) …", "(Het) verschil tussen …", "(Een)
+  // vergelijking tussen/van …". Runs after the question frames, so "Wat is het
+  // verschil tussen …" loses both. What is compared is the topic; the verb or
+  // noun of comparing is not, and an AND-matching source found nothing for it.
+  new RegExp(`^(?:vergelijk|vergelijken)${END}(?:\\s+(?:de|het|een|alle)${END})?\\s*`, "i"),
+  new RegExp(
+    `^(?:(?:een|de|het)\\s+)?(?:vergelijking(?:en)?\\s+(?:tussen|van)|verschil(?:len)?\\s+tussen)${END}(?:\\s+(?:de|het|een|alle)${END})?\\s*`,
+    "i",
+  ),
 ];
+
+/**
+ * Comparison words that frame a question rather than name its topic, for
+ * {@link extractKeywords}: the verb anywhere ("Vergelijk de moties met …",
+ * "Kun je … vergelijken"), the noun only before "tussen" (or "van"/"met" for
+ * "vergelijking"), so "regionale verschillen in de jeugdzorg" keeps its topic.
+ */
+const COMPARISON_VERBS = new Set(["vergelijk", "vergelijkt", "vergelijken", "vergeleken"]);
+const COMPARISON_NOUNS: Record<string, Set<string>> = {
+  vergelijking: new Set(["tussen", "van", "met"]),
+  vergelijkingen: new Set(["tussen", "van", "met"]),
+  verschil: new Set(["tussen"]),
+  verschillen: new Set(["tussen"]),
+};
+
+/** Whether the token at `i` is a comparison frame word, see COMPARISON_VERBS. */
+function isComparisonFrame(tokens: Token[], i: number): boolean {
+  const token = tokens[i];
+  if (token.phrase) return false;
+  const lower = token.text.toLowerCase();
+  if (COMPARISON_VERBS.has(lower)) return true;
+  const next = tokens[i + 1];
+  return Boolean(COMPARISON_NOUNS[lower] && next && !next.phrase && COMPARISON_NOUNS[lower].has(next.text.toLowerCase()));
+}
 
 /**
  * "Lijst moties" / "Overzicht subsidies": a leading list word directly followed
@@ -183,6 +216,8 @@ const STRICT_META_WORDS = new Set([
   "data", "datasets", "resultaten", "overzicht", "lijst",
   // NL action/display remnants (laten zien, toon, etc.)
   "laten", "zien", "tonen", "vertellen", "verteld", "opzoeken",
+  // comparison verbs ("Vergelijk de uitspraken over ...")
+  "vergelijk", "vergelijkt", "vergelijken", "vergeleken",
   // recency words (handled separately, strip from tokens)
   "nieuwste", "recentste", "recente", "recent", "laatste", "meest",
   "latest", "newest", "most",
@@ -576,7 +611,15 @@ export function rewriteNote(rw: Pick<RewriteResult, "original" | "rewritten" | "
   if (!rewritten || withoutEnd(original) === withoutEnd(rewritten)) return undefined;
   const shown = original.length > 200 ? `${original.slice(0, 197)}...` : original;
   const recency = rw.recency && !hasRecencyMarker(rewritten) ? " (tijdsaanduiding zoals 'laatste' of 'nieuwste' weggelaten; die bepaalt geen volgorde)" : "";
-  return `Zoekterm herschreven: "${shown}" → "${rewritten}"${recency}.`;
+  return `Zoekterm herschreven: "${shown}" → ${quotedQuery(rewritten)}${recency}.`;
+}
+
+/**
+ * A search query in quotes for a note, or as it is when it holds a phrase in
+ * quotes of its own: '"ring utrecht"' in quotes again read as a doubled quote.
+ */
+export function quotedQuery(query: string): string {
+  return query.includes('"') ? query : `"${query}"`;
 }
 
 export function rewriteQuery(
@@ -696,6 +739,37 @@ function isKeywordContent(token: Token, analysis: Analysis): boolean {
 }
 
 /**
+ * How {@link extractKeywordTerms} formed a term:
+ * - "quoted": the user put it in quotes;
+ * - "bound": a meta noun bound into a term ("open data portaal", "data
+ *   strategie"), also when capitalised ("Open Data Portaal");
+ * - "name": a run of capitalised words grouped into one term ("Ring Utrecht",
+ *   but also "Schiphol Geluidsoverlast" or "Wet Kwaliteitsborging Bouwen"),
+ *   which a document need not hold in that form;
+ * - "word": a single word, acronym or number.
+ */
+export type KeywordTermKind = "quoted" | "bound" | "name" | "word";
+
+export interface KeywordTerm {
+  /** The term, lowercased. */
+  text: string;
+  kind: KeywordTermKind;
+}
+
+/**
+ * Whether a run of capitalised words is a meta-noun term and nothing more:
+ * "Open Data Portaal", "Open Data", "Data Strategie". "Lijst Pim Fortuyn" and
+ * "Open Data Portaal Utrecht" are names.
+ */
+function isBoundRun(words: string[]): boolean {
+  const i = words.findIndex((word) => META_NOUNS.has(word));
+  if (i < 0) return false;
+  const start = i > 0 && metaNounBinding(words[i - 1], words[i], undefined) === "modifier" ? i - 1 : i;
+  const end = i + 1 < words.length && metaNounBinding(undefined, words[i], words[i + 1]) === "head" ? i + 1 : i;
+  return end > start && start === 0 && end === words.length - 1;
+}
+
+/**
  * Topic keywords of a natural-language question, for routers that have to
  * turn "Wat doet de Belastingdienst met de BTW?" into a search ("belastingdienst",
  * "btw") instead of sending the sentence. Question frames, question verbs,
@@ -708,13 +782,26 @@ function isKeywordContent(token: Token, analysis: Analysis): boolean {
  * noun bound into a term ("open data", "open data portaal" in lowercase).
  * Acronyms survive even when they spell a function word ("OM", "IT", "ALS",
  * "WHO"); "OR" is dropped only as an operator between two terms. Terms are
- * lowercased and deduplicated.
+ * lowercased and deduplicated. {@link extractKeywordTerms} also says how each
+ * term was formed.
  *
  * `exclude` drops words (or multi-word terms) the caller already acts on, such
  * as the routing word itself ("aanbestedingen") or a place it scopes by. The
  * result can be empty; the caller decides what to do then.
  */
 export function extractKeywords(raw: string, options: { exclude?: Iterable<string> } = {}): string[] {
+  return extractKeywordTerms(raw, options).map((term) => term.text);
+}
+
+/**
+ * {@link extractKeywords} with how each term was formed (see
+ * {@link KeywordTermKind}). A caller that searches multi-word terms as
+ * phrases can tell a phrase the question holds ("quoted", "bound") from a run
+ * of capitalised words ("name"), which a source may only hold in other words:
+ * "Schiphol Geluidsoverlast" as a phrase finds no paper about noise around
+ * Schiphol.
+ */
+export function extractKeywordTerms(raw: string, options: { exclude?: Iterable<string> } = {}): KeywordTerm[] {
   const original = String(raw ?? "").trim();
   if (!original) return [];
 
@@ -729,13 +816,18 @@ export function extractKeywords(raw: string, options: { exclude?: Iterable<strin
   );
   const infixes = infixIndexes(tokens, analysis, GROUP_INFIXES);
 
-  const terms: string[] = [];
+  const terms: KeywordTerm[] = [];
+  const lastTerm = (): string | undefined => terms[terms.length - 1]?.text;
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
     if (token.phrase) {
-      terms.push(token.text.toLowerCase());
+      terms.push({ text: token.text.toLowerCase(), kind: "quoted" });
       continue;
     }
+    // "Vergelijk de moties met het kabinetsbeleid over stikstof": the topic is
+    // what is compared. As a search word "vergelijk" made the Tweede Kamer
+    // route find nothing and fall back to the single term "kabinetsbeleid".
+    if (isComparisonFrame(tokens, i)) continue;
 
     // Group a run of capitalised words, with infixes between them, into one
     // name. The first word of a sentence is capitalised by grammar, not because
@@ -761,11 +853,11 @@ export function extractKeywords(raw: string, options: { exclude?: Iterable<strin
         // "Open Data Portaal" at the start of the input: "Open" is no name
         // start (sentence-initial), but it does bind "Data".
         const prev = tokens[i - 1];
-        if (prev && !prev.phrase && metaNounBinding(prev.text, token.text, undefined) === "modifier" && terms[terms.length - 1] === prev.text.toLowerCase()) {
+        if (prev && !prev.phrase && metaNounBinding(prev.text, token.text, undefined) === "modifier" && lastTerm() === prev.text.toLowerCase()) {
           terms.pop();
           words.unshift(prev.text.toLowerCase());
         }
-        terms.push(words.join(" "));
+        terms.push({ text: words.join(" "), kind: isBoundRun(words) ? "bound" : "name" });
         i = end;
         continue;
       }
@@ -777,7 +869,7 @@ export function extractKeywords(raw: string, options: { exclude?: Iterable<strin
       // "OV OR fietspaden": an operator between two terms is search syntax.
       // "de OR" is the works council (ondernemingsraad), a topic.
       const between = i > 0 && i < tokens.length - 1 && isKeywordContent(tokens[i - 1], analysis) && isKeywordContent(tokens[i + 1], analysis);
-      if (!between && token.text === "OR" && !analysis.allCaps) terms.push(lower);
+      if (!between && token.text === "OR" && !analysis.allCaps) terms.push({ text: lower, kind: "word" });
       continue;
     }
 
@@ -790,32 +882,32 @@ export function extractKeywords(raw: string, options: { exclude?: Iterable<strin
       const prev = tokens[i - 1];
       const next = tokens[i + 1];
       if (prev && !prev.phrase && metaNounBinding(prev.text, lower, undefined) === "modifier") {
-        if (terms[terms.length - 1] === prev.text.toLowerCase()) terms.pop();
+        if (lastTerm() === prev.text.toLowerCase()) terms.pop();
         words.unshift(prev.text.toLowerCase());
       }
       if (next && !next.phrase && metaNounBinding(undefined, lower, next.text) === "head") {
         words.push(next.text.toLowerCase());
         i++;
       }
-      terms.push(words.join(" "));
+      terms.push({ text: words.join(" "), kind: "bound" });
       continue;
     }
 
     if (!analysis.allCaps && isAcronym(token.text)) {
-      terms.push(lower);
+      terms.push({ text: lower, kind: "word" });
       continue;
     }
     if (KEYWORD_STOPWORDS.has(lower)) continue;
-    terms.push(lower);
+    terms.push({ text: lower, kind: "word" });
   }
 
   // A name or phrase is excluded only when every word of it is ("Gemeente
   // Utrecht" when scoping by gemeente Utrecht); "Open Data Portaal" survives an
   // exclusion of "data".
   const seen = new Set<string>();
-  return terms.filter((term) => {
-    if (term.split(" ").every((word) => exclude.has(word)) || seen.has(term)) return false;
-    seen.add(term);
+  return terms.filter(({ text }) => {
+    if (text.split(" ").every((word) => exclude.has(word)) || seen.has(text)) return false;
+    seen.add(text);
     return true;
   });
 }

@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { asksForRulings, detectPolicyIntent, registerTools, toOriQuery } from "../src/tools.js";
+import { asksForRulings, detectPolicyIntent, oriPlacePhrase, registerTools, toOriQuery, toPhraseQuery } from "../src/tools.js";
 import { clearHttpCache } from "../src/utils/connector-runtime.js";
 import { appCache } from "../src/cache.js";
 import { jsonResponse, xmlResponse } from "./helpers/config.js";
+import { SRU_DIAGNOSTIC } from "./helpers/bekendmakingen-fixtures.js";
 
 /* ------------------------------------------------------------------ */
 /*  Harness: call the nl_gov_ask handler without an MCP transport      */
@@ -69,6 +70,9 @@ const tkTopicTerms = (text: string): string[] =>
 
 /** Tweede Kamer searches sent, without the row counts and link lookups around them. */
 const tkSearches = () => sent("tk").filter((t) => t.includes("$orderby=Datum desc"));
+
+/** The topic terms of each Tweede Kamer search, sorted: the filter does not keep the question's order. */
+const tkTermSets = () => tkSearches().map((search) => tkTopicTerms(search).sort());
 
 /** The CQL query of an SRU request. */
 const sruQuery = (text: string): string => /[?&]query=([^&]*)/.exec(text)?.[1] ?? "";
@@ -167,9 +171,10 @@ const DEN_HAAG_INDEX = ORI_INDICES[1].index;
  * /_aliases) and the Organization records that name the indices, which a
  * municipality is resolved against; aggregations (the newest meeting); and
  * searches, answered by `hits`. Every search reports the shards it ran on, as
- * Elasticsearch does: none would mean the index does not exist.
+ * Elasticsearch does: none would mean the index does not exist. `total` is
+ * the hit count ORI reports, by default the hits returned.
  */
-function oriUpstream(hits: (search: OriSearch) => Array<{ index: string; title: string }> = () => []): Route {
+function oriUpstream(hits: (search: OriSearch) => Array<{ index: string; title: string }> = () => [], total?: number): Route {
   const shards = { total: 1, successful: 1, skipped: 0, failed: 0 };
   return (url, body) => {
     if (url.pathname.endsWith("/_aliases")) {
@@ -189,7 +194,7 @@ function oriUpstream(hits: (search: OriSearch) => Array<{ index: string; title: 
     return jsonResponse({
       _shards: shards,
       hits: {
-        total: { value: found.length, relation: "eq" },
+        total: { value: total ?? found.length, relation: "eq" },
         hits: found.map((hit, i) => ({
           _id: `ori-${i + 1}`,
           _index: hit.index,
@@ -1063,9 +1068,11 @@ describe("nl_gov_ask Tweede Kamer route on a multi-word topic", () => {
     const terms = tkTopicTerms(filter);
     const type = /contains\(Soort,'([^']*)'\)/.exec(filter)?.[1];
     const rows = titles
-      .filter((t) => terms.every((term) => t.Titel.toLowerCase().includes(term.toLowerCase())) && (type === undefined || t.Soort.includes(type)))
-      .map((t, i) => ({ Id: `tk-${i}`, Titel: t.Titel, Onderwerp: t.Titel, Soort: t.Soort, Datum: "2026-09-01T00:00:00" }));
-    return jsonResponse(tkJson(rows));
+      .map((t, i) => ({ Id: `tk-${i}`, Titel: t.Titel, Onderwerp: t.Titel, Soort: t.Soort, Datum: "2026-09-01T00:00:00" }))
+      .filter((t) => terms.every((term) => t.Titel.toLowerCase().includes(term.toLowerCase())) && (type === undefined || t.Soort.includes(type)));
+    // The count is of every match, a search page holds $top of them.
+    const pageSize = filter.includes("Id in (") ? rows.length : Number(url.searchParams.get("$top") ?? rows.length);
+    return jsonResponse({ ...tkJson(rows), value: rows.slice(0, pageSize) });
   };
   const motions = [
     { Titel: "Motie van het lid Y over de pensioenleeftijd", Soort: "Motie" },
@@ -1098,6 +1105,192 @@ describe("nl_gov_ask Tweede Kamer route on a multi-word topic", () => {
     for (const search of tkSearches()) expect(tkTopicTerms(search).length).toBeGreaterThan(0);
     expect(tkSearches().flatMap(tkTopicTerms)).not.toContain("motie");
     expect(res.access_note).toContain("Tweede Kamer (0 resultaten)");
+  });
+
+  it("searches what a comparison compares, not the word 'vergelijk'", async () => {
+    mockUpstreams({
+      tk: andTk([
+        ...motions,
+        { Titel: "Motie van het lid Z over het kabinetsbeleid in Brussel", Soort: "Motie" },
+        { Titel: "Motie van het lid W over kabinetsbeleid voor stikstof in natuurgebieden", Soort: "Motie" },
+      ]),
+    });
+
+    const res = await ask({ question: "Vergelijk de moties van de Tweede Kamer met het kabinetsbeleid over stikstof", top: 5 });
+
+    // Before, "vergelijk" was a required term: nothing matched, and the single
+    // term "kabinetsbeleid" returned motions on any other subject.
+    expect(tkTopicTerms(tkSearches()[0])).toEqual(["kabinetsbeleid", "stikstof"]);
+    expect(tkSearches().flatMap(tkTopicTerms)).not.toContain("vergelijk");
+    expect(res.records.map((r: { title: string }) => r.title)).toEqual(["Motie van het lid W over kabinetsbeleid voor stikstof in natuurgebieden"]);
+    expect(res.access_note).toContain('→ "kabinetsbeleid stikstof"');
+  });
+
+  it("searches a run of capitalised words as loose words when no paper holds it as a phrase", async () => {
+    mockUpstreams({
+      tk: andTk([
+        ...motions,
+        { Titel: "Motie van het lid Z over geluidsoverlast rond Schiphol", Soort: "Motie" },
+        { Titel: "Brief over geluidsoverlast rond Schiphol", Soort: "Brief regering" },
+      ]),
+    });
+
+    const res = await ask({ question: "Welke moties gaan over Schiphol Geluidsoverlast?", top: 5 });
+
+    // Sent only as a phrase, the name found nothing and the answer fell back
+    // to the dataset catalogue.
+    expect(res.summary).toBe("Router: Tweede Kamer (1 resultaten)");
+    expect(res.records.map((r: { title: string }) => r.title)).toEqual(["Motie van het lid Z over geluidsoverlast rond Schiphol"]);
+    const searches = tkSearches();
+    expect(tkTermSets()).toEqual([["schiphol geluidsoverlast"], ["geluidsoverlast", "schiphol"]]);
+    for (const search of searches) expect(search).toContain("contains(Soort,'Motie')");
+    expect(res.access_note).toContain('→ "schiphol geluidsoverlast"');
+  });
+
+  it("keeps the document type when only the loose words find motions", async () => {
+    mockUpstreams({
+      tk: andTk([
+        { Titel: "Motie van het lid Z over het klimaatakkoord van Parijs", Soort: "Motie" },
+        { Titel: "Brief over de bijdrage aan het Klimaatakkoord Parijs", Soort: "Brief regering" },
+      ]),
+    });
+
+    const res = await ask({ question: "Welke moties over het Klimaatakkoord Parijs zijn aangenomen?", top: 5 });
+
+    // Before, the phrase without the type came next and returned the letter.
+    expect(res.records.map((r: { title: string }) => r.title)).toEqual(["Motie van het lid Z over het klimaatakkoord van Parijs"]);
+    expect(tkTermSets()).toEqual([["klimaatakkoord parijs"], ["klimaatakkoord", "parijs"]]);
+  });
+
+  it("finds the papers on a name the question words differently when it names no document type", async () => {
+    mockUpstreams({ tk: andTk([{ Titel: "Wijziging van de Wet kwaliteitsborging voor het bouwen", Soort: "Brief regering" }]) });
+
+    const res = await ask({ question: "Welke kamerstukken gaan over de Wet Kwaliteitsborging Bouwen?", top: 5 });
+
+    expect(res.summary).toBe("Router: Tweede Kamer (1 resultaten)");
+    expect(tkTermSets()).toEqual([["wet kwaliteitsborging bouwen"], ["bouwen", "kwaliteitsborging", "wet"]]);
+  });
+
+  it("keeps a name as a phrase when the papers hold it as one, with one search when the phrase fills the page", async () => {
+    mockUpstreams({
+      tk: andTk([
+        { Titel: "Brief over de Ring Utrecht", Soort: "Brief regering" },
+        { Titel: "Motie over de planning van de Ring Utrecht", Soort: "Motie" },
+        // The loose words also match "ring" inside another word.
+        { Titel: "Invoeringstoets regio Utrecht", Soort: "Bijlage" },
+      ]),
+    });
+
+    const res = await ask({ question: "Welke kamerstukken gaan over de Ring Utrecht?", top: 2 });
+
+    expect(res.records.map((r: { title: string }) => r.title)).toEqual(["Brief over de Ring Utrecht", "Motie over de planning van de Ring Utrecht"]);
+    expect(tkTermSets()).toEqual([["ring utrecht"]]);
+    // The route reports the records it holds, so it asks for no count: with
+    // one, every search took about twice as long.
+    for (const search of tkSearches()) expect(search).not.toContain("$count");
+    // The phrase is shown once quoted, not in quotes of its own again.
+    expect(res.access_note).toContain('→ "ring utrecht".');
+    expect(res.access_note).not.toContain('""');
+  });
+
+  const transportMotions = [
+    { Titel: "Motie over het Openbaar Vervoer Twente", Soort: "Motie" },
+    { Titel: "Motie over openbaar vervoer in Twente", Soort: "Motie" },
+    { Titel: "Brief over openbaar vervoer in Twente", Soort: "Brief regering" },
+    { Titel: "Motie over de bussen in Twente en het openbaar vervoer", Soort: "Motie" },
+    { Titel: "Motie over het openbaar vervoer in Drenthe", Soort: "Motie" },
+  ];
+
+  it("fills a short phrase result with the papers that hold its words apart, of the same type", async () => {
+    mockUpstreams({ tk: andTk(transportMotions) });
+
+    const res = await ask({ question: "Welke moties gaan over het Openbaar Vervoer Twente?", top: 5, verbose: true });
+
+    // The phrase alone found one motion and reported it as the whole answer.
+    expect(res.summary).toBe("Router: Tweede Kamer (3 resultaten)");
+    expect(res.records.map((r: { title: string }) => r.title)).toEqual([
+      "Motie over het Openbaar Vervoer Twente",
+      "Motie over openbaar vervoer in Twente",
+      "Motie over de bussen in Twente en het openbaar vervoer",
+    ]);
+    expect(tkTermSets()).toEqual([["openbaar vervoer twente"], ["openbaar", "twente", "vervoer"]]);
+    for (const search of tkSearches()) expect(search).toContain("contains(Soort,'Motie')");
+    expect(res.access_note).toContain('→ "openbaar vervoer twente".');
+    expect(res.access_note).toContain(
+      `1 document bevat "openbaar vervoer twente" als woordgroep; aangevuld met 2 documenten met dezelfde woorden afzonderlijk (openbaar vervoer twente), gemarkeerd met data.match 'woorden afzonderlijk'.`,
+    );
+    // "Los" stays the term notes' word for a whole word.
+    expect(res.access_note).not.toContain("woorden los");
+    expect(res.records.map((r: { data: Record<string, unknown> }) => r.data.match)).toEqual([undefined, "woorden afzonderlijk", "woorden afzonderlijk"]);
+    expect(res.verbose.fallbacks_used).toContain("tweede_kamer:loose_supplement:openbaar vervoer twente (type Motie)");
+  });
+
+  it("fills only the rest of the page, after the phrase hits", async () => {
+    mockUpstreams({ tk: andTk(transportMotions) });
+
+    const res = await ask({ question: "Welke moties gaan over het Openbaar Vervoer Twente?", top: 2 });
+
+    expect(res.records.map((r: { title: string }) => r.title)).toEqual(["Motie over het Openbaar Vervoer Twente", "Motie over openbaar vervoer in Twente"]);
+    expect(res.access_note).toContain("aangevuld met 1 document met dezelfde woorden afzonderlijk");
+  });
+
+  it("does not loosen a phrase the question quotes", async () => {
+    mockUpstreams({ tk: andTk(transportMotions) });
+
+    const res = await ask({ question: 'Welke moties gaan over "openbaar vervoer twente"?', top: 5 });
+
+    expect(res.records.map((r: { title: string }) => r.title)).toEqual(["Motie over het Openbaar Vervoer Twente"]);
+    expect(tkTermSets()).toEqual([["openbaar vervoer twente"]]);
+    expect(res.access_note ?? "").not.toContain("aangevuld");
+  });
+
+  const dataMotions = [
+    { Titel: "Motie over open data bij het Kadaster Zeeland", Soort: "Motie" },
+    { Titel: "Motie over open data van het Kadaster in Zeeland", Soort: "Motie" },
+    // Its words apart: "open" inside "openbaar".
+    { Titel: "Motie over openbaar vervoer en data van het Kadaster in Zeeland", Soort: "Motie" },
+  ];
+
+  it("does not take a fixed word group apart to fill a short phrase result", async () => {
+    mockUpstreams({ tk: andTk(dataMotions) });
+
+    const res = await ask({ question: "Welke moties gaan over open data?", top: 5, verbose: true });
+
+    // Before, "open data" was taken apart as a name is, and "openbaar" filled the page.
+    expect(res.summary).toBe("Router: Tweede Kamer (2 resultaten)");
+    expect(res.records.map((r: { title: string }) => r.title)).toEqual([
+      "Motie over open data bij het Kadaster Zeeland",
+      "Motie over open data van het Kadaster in Zeeland",
+    ]);
+    expect(tkTermSets()).toEqual([["open data"]]);
+    expect(res.access_note ?? "").not.toContain("aangevuld");
+    expect(res.verbose.fallbacks_used.some((step: string) => step.startsWith("tweede_kamer:loose_supplement"))).toBe(false);
+  });
+
+  it("takes only the name apart, not a fixed word group next to it", async () => {
+    mockUpstreams({ tk: andTk(dataMotions) });
+
+    const res = await ask({ question: "Welke moties gaan over open data bij het Kadaster Zeeland?", top: 5 });
+
+    expect(res.records.map((r: { title: string }) => r.title)).toEqual([
+      "Motie over open data bij het Kadaster Zeeland",
+      "Motie over open data van het Kadaster in Zeeland",
+    ]);
+    expect(tkTermSets()).toEqual([["kadaster zeeland", "open data"], ["kadaster", "open data", "zeeland"]]);
+    expect(res.access_note).toContain('1 document bevat "kadaster zeeland" als woordgroep; aangevuld met 1 document met dezelfde woorden afzonderlijk ("open data" kadaster zeeland)');
+  });
+
+  it("keeps the phrase hits, and says so, when the search on the loose words fails", async () => {
+    const phraseOnly = andTk(transportMotions);
+    mockUpstreams({
+      tk: (url) => (tkTopicTerms(url.searchParams.get("$filter") ?? "").length > 1 ? new Response("bad request", { status: 400 }) : phraseOnly(url)),
+    });
+
+    const res = await ask({ question: "Welke moties gaan over het Openbaar Vervoer Twente?", top: 5, verbose: true });
+
+    expect(res.summary).toBe("Router: Tweede Kamer (1 resultaten)");
+    expect(res.access_note).toContain('1 document bevat "openbaar vervoer twente" als woordgroep; aanvullen met documenten met dezelfde woorden afzonderlijk (openbaar vervoer twente) is mislukt.');
+    expect(res.verbose.fallbacks_used).toContain("tweede_kamer:loose_supplement_failed");
   });
 
   it("still lists the latest motions when the question has no topic", async () => {
@@ -1240,5 +1433,333 @@ describe("nl_gov_ask EUR-Lex document numbers", () => {
 
     const searchWords = await ask({ question: "Zoek in EUR-Lex naar 2016/679", dryRun: true });
     expect(searchWords.planned_requests[0].params.query).toBe("2016/679");
+  });
+});
+
+describe("nl_gov_ask with several sources named in one question", () => {
+  const parkingPaper = { Id: "tk-1", Titel: "Brief over parkeerbeleid en woon-werkverkeer", Onderwerp: "Brief over parkeerbeleid en woon-werkverkeer", Soort: "Brief regering", Datum: "2026-09-01T00:00:00" };
+
+  it("does not make one source require the route words of another", async () => {
+    mockUpstreams({
+      ob: () => xmlResponse(sruXml(["Verkeersbesluit parkeerregulering centrum"])),
+      tk: () => jsonResponse(tkJson([parkingPaper])),
+    });
+
+    const res = await ask({ question: "Welke kamerstukken en publicaties in de Staatscourant gaan over parkeerbeleid?", top: 5 });
+
+    expect(res.summary).toMatch(/^Router: multi-source \(2 resultaten uit 2 bronnen\)/);
+    // Officiële Bekendmakingen required "kamerstukken", Tweede Kamer "staatscourant" and "publicaties".
+    expect(sruTextTerms(sent("ob")[0])).toEqual(["parkeerbeleid"]);
+    expect(sruQuery(sent("ob")[0])).toContain('w.publicatienaam="Staatscourant"');
+    expect(tkTopicTerms(tkSearches()[0])).toEqual(["parkeerbeleid"]);
+    expect(res.access_note).toContain('Tweede Kamer "parkeerbeleid"; Officiële Bekendmakingen "parkeerbeleid"');
+  });
+
+  it("keeps the other routes' words out of the single-source routes too", async () => {
+    mockUpstreams({
+      ob: () => xmlResponse(sruXml([])),
+      tk: () => jsonResponse(tkJson([])),
+      rijk: () => xmlResponse(rssXml([])),
+      dov: () => jsonResponse(ckanJson([])),
+    });
+
+    await ask({ question: "Welke moties en bekendmakingen gaan over afvalinzameling?", top: 5 });
+
+    for (const search of tkSearches()) expect(tkTopicTerms(search)).not.toContain("bekendmakingen");
+    for (const text of sent("ob")) expect(sruTextTerms(text)).not.toContain("moties");
+    expect(sent("ob").length).toBeGreaterThan(0);
+    expect(sent("dov")[0]).toContain("q=afvalinzameling&");
+  });
+
+  it("leaves 'uitspraken' out of Tweede Kamer and 'kamervragen' out of Rechtspraak when a question names both", async () => {
+    mockUpstreams({
+      rechtspraak: () => jsonResponse(rechtspraakJson(["ECLI:NL:RBMNE:2026:1"])),
+      tk: () => jsonResponse(tkJson([{ ...parkingPaper, Titel: "Brief over huurbescherming", Onderwerp: "Brief over huurbescherming" }])),
+    });
+
+    const res = await ask({ question: "Welke uitspraken en kamervragen zijn er over huurbescherming?", top: 3 });
+
+    expect(res.summary).toMatch(/^Router: multi-source/);
+    // Tweede Kamer required "uitspraken" and found nothing; Rechtspraak required "kamervragen".
+    expect(tkTopicTerms(tkSearches()[0])).toEqual(["huurbescherming"]);
+    const term = (JSON.parse(requests.find((r) => r.upstream === "rechtspraak")!.body!) as { SearchTerms: Array<{ Term: string }> }).SearchTerms[0].Term;
+    expect(term).toBe("huurbescherming");
+  });
+
+  it("plans the same queries in a dry run, and keeps a name that holds a route word", async () => {
+    mockUpstreams({});
+    const plan = async (question: string) =>
+      Object.fromEntries((await ask({ question, dryRun: true })).planned_requests.map((r: { connector: string; params: { query: string } }) => [r.connector, r.params.query]));
+
+    expect(await plan("Welke kamerstukken en publicaties in de Staatscourant gaan over parkeerbeleid?")).toEqual({ tk: "parkeerbeleid", ob: "parkeerbeleid" });
+    expect(await plan("Welke uitspraken en kamervragen zijn er over huurbescherming?")).toEqual({ tk: "huurbescherming", rechtspraak: "huurbescherming" });
+    // "parlement" picks Tweede Kamer, but in "Europees Parlement" it is part
+    // of the topic. A run of capitalised words goes to Tweede Kamer as its
+    // words in a multi-source answer: one search, and such a name is often no
+    // phrase in the papers.
+    expect(await plan("Welke uitspraken en kamervragen gaan over het Europees Parlement?")).toEqual({ tk: "europees parlement", rechtspraak: "europees parlement" });
+  });
+
+  it("keeps 'uitspraak' for the other sources when it is the only kind of paper named", async () => {
+    mockUpstreams(allUpstreams);
+    const res = await ask({ question: "Uitspraak in de zaak tegen de minister van Justitie", top: 3 });
+    expect(res.access_note).toContain('Rijksoverheid "uitspraak zaak minister justitie"');
+  });
+
+  it("keeps a route word that is the only topic left", async () => {
+    mockUpstreams({ ob: () => xmlResponse(sruXml([])), tk: () => jsonResponse(tkJson([])) });
+
+    await ask({ question: "Welke kamerstukken gaan over de Staatscourant?", top: 5 });
+
+    expect(tkTopicTerms(tkSearches()[0])).toEqual(["staatscourant"]);
+  });
+
+  it("keeps council document words in a municipality's council records", async () => {
+    mockUpstreams({ ori: oriUpstream(({ path }) => (path.includes("ori_utrecht") ? [{ index: UTRECHT_INDEX, title: "Motie parkeerbeleid binnenstad" }] : [])) });
+
+    const res = await ask({ question: "Welke moties over parkeerbeleid heeft de gemeenteraad van Utrecht aangenomen?", top: 5 });
+
+    expect(res.summary).toBe("Router: Open Raadsinformatie Utrecht (1 resultaten)");
+    expect(oriSearches()[0].query).toContain("moties");
+    expect(oriSearches()[0].query).toContain("parkeerbeleid");
+  });
+});
+
+describe("nl_gov_ask pagination within the records it fetched", () => {
+  const manyHits = (titles: string[], total: number) => xmlResponse(sruXml(titles).replace(/<sru:numberOfRecords>\d+</, `<sru:numberOfRecords>${total}<`));
+  const titles = ["Parkeerverordening centrum", "Parkeerbeleid wijk Oost", "Verkeersbesluit parkeren"];
+
+  it("does not promise a next page when it holds no more records than it showed", async () => {
+    mockUpstreams({ ob: () => manyHits(titles, 3509) });
+
+    const res = await ask({ question: "Welke bekendmakingen gaan over parkeerbeleid?", top: 3 });
+
+    expect(res.summary).toBe("Router: Bekendmakingen (3 resultaten)");
+    expect(res.pagination).toEqual({ offset: 0, limit: 3, total: 3, has_more: false });
+    // The source's own count stays available, and is explained.
+    expect(res.provenance.total_results).toBe(3509);
+    expect(res.access_note).toContain("De bron meldt 3.509 treffers; nl_gov_ask haalt er 3 op");
+    expect(res.access_note).toContain("verhoog 'top'");
+  });
+
+  it("pages within the fetched records", async () => {
+    mockUpstreams({ ob: () => manyHits(titles, 3509) });
+    const first = await ask({ question: "Welke bekendmakingen gaan over parkeerbeleid?", top: 3, limit: 2 });
+    expect(first.records).toHaveLength(2);
+    expect(first.pagination).toEqual({ offset: 0, limit: 2, total: 3, has_more: true });
+
+    const last = await ask({ question: "Welke bekendmakingen gaan over parkeerbeleid?", top: 3, limit: 2, offset: 2 });
+    expect(last.records).toHaveLength(1);
+    expect(last.pagination).toEqual({ offset: 2, limit: 2, total: 3, has_more: false });
+  });
+
+  it("does the same for a municipality's council records", async () => {
+    mockUpstreams({
+      ori: oriUpstream(
+        ({ path }) => (path.includes("ori_utrecht") ? [{ index: UTRECHT_INDEX, title: "Parkeervisie" }, { index: UTRECHT_INDEX, title: "Raadsbrief parkeren" }] : []),
+        2203,
+      ),
+    });
+
+    const res = await ask({ question: "Wat is het parkeerbeleid van de gemeente Utrecht?", top: 2, offset: 2 });
+
+    expect(res.records).toEqual([]);
+    expect(res.pagination).toMatchObject({ offset: 2, total: 2, has_more: false });
+    expect(res.provenance.total_results).toBe(2203);
+    expect(res.access_note).toContain("De bron meldt 2.203 treffers");
+  });
+
+  it("adds no note when it holds every record the source found", async () => {
+    mockUpstreams({ ob: () => manyHits(titles, 3) });
+    const res = await ask({ question: "Welke bekendmakingen gaan over parkeerbeleid?", top: 5 });
+    expect(res.pagination).toEqual({ offset: 0, limit: 5, total: 3, has_more: false });
+    expect(res.access_note ?? "").not.toContain("De bron meldt");
+  });
+});
+
+describe("nl_gov_ask national council search for a named municipality", () => {
+  it("binds a one-word town name to 'gemeente' and keeps a longer name a phrase", () => {
+    expect(oriPlacePhrase("Kampen")).toBe('"gemeente kampen"');
+    expect(oriPlacePhrase("Bergen op Zoom")).toBe('"bergen op zoom"');
+  });
+
+  it("searches all councils for the municipality as a phrase, not as a loose word", async () => {
+    mockUpstreams({
+      ori: oriUpstream(() => [{ index: DEN_HAAG_INDEX, title: "Raadsvoorstel samenwerking afvalinzameling" }]),
+      ob: () => xmlResponse(sruXml([])),
+      tk: () => jsonResponse(tkJson([])),
+      rijk: () => xmlResponse(rssXml([])),
+    });
+
+    // Kampen has no ORI index in this fixture. As a loose word, "kampen" also
+    // matched "kampen met" in other councils' papers.
+    const res = await ask({ question: "Wat is het beleid voor afvalinzameling van de gemeente Kampen?", top: 5, verbose: true });
+
+    expect(res.verbose.fallbacks_used).toContain("ori:Kampen:no_index");
+    const searches = oriSearches();
+    expect(searches).toHaveLength(1);
+    expect(searches[0].path).toBe("/v1/elastic/_search");
+    expect(searches[0].query).toBe('beleid afvalinzameling "gemeente kampen"');
+    expect(res.access_note).toContain('met de gemeente als woordgroep ("gemeente kampen")');
+  });
+
+  it("keeps a multi-word municipality a phrase of its own", async () => {
+    mockUpstreams({
+      ori: oriUpstream(() => [{ index: DEN_HAAG_INDEX, title: "Raadsvoorstel fietspaden" }]),
+      ob: () => xmlResponse(sruXml([])),
+      tk: () => jsonResponse(tkJson([])),
+      rijk: () => xmlResponse(rssXml([])),
+    });
+
+    await ask({ question: "Wat is het beleid voor fietspaden van de gemeente Bergen op Zoom?", top: 5 });
+
+    expect(oriSearches()[0].query).toBe('beleid fietspaden "bergen op zoom"');
+  });
+});
+
+describe("nl_gov_ask phrases for the sources that read them", () => {
+  it("sends Tweede Kamer and Officiële Bekendmakingen a multi-word term as a phrase, as ORI gets it", async () => {
+    mockUpstreams({
+      ori: oriUpstream(() => []),
+      ob: () => xmlResponse(sruXml([])),
+      tk: () => jsonResponse(tkJson([])),
+      rijk: () => xmlResponse(rssXml([])),
+      dov: () => jsonResponse(ckanJson([])),
+    });
+
+    await ask({ question: "Welke gemeenten hebben een Open Data Portaal?", top: 5 });
+
+    expect(oriSearches()[0].query).toBe('"open data portaal"');
+    // Before, Tweede Kamer required "open", "data" and "portaal" one by one.
+    expect(tkTopicTerms(tkSearches()[0])).toEqual(["open data portaal"]);
+    expect(sruQuery(sent("ob")[0])).toContain('"open data portaal"');
+    // Rijksoverheid's search has no phrase syntax: words.
+    expect(sent("rijk")[0]).toContain('"resultSearchTerm":"open data portaal"');
+  });
+
+  it("sends a quoted phrase from the question to the Tweede Kamer route as a phrase", async () => {
+    mockUpstreams({ tk: () => jsonResponse(tkJson([])), dov: () => jsonResponse(ckanJson([])) });
+
+    await ask({ question: 'Welke moties gaan over "omgekeerd inzamelen"?', top: 5 });
+
+    expect(tkTopicTerms(tkSearches()[0])).toEqual(["omgekeerd inzamelen"]);
+  });
+
+  it("quotes only multi-word terms, and not the ones it is told to keep loose", () => {
+    expect(toPhraseQuery(["afvalinzameling", "den haag"])).toBe('afvalinzameling "den haag"');
+    expect(toOriQuery(["afvalinzameling", "den haag"])).toBe(toPhraseQuery(["afvalinzameling", "den haag"]));
+    expect(toPhraseQuery(["open data portaal", "den haag"], new Set(["den haag"]))).toBe('"open data portaal" den haag');
+  });
+
+  it("sends Officiële Bekendmakingen a run of capitalised words as its words", async () => {
+    mockUpstreams({ ob: () => xmlResponse(sruXml(["Kamerbrief over klimaatafspraken van Parijs"])) });
+
+    const res = await ask({ question: "Welke bekendmakingen gaan over het Klimaatakkoord Parijs?", top: 5 });
+
+    // As a phrase, the search ranked unrelated full texts that hold it first.
+    expect(res.summary).toBe("Router: Bekendmakingen (1 resultaten)");
+    expect(sent("ob")).toHaveLength(1);
+    expect(sruTextTerms(sent("ob")[0])).toEqual(["klimaatakkoord", "parijs"]);
+    expect(sruQuery(sent("ob")[0])).not.toContain('"klimaatakkoord parijs"');
+  });
+
+  it("searches Officiële Bekendmakingen for the loose words when no publication holds a phrase", async () => {
+    mockUpstreams({
+      ob: (url) => xmlResponse(sruXml((url.searchParams.get("query") ?? "").includes('"omgekeerd inzamelen"') ? [] : ["Afvalbeleidsplan: omgekeerd en gescheiden inzamelen"])),
+    });
+
+    const res = await ask({ question: 'Welke bekendmakingen gaan over "omgekeerd inzamelen"?', top: 5, verbose: true });
+
+    expect(res.summary).toBe("Router: Bekendmakingen (1 resultaten)");
+    expect(sent("ob").map(sruQuery).map((cql) => cql.includes('"omgekeerd inzamelen"'))).toEqual([true, false]);
+    expect(sruTextTerms(sent("ob")[1])).toEqual(["omgekeerd", "inzamelen"]);
+    expect(res.access_note).toContain('Met woordgroep niets gevonden voor "omgekeerd inzamelen"; daarom gezocht op de losse woorden.');
+    expect(res.verbose.fallbacks_used).toContain("officiele_bekendmakingen:loose_words:omgekeerd inzamelen");
+  });
+
+  it("sends the document search a run of capitalised words as its words", async () => {
+    mockUpstreams({
+      ob: () => xmlResponse(sruXml(["Luchthavenverkeerbesluit Schiphol"])),
+      tk: () => jsonResponse(tkJson([])),
+      rijk: () => xmlResponse(rssXml([])),
+    });
+
+    const res = await ask({ question: "Wat doet het kabinet aan Schiphol Geluidsoverlast?", top: 5 });
+
+    expect(res.summary).toMatch(/^Router: organisatie\/beleid/);
+    expect(sruTextTerms(sent("ob")[0]).sort()).toEqual(["geluidsoverlast", "kabinet", "schiphol"]);
+    expect(sruQuery(sent("ob")[0])).not.toContain('"schiphol geluidsoverlast"');
+    expect(tkTermSets()[0]).toEqual(["geluidsoverlast", "kabinet", "schiphol"]);
+  });
+});
+
+describe("nl_gov_ask when Officiële Bekendmakingen refuses or fails", () => {
+  it("reports a refused query as not searched instead of 0 results", async () => {
+    mockUpstreams({ ob: () => xmlResponse(SRU_DIAGNOSTIC), dov: () => jsonResponse(ckanJson([])) });
+
+    const res = await ask({ question: "Welke bekendmakingen gaan over afvalinzameling?", top: 5, verbose: true });
+
+    expect(res.summary).toBe("Router fallback: data.overheid (0 resultaten)");
+    expect(res.access_note).toContain("Officiële Bekendmakingen (zoekvraag geweigerd, niet gezocht)");
+    expect(res.access_note).not.toContain("Officiële Bekendmakingen (0 resultaten)");
+    expect(res.failures).toEqual([expect.objectContaining({ connector: "officiele_bekendmakingen", message: expect.stringContaining("weigerde de zoekvraag") })]);
+    expect(res.verbose.fallbacks_used).toContain("officiele_bekendmakingen:query_refused");
+  });
+
+  it("falls through to the next route when the source fails, as the other routes do", async () => {
+    mockUpstreams({ ob: () => new Response("bad gateway", { status: 502 }), dov: () => jsonResponse(ckanJson(["Afvalinzameling per gemeente"])) });
+
+    const res = await ask({ question: "Welke bekendmakingen gaan over afvalinzameling?", top: 5 });
+
+    // Before, the whole question failed with the source's HTTP error.
+    expect(res.error).toBeUndefined();
+    expect(res.summary).toBe("Router fallback: data.overheid (1 resultaten)");
+    expect(res.access_note).toContain("Officiële Bekendmakingen (mislukt: http_error)");
+    expect(res.failures).toEqual([expect.objectContaining({ connector: "officiele_bekendmakingen", error_type: "http_error" })]);
+  });
+
+  it("names a refusal in the document search", async () => {
+    mockUpstreams({
+      ob: () => xmlResponse(SRU_DIAGNOSTIC),
+      tk: () => jsonResponse(tkJson([{ Id: "tk-1", Titel: "Brief over btw-tarieven", Onderwerp: "Brief over btw-tarieven", Soort: "Brief regering", Datum: "2026-09-01T00:00:00" }])),
+      rijk: () => xmlResponse(rssXml([])),
+    });
+
+    const res = await ask({ question: "Wat doet de Belastingdienst met de BTW?", top: 5 });
+
+    expect(res.summary).toMatch(/^Router: organisatie\/beleid/);
+    expect(res.access_note).toContain("Officiële Bekendmakingen weigerde de zoekvraag (niet gezocht)");
+    expect(res.access_note).not.toContain("Officiële Bekendmakingen 0");
+    expect(res.failures).toEqual([expect.objectContaining({ connector: "officiele_bekendmakingen", message: expect.stringContaining("SRU-diagnose") })]);
+  });
+
+  it("counts a refusal as a failed source in a multi-source answer", async () => {
+    mockUpstreams({
+      ob: () => xmlResponse(SRU_DIAGNOSTIC),
+      tk: () => jsonResponse(tkJson([{ Id: "tk-1", Titel: "Brief over parkeerbeleid", Onderwerp: "Brief over parkeerbeleid", Soort: "Brief regering", Datum: "2026-09-01T00:00:00" }])),
+    });
+
+    const res = await ask({ question: "Welke kamerstukken en publicaties in de Staatscourant gaan over parkeerbeleid?", top: 5 });
+
+    expect(res.summary).toBe("Router: multi-source (1 resultaten uit 1 bronnen)");
+    expect(res.failures).toEqual([expect.objectContaining({ connector: "ob", message: expect.stringContaining("weigerde de zoekvraag") })]);
+  });
+
+  it("goes on to the next routes when one source refused and the others found nothing", async () => {
+    mockUpstreams({
+      ob: () => xmlResponse(SRU_DIAGNOSTIC),
+      tk: () => jsonResponse(tkJson([])),
+      rijk: () => xmlResponse(rssXml([])),
+      dov: () => jsonResponse(ckanJson([])),
+    });
+
+    const res = await ask({ question: "Welke kamerstukken en publicaties in de Staatscourant gaan over parkeerbeleid?", top: 5 });
+
+    // Not "Alle geselecteerde bronnen faalden": Tweede Kamer answered, with nothing.
+    expect(res.error).toBeUndefined();
+    expect(res.access_note).toContain("zoekvraag geweigerd, niet gezocht");
+    // Refused in the multi-source step, on its own route and in the document
+    // search: reported once.
+    expect(res.failures.filter((f: { message: string }) => f.message.includes("weigerde de zoekvraag"))).toHaveLength(1);
   });
 });

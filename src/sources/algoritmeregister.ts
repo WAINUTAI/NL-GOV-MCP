@@ -323,8 +323,6 @@ interface AbbreviationToken {
   type?: string;
   /** The abbreviation as typed (accents removed), for its capitals: "IenW", "I&W". */
   cased: string;
-  /** Typed with "Min" for "Ministerie van" ("MinEZK", "Min. JenV"). */
-  minForm?: boolean;
 }
 
 /** 2 to 6 letters, '&' and '+' allowed between them ("VWS", "IenW", "I&W"). */
@@ -347,7 +345,7 @@ function abbreviationToken(raw: string): AbbreviationToken | undefined {
     .trim();
   const min = cased.match(/^min\.?\s*(.+)$/i);
   if (min && isShortTerm(min[1]) && !"ministerie".startsWith(cased.toLowerCase().replace(/[^a-z]/g, ""))) {
-    return { token: min[1].toLowerCase().replace(/[&+]/g, ""), type: "ministerie", cased: min[1], minForm: true };
+    return { token: min[1].toLowerCase().replace(/[&+]/g, ""), type: "ministerie", cased: min[1] };
   }
   const prefix = cased.match(ORG_TYPE_PREFIX_ANY_CASE);
   const bare = prefix ? cased.slice(prefix[0].length) : cased;
@@ -357,6 +355,70 @@ function abbreviationToken(raw: string): AbbreviationToken | undefined {
     ...(prefix ? { type: orgTypeClass(prefix[1].toLowerCase()) } : {}),
     cased: bare,
   };
+}
+
+/**
+ * Everyday abbreviations of the ministries that publish in the register, by org_id.
+ * The official ones were checked against the abbreviation TOOI gives that org_id
+ * (tooiont:afkorting: "OCW", "IenW", "LVVN", "AenM") or the register's own code for it
+ * ("ministerie-buza", "ministerie-lnv"); "EZ" is Economische Zaken, which the register
+ * only has as EZK. "SoZaWe" and "BiZa" are the common short names of Sociale Zaken en
+ * Werkgelegenheid and Binnenlandse Zaken (BuZa is Buitenlandse Zaken); listed so that
+ * they are understood alone ("SoZaWe") and in lower case too ("minsozawe"), where
+ * namesMinistry cannot tell the words apart. Keys are written as abbreviationToken
+ * reduces them: lower case, without '&' and '+' ("I&W" → "iw", "OC&W" → "ocw").
+ *
+ * The register's organisation search finds such a form only by chance: "MinOCW" and
+ * "Ministerie van OCW" find the Inspectie van het Onderwijs (OCW), "MinEZK" finds BZK,
+ * and "Ministerie van A&M" lists every ministry, of which the letters fit Algemene
+ * Zaken. A ministry form ("MinOCW", "Min. OCW", "Ministerie van OCW") in this table is
+ * therefore resolved through it, never by letters that happen to fit a name; any other
+ * ministry form only when it names one ministry outright (see pickMinistry).
+ */
+const MINISTRY_BY_ABBREVIATION = new Map<string, string>([
+  ["az", "mnre1010"],
+  ["bz", "mnre1013"],
+  ["buza", "mnre1013"],
+  ["def", "mnre1018"],
+  ["vws", "mnre1025"],
+  ["bzk", "mnre1034"],
+  ["biza", "mnre1034"],
+  ["ezk", "mnre1045"],
+  ["ez", "mnre1045"],
+  ["jenv", "mnre1058"],
+  ["jv", "mnre1058"],
+  ["szw", "mnre1073"],
+  ["sozawe", "mnre1073"],
+  ["fin", "mnre1090"],
+  ["ocw", "mnre1109"],
+  ["ocenw", "mnre1109"],
+  ["ienw", "mnre1130"],
+  ["iw", "mnre1130"],
+  ["lnv", "mnre1153"],
+  ["lvvn", "mnre1153"],
+  ["aenm", "mnre1162"],
+  ["am", "mnre1162"],
+  ["vro", "mnre1171"],
+]);
+
+/**
+ * Without "Min" or "Ministerie van" in front, only these name a ministry unmistakably;
+ * "Fin", "Def", "AZ" or "I&W" alone are left to the organisation search.
+ */
+const BARE_MINISTRY_ABBREVIATIONS = new Set(["buza", "biza", "vws", "bzk", "ezk", "jenv", "szw", "sozawe", "ocw", "ocenw", "ienw", "lnv", "lvvn", "aenm", "vro"]);
+
+/**
+ * The ministry `raw` abbreviates according to MINISTRY_BY_ABBREVIATION: `typed` when
+ * it carries the ministry's type word ("MinOCW", "Ministerie van OCW"), otherwise only
+ * for the unmistakable bare forms ("OCW").
+ */
+function ministryByAbbreviation(raw: string): { orgId: string; token: string; typed: boolean } | undefined {
+  const abbr = abbreviationToken(raw);
+  if (!abbr || (abbr.type && abbr.type !== "ministerie")) return undefined;
+  const orgId = MINISTRY_BY_ABBREVIATION.get(abbr.token);
+  if (!orgId) return undefined;
+  const typed = abbr.type === "ministerie";
+  return typed || BARE_MINISTRY_ABBREVIATIONS.has(abbr.token) ? { orgId, token: abbr.token, typed } : undefined;
 }
 
 /** Whether `letters` occur in this order in `text`. */
@@ -422,6 +484,45 @@ function isAbbreviationOf(raw: string, candidateName: string): boolean {
       capitalsFit(abbr.cased, words) &&
       words.some((w, i) => w[0] === token[0] && isSubsequence(token.slice(1), words.slice(i).join("").slice(1))),
   );
+}
+
+/**
+ * Whether a ministry form (`cased`: "Jus", "SoZaWe") names this ministry outright,
+ * rather than with letters that merely occur in its name in order (isAbbreviationOf):
+ *
+ * - its letters, at least three, start one word of the name: "Jus" (Justitie),
+ *   "Ond" (Onderwijs), "Financ" (Financiën);
+ * - or, written with capitals, each capital starts the next word of the name, the
+ *   first one its first word, and the lower-case letters after a capital continue
+ *   that word ("SoZaWe": Sociale Zaken en Werkgelegenheid; "en" is skipped), except
+ *   that "en", '&' or '+' must be the word "en" itself ("IenW", "OC&W").
+ *
+ * So "VenW" (Verkeer en Waterstaat) is not Volksgezondheid, Welzijn en Sport, as the
+ * word after V is not "en", and "A&M" is not Algemene Zaken, as M starts no word.
+ */
+function namesMinistry(cased: string, ministryName: string): boolean {
+  const words = nameWords(orgNameParts(fold(ministryName)).bare);
+  const letters = fold(cased).replace(/[&+]/g, "");
+  if (letters.length >= 3 && words.some((w) => !ORG_FILLER_WORDS.has(w) && w.startsWith(letters))) return true;
+  const segments = cased.match(/\p{Lu}\p{Ll}*|[&+]/gu) ?? [];
+  if (segments.length < 2 || segments.join("") !== cased) return false;
+  const nextWord = (from: number): number => {
+    let i = from;
+    while (i < words.length && ORG_FILLER_WORDS.has(words[i])) i++;
+    return i;
+  };
+  const fitsFrom = (segment: number, word: number): boolean => {
+    if (segment === segments.length) return true;
+    const part = fold(segments[segment]);
+    if (part === "&" || part === "+") return words[word + 1] === "en" && fitsFrom(segment + 1, word + 1);
+    const i = nextWord(word + 1);
+    const w = words[i];
+    if (w === undefined) return false;
+    if (w.startsWith(part) && fitsFrom(segment + 1, i)) return true;
+    const head = part.endsWith("en") ? part.slice(0, -2) : "";
+    return !!head && w.startsWith(head) && words[i + 1] === "en" && fitsFrom(segment + 1, i + 1);
+  };
+  return fitsFrom(0, -1);
 }
 
 /**
@@ -494,8 +595,14 @@ export function normalizeAlgoritmeCategorie(value: string): { value: string; kno
  * Candidates that contain none of that (the register matched them on stems, other text
  * or similar words) are never chosen, except one candidate for an abbreviation such
  * as "CBS", or the one organisation of the named type a typed abbreviation fits
- * ("Ministerie van JenV"); otherwise the result is not_found with those candidates as
- * alternatives, so "West Betuwe" does not turn into "Gemeente Neder-Betuwe".
+ * ("Hoogheemraadschap HHNK"); otherwise the result is not_found with those candidates
+ * as alternatives, so "West Betuwe" does not turn into "Gemeente Neder-Betuwe".
+ *
+ * A ministry form ("MinOCW", "Ministerie van JenV") resolves only to the ministry
+ * MINISTRY_BY_ABBREVIATION gives for it, and only when that one is among the
+ * candidates. For a ministry form the table does not know, the ministries its letters
+ * fit are named, not chosen ("Ministerie van VenW" is not VWS): whether it names one
+ * ministry outright can only be told from the list of all ministries (pickMinistry).
  */
 export function pickOrganisation(
   input: string,
@@ -503,13 +610,18 @@ export function pickOrganisation(
   candidateTotal = candidates.length,
 ): OrganisationResolution {
   const raw = input.trim();
+  const none: OrganisationResolution = { input: raw, status: "not_found", alternatives: [], candidate_total: 0, without_algorithms: [] };
+  const ministry = ministryByAbbreviation(raw);
+  if (ministry?.typed) {
+    const hit = candidates.find((c) => c.org_id === ministry.orgId);
+    return hit ? { input: raw, status: "resolved", match: "deel", organisation: hit, alternatives: [], candidate_total: 1, without_algorithms: [] } : none;
+  }
   const scored = candidates.map((c, index) => ({
     c,
     score: scoreCandidate(raw, c),
     rank: placeTypeRank(fold(c.name)),
     index,
   }));
-  const none: OrganisationResolution = { input: raw, status: "not_found", alternatives: [], candidate_total: 0, without_algorithms: [] };
   if (!scored.length) return none;
 
   const best = Math.max(...scored.map((s) => s.score));
@@ -518,12 +630,15 @@ export function pickOrganisation(
     if (abbr) {
       // The register's single answer for a short token: taken when it is an abbreviation
       // of that name, otherwise named as a look-alike ("OM" → Gemeente Ommen). After a
-      // type word the search lists every organisation of that type ("Ministerie van
-      // JenV"); then the one it abbreviates is taken, if the list is complete and there
-      // is exactly one.
+      // type word the search lists every organisation of that type ("Hoogheemraadschap
+      // HHNK"); then the one it abbreviates is taken, if the list is complete and there
+      // is exactly one. Ministries are the exception (see above): fitting letters only
+      // make a look-alike.
       const fits = scored.filter((s) => isAbbreviationOf(raw, s.c.name));
       const complete = candidateTotal <= candidates.length;
-      if (fits.length === 1 && (scored.length === 1 || (abbr.type && complete))) {
+      if (abbr.type === "ministerie") {
+        if (fits.length) return { ...none, alternatives: fits.slice(0, ORG_ALTERNATIVES_SHOWN).map((s) => s.c) };
+      } else if (fits.length === 1 && (scored.length === 1 || (abbr.type && complete))) {
         return { input: raw, status: "resolved", match: "deel", organisation: fits[0].c, alternatives: [], candidate_total: 1, without_algorithms: [] };
       }
       if (scored.length === 1) return { ...none, alternatives: [scored[0].c] };
@@ -560,6 +675,31 @@ export function pickOrganisation(
     candidate_total: total,
     without_algorithms: [],
   };
+}
+
+/**
+ * Pick the ministry meant by `input` from the register's complete list of ministries
+ * (organisationtype 'ministerie'), as pickOrganisation does, plus one case only that
+ * list can settle: a ministry form the table of abbreviations does not know ("MinJus",
+ * "MinOnd", "Ministerie van Financ") is taken when exactly one ministry has a name it
+ * names outright (see namesMinistry). Several such ministries ("MinVol": Volksgezondheid
+ * and Volkshuisvesting) are named first among the look-alikes; none chosen.
+ */
+export function pickMinistry(
+  input: string,
+  ministries: OrganisationCandidate[],
+  total = ministries.length,
+): OrganisationResolution {
+  const picked = pickOrganisation(input, ministries, total);
+  const abbr = abbreviationToken(picked.input);
+  if (picked.status !== "not_found" || abbr?.type !== "ministerie" || ministryByAbbreviation(picked.input)) return picked;
+  if (total > ministries.length) return picked;
+  const named = ministries.filter((c) => namesMinistry(abbr.cased, c.name));
+  if (named.length === 1) {
+    return { input: picked.input, status: "resolved", match: "deel", organisation: named[0], alternatives: [], candidate_total: 1, without_algorithms: [] };
+  }
+  const alternatives = [...named, ...picked.alternatives.filter((c) => !named.includes(c))];
+  return { ...picked, alternatives: alternatives.slice(0, ORG_ALTERNATIVES_SHOWN) };
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -838,18 +978,50 @@ export class AlgoritmeregisterSource {
   /**
    * Resolve an organisation name, org_id or register code to the register's org_id.
    *
-   * Order: the name search (organisations with published algorithms) for the name
-   * itself, the register's own name for the place, other spellings of an abbreviation
-   * ("MinSZW", "I&W"), a direct id/code lookup for input that looks like one, then
-   * the full organisation list (which also holds
-   * organisations without published algorithms) for the name itself, and only then a
-   * candidate that merely contains the input.
+   * Order: a ministry abbreviation ("MinOCW", "Ministerie van JenV") straight from the
+   * register's list of ministries; else the name search (organisations with published
+   * algorithms) for the name itself, a bare ministry abbreviation ("OCW"), the
+   * register's own name for the place, other ministry forms ("MinJus", "MinVenJ") in
+   * the list of ministries and other spellings of an abbreviation ("I&W"), a direct
+   * id/code lookup for input that looks like one, then the full organisation list
+   * (which also holds organisations without published algorithms) for the name
+   * itself, and only then a candidate that merely contains the input.
    */
   async resolveOrganisation(input: string): Promise<OrganisationResolution> {
     const raw = input.replace(/\s+/g, " ").trim();
+    const ministry = ministryByAbbreviation(raw);
+    if (ministry?.typed) return this.resolveMinistry(raw, ministry.orgId);
+
     const first = await this.searchOrganisations(raw);
     const picked = pickOrganisation(raw, first.candidates, first.total);
     if (isNameMatch(picked)) return picked;
+
+    if (ministry) {
+      // "VWS" finds the ministry itself; "OCW" finds only the Inspectie van het Onderwijs
+      // (OCW), which carries the abbreviation in its name and is named next to it.
+      if (picked.status === "resolved" && picked.organisation?.org_id === ministry.orgId) return picked;
+      const ministries = await this.searchOrganisations("", "ministerie");
+      const hit = ministries.candidates.find((c) => c.org_id === ministry.orgId);
+      if (hit) {
+        const alternatives = first.candidates
+          .filter((c) => c.org_id !== hit.org_id && nameWords(fold(c.name)).includes(ministry.token))
+          .slice(0, ORG_ALTERNATIVES_SHOWN);
+        return { input: raw, status: "resolved", match: "deel", organisation: hit, alternatives, candidate_total: 1 + alternatives.length, without_algorithms: [] };
+      }
+    }
+
+    // The register names one ministry without its type word ("Asiel en Migratie"), so
+    // its official name "Ministerie van Asiel en Migratie" scored nothing against it.
+    // Every entry in the register's list of ministries is a ministry: there the name
+    // without the type word decides.
+    const inputParts = orgNameParts(fold(raw));
+    if (inputParts.type === "ministerie") {
+      const ministries = await this.searchOrganisations("", "ministerie");
+      const same = ministries.candidates.filter((c) => orgNameParts(fold(c.name)).bare === inputParts.bare);
+      if (same.length === 1) {
+        return { input: raw, status: "resolved", match: "naam", organisation: same[0], alternatives: [], candidate_total: 1, without_algorithms: [] };
+      }
+    }
 
     // The register may use another name for the place ("Den Bosch" finds Den Haag and
     // Den Helder, the register says "'s-Hertogenbosch"); try those before settling.
@@ -945,22 +1117,38 @@ export class AlgoritmeregisterSource {
   }
 
   /**
+   * A ministry form the table of abbreviations knows ("MinOCW", "Ministerie van A&M"),
+   * from the register's list of ministries with published algorithms. Not in that
+   * list: not_found, with the ministry named when the register knows it without
+   * published algorithms. Never another ministry.
+   */
+  private async resolveMinistry(raw: string, orgId: string): Promise<OrganisationResolution> {
+    const ministries = await this.searchOrganisations("", "ministerie");
+    const picked = pickMinistry(raw, ministries.candidates, ministries.total);
+    if (picked.status === "resolved") return picked;
+    // Only enriches the "not found" note; failing here must not hide that answer.
+    const known = await this.lookupOrgId(orgId).catch(() => undefined);
+    return { ...picked, without_algorithms: known ? [`${known.name} (${orgId})`] : [] };
+  }
+
+  /**
    * Other spellings of an abbreviation the name search did not resolve.
    *
-   * "MinSZW", "Min. JenV", "MinEZK": the search finds nothing for the short form, or
-   * another ministry ("MinEZK" → BZK, on the letters of "Ministerie"); for "Ministerie
-   * van SZW" it lists every ministry, and pickOrganisation takes the one the
-   * abbreviation fits. "I&W": the search answers with an unrelated organisation; the
-   * register's names write '&' as "en" ("IenW"), which is taken when the input itself
-   * abbreviates the organisation found.
+   * A ministry form the table of abbreviations does not know ("MinJus", "Ministerie
+   * van Onderw", "MinVenJ"): the name search finds nothing for it, another ministry, or
+   * every ministry by its type word. The register's list of all ministries settles it:
+   * pickMinistry takes the one ministry it names outright, or names those the letters
+   * fit without choosing one. "I&W": the search answers with an unrelated organisation;
+   * the register's names write '&' as "en" ("IenW"), which is taken when the input
+   * itself abbreviates the organisation found.
    */
   private async resolveAbbreviation(raw: string): Promise<OrganisationResolution | undefined> {
     const abbr = abbreviationToken(raw);
     if (!abbr) return undefined;
-    if (abbr.minForm) {
-      const viaLong = await this.searchOrganisations(`Ministerie van ${abbr.cased}`);
-      const picked = pickOrganisation(raw, viaLong.candidates, viaLong.total);
-      if (picked.status === "resolved") return picked;
+    if (abbr.type === "ministerie") {
+      const ministries = await this.searchOrganisations("", "ministerie");
+      const picked = pickMinistry(raw, ministries.candidates, ministries.total);
+      if (picked.status === "resolved" || picked.alternatives.length) return picked;
     }
     if (abbr.cased.includes("&")) {
       const via = await this.resolveOrganisation(abbr.cased.replace(/&/g, "en"));
@@ -987,11 +1175,19 @@ export class AlgoritmeregisterSource {
     return undefined;
   }
 
-  /** Organisations with published algorithms whose name matches (the overview lists no others). */
-  private async searchOrganisations(searchtext: string): Promise<{ candidates: OrganisationCandidate[]; total: number }> {
+  /**
+   * Organisations with published algorithms whose name matches (the overview lists no
+   * others), or with `organisationtype` all of that type (the ministries: 14 in 2026).
+   */
+  private async searchOrganisations(
+    searchtext: string,
+    organisationtype?: AlgoritmeOrganisatietype,
+  ): Promise<{ candidates: OrganisationCandidate[]; total: number }> {
     const { data } = await postJson<unknown>(
       ALGORITMEREGISTER_ORG_ENDPOINT,
-      { page: 1, limit: ORG_CANDIDATE_ROWS, searchtext },
+      organisationtype
+        ? { page: 1, limit: ALGORITMEREGISTER_MAX_ROWS, organisationtype }
+        : { page: 1, limit: ORG_CANDIDATE_ROWS, searchtext },
       { connector: CONNECTOR, timeoutMs: TIMEOUT_MS },
     );
     const overview = asRecord(data);
@@ -1155,6 +1351,16 @@ export class AlgoritmeregisterSource {
     return mentions.some(Boolean) ? undefined : { certain: false, exactElsewhere };
   }
 
+  /** Algorithms of organisations of this type, without any other filter; undefined when it cannot be told. */
+  private async countOrganisationType(organisationtype: AlgoritmeOrganisatietype): Promise<number | undefined> {
+    try {
+      return (await this.fetchPage({ searchtext: "", organisationtype }, 1, 1)).total;
+    } catch {
+      // Only decides which note fits; the (empty) result itself stands.
+      return undefined;
+    }
+  }
+
   /** The JSON body the register expects, without paging (shared with dryRun). */
   buildQuery(args: AlgoritmeregisterSearchArgs, orgId?: string): Record<string, unknown> {
     const query = (args.query ?? "").replace(/\s+/g, " ").trim();
@@ -1282,12 +1488,30 @@ export class AlgoritmeregisterSource {
     if (total === 0 && query.includes(" ")) {
       notes.push("Geen treffers: alle zoekwoorden moeten voorkomen, probeer minder of andere woorden.");
     }
+    let typeProbed = false;
     if (args.organisatietype && total === 0) {
-      notes.push(
-        `Geen treffers met organisatietype '${args.organisatietype}'. Het register deelt organisaties zelf in en gebruikt niet elk type: ` +
-          "omgevingsdiensten, veiligheidsregio's, GGD's en andere regionale samenwerkingsverbanden staan onder 'veiligheidsregio' " +
-          "(in het register 'Regionaal samenwerkingsorgaan'). Zoek zo'n organisatie liever op naam (organisatie).",
-      );
+      // Only the type itself finding nothing means the register does not use it. With
+      // other constraints the zero may be theirs: one count of the type alone decides.
+      const others = [
+        ...(orgId ? ["organisatie"] : []),
+        ...(query ? ["zoekwoorden"] : []),
+        ...Object.keys(filters).filter((k) => k !== "organisatietype"),
+      ];
+      typeProbed = others.length > 0;
+      const typeTotal = typeProbed ? await this.countOrganisationType(args.organisatietype) : 0;
+      if (typeTotal === 0) {
+        notes.push(
+          `Geen treffers met organisatietype '${args.organisatietype}'. Het register deelt organisaties zelf in en gebruikt niet elk type: ` +
+            "omgevingsdiensten, veiligheidsregio's, GGD's en andere regionale samenwerkingsverbanden staan onder 'veiligheidsregio' " +
+            "(in het register 'Regionaal samenwerkingsorgaan'). Zoek zo'n organisatie liever op naam (organisatie).",
+        );
+      } else if (typeTotal !== undefined) {
+        const list = others.length > 1 ? `${others.slice(0, -1).join(", ")} en ${others.at(-1)}` : others[0];
+        notes.push(
+          `Organisatietype '${args.organisatietype}' heeft op zichzelf wel treffers (${algoritmes(typeTotal)}); ` +
+            `de nul komt door de combinatie met ${list}.`,
+        );
+      }
     }
     if (categorie && !categorie.known) {
       notes.push(
@@ -1302,6 +1526,7 @@ export class AlgoritmeregisterSource {
     params.page = fetchedPages.length ? fetchedPages.join(",") : "1";
     params.limit = fetchedPages.length ? String(plan.pageSize) : "1";
     if (probed && fetchedPages.length) params.total_probe = "page=1&limit=1";
+    if (typeProbed) params.organisationtype_probe = `organisationtype=${args.organisatietype}&page=1&limit=1`;
 
     return {
       items,

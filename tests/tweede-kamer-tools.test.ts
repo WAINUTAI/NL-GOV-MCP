@@ -271,6 +271,172 @@ describe("tweede_kamer_search", () => {
   });
 });
 
+describe("tweede_kamer_search — meeting date of Agendapunt, Besluit and Stemming", () => {
+  const AGENDAPUNT_A = "a0000000-0000-4000-8000-000000000001";
+  const AGENDAPUNT_B = "a0000000-0000-4000-8000-00000000000b";
+  const ACTIVITEIT = "c0000000-0000-4000-8000-000000000001";
+  const BESLUIT = "b0000000-0000-4000-8000-0000000000ff";
+  const CHANGED = "2026-08-11T10:33:40.737+02:00";
+  const entitySet = (input: string) => new URL(input).pathname.split("/").pop() ?? "";
+  const isLookup = (input: string) => (new URL(input).searchParams.get("$filter") ?? "").startsWith("Id in (");
+  const besluit = (id: string, agendapunt: string | null) => ({
+    Id: id,
+    Agendapunt_Id: agendapunt,
+    BesluitSoort: "Stemmen - aangenomen",
+    BesluitTekst: "Aangenomen.",
+    GewijzigdOp: CHANGED,
+    Verwijderd: false,
+  });
+
+  /** Answers the search with `rows` and every `Id in (...)` lookup with `lookup`. */
+  function serve(rows: unknown[], lookup: (input: string) => Response) {
+    return vi.fn(async (input: string) => (isLookup(input) ? lookup(input) : jsonResponse({ "@odata.count": rows.length, value: rows })));
+  }
+
+  it("gives each Besluit the date of its meeting, looked up once for the page", async () => {
+    const fetchMock = serve(
+      [
+        besluit("b0000000-0000-4000-8000-000000000001", AGENDAPUNT_A),
+        besluit("b0000000-0000-4000-8000-000000000002", AGENDAPUNT_A),
+        besluit("b0000000-0000-4000-8000-000000000003", AGENDAPUNT_B),
+      ],
+      () =>
+        jsonResponse({
+          value: [
+            { Id: AGENDAPUNT_A, Activiteit: { Id: ACTIVITEIT, Datum: "2026-06-03T13:00:00+02:00" } },
+            { Id: AGENDAPUNT_B.toUpperCase(), Activiteit: { Id: ACTIVITEIT, Datum: "2026-06-04T10:15:00+02:00" } },
+          ],
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const payload = await callTool("tweede_kamer_search", { entity: "Besluit", date_from: "2026-06-01", date_to: "2026-06-05", top: 3 });
+
+    expect(payload.error).toBeUndefined();
+    // The search itself is unchanged (no $expand), then one lookup for the two distinct agendapunten.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const search = urlOf(fetchMock, 0);
+    expect(search.searchParams.get("$expand")).toBeNull();
+    expect(search.searchParams.get("$orderby")).toBe("GewijzigdOp desc");
+    const lookup = urlOf(fetchMock, 1);
+    expect(entitySet(lookup.href)).toBe("Agendapunt");
+    expect(lookup.searchParams.get("$filter")).toBe(`Id in (${AGENDAPUNT_A},${AGENDAPUNT_B})`);
+    expect(lookup.searchParams.get("$select")).toBe("Id");
+    expect(lookup.searchParams.get("$expand")).toBe("Activiteit($select=Id,Datum)");
+
+    expect(payload.records.map((r: Payload) => r.date)).toEqual([
+      "2026-06-03T13:00:00+02:00",
+      "2026-06-03T13:00:00+02:00",
+      "2026-06-04T10:15:00+02:00",
+    ]);
+    for (const r of payload.records) {
+      expect(r.data.vergaderdatum).toBe(r.date);
+      // The change date stays, as its own field.
+      expect(r.data.GewijzigdOp).toBe(CHANGED);
+    }
+    expect(payload.access_note).toContain("De datum van een record is de datum van de vergadering (vergaderdatum); GewijzigdOp is de wijzigingsdatum.");
+    expect(payload.access_note).not.toContain("is de datum de wijzigingsdatum");
+    // The page is in the default order, which is not the order of the dates shown.
+    expect(payload.access_note).toContain(
+      "De records staan op GewijzigdOp (laatste wijziging), niet op die datum; sorteer op vergaderdatum met orderby 'Agendapunt/Activiteit/Datum desc'.",
+    );
+  });
+
+  it("does not point to another order when the caller chose one", async () => {
+    const fetchMock = serve([besluit("b0000000-0000-4000-8000-000000000001", AGENDAPUNT_A)], () =>
+      jsonResponse({ value: [{ Id: AGENDAPUNT_A, Activiteit: { Id: ACTIVITEIT, Datum: "2026-06-03T13:00:00+02:00" } }] }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const payload = await callTool("tweede_kamer_search", { entity: "Besluit", top: 1, orderby: "Agendapunt/Activiteit/Datum desc" });
+
+    expect(urlOf(fetchMock, 0).searchParams.get("$orderby")).toBe("Agendapunt/Activiteit/Datum desc");
+    expect(payload.access_note).toContain("De datum van een record is de datum van de vergadering (vergaderdatum)");
+    expect(payload.access_note).not.toContain("sorteer op vergaderdatum");
+  });
+
+  it("does not claim a meeting date next to a date filter when the lookup fails", async () => {
+    const fetchMock = serve([besluit("b0000000-0000-4000-8000-000000000001", AGENDAPUNT_A)], () => new Response("", { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const payload = await callTool("tweede_kamer_search", { entity: "Besluit", date_from: "2026-06-01", date_to: "2026-06-05", top: 1 });
+
+    expect(payload.records[0].date).toBe(CHANGED);
+    expect(payload.access_note).toContain("Datumfilter op Besluit.Agendapunt/Activiteit/Datum (Nederlandse tijd): de datum van de vergadering (vergaderdatum).");
+    expect(payload.access_note).toContain("De vergaderdatum kon niet (voor alle records) worden opgehaald; bij alle records is de datum de wijzigingsdatum (GewijzigdOp).");
+    // Nothing says the records show their meeting date, nor that the order differs from the dates shown.
+    expect(payload.access_note).not.toContain("De datum van een record is de datum van de vergadering");
+    expect(payload.access_note).not.toContain("bij elk record");
+    expect(payload.access_note).not.toContain("sorteer op vergaderdatum");
+  });
+
+  it("dates a Stemming by its voting session and an Agendapunt by its Activiteit", async () => {
+    const vote = (id: string) => ({ Id: id, Besluit_Id: BESLUIT, Soort: "Voor", ActorFractie: "D66", GewijzigdOp: CHANGED });
+    const votes = serve([vote("s-1"), vote("s-2")], () =>
+      jsonResponse({ value: [{ Id: BESLUIT, Agendapunt: { Id: AGENDAPUNT_A, Activiteit: { Id: ACTIVITEIT, Datum: "2026-07-02T13:30:00+02:00" } } }] }),
+    );
+    vi.stubGlobal("fetch", votes);
+    const voted = await callTool("tweede_kamer_search", { entity: "Stemming", filter: "ActorFractie eq 'D66'", top: 2 });
+    expect(votes).toHaveBeenCalledTimes(2);
+    const voteLookup = urlOf(votes, 1);
+    expect(entitySet(voteLookup.href)).toBe("Besluit");
+    expect(voteLookup.searchParams.get("$filter")).toBe(`Id in (${BESLUIT})`);
+    expect(voteLookup.searchParams.get("$expand")).toBe("Agendapunt($select=Id;$expand=Activiteit($select=Id,Datum))");
+    expect(voted.records.map((r: Payload) => r.date)).toEqual(["2026-07-02T13:30:00+02:00", "2026-07-02T13:30:00+02:00"]);
+    expect(voted.records[0].data).toMatchObject({ vergaderdatum: "2026-07-02T13:30:00+02:00", GewijzigdOp: CHANGED });
+
+    vi.unstubAllGlobals();
+    clearHttpCache();
+    const agendapunt = { Id: AGENDAPUNT_A, Onderwerp: "Debat over fietspaden", Activiteit_Id: ACTIVITEIT, Aanvangstijd: null, GewijzigdOp: CHANGED };
+    const items = serve([agendapunt], () => jsonResponse({ value: [{ Id: ACTIVITEIT, Datum: "2026-06-04T13:00:00+02:00" }] }));
+    vi.stubGlobal("fetch", items);
+    const listed = await callTool("tweede_kamer_search", { entity: "Agendapunt", query: "fietspaden", top: 1 });
+    const itemLookup = urlOf(items, items.mock.calls.length - 1);
+    expect(entitySet(itemLookup.href)).toBe("Activiteit");
+    expect(itemLookup.searchParams.get("$select")).toBe("Id,Datum");
+    expect(itemLookup.searchParams.get("$expand")).toBeNull();
+    expect(listed.records[0].date).toBe("2026-06-04T13:00:00+02:00");
+    expect(listed.records[0].data).toMatchObject({ vergaderdatum: "2026-06-04T13:00:00+02:00", GewijzigdOp: CHANGED });
+  });
+
+  it("keeps the records with their change date, and says so, when the lookup fails", async () => {
+    const fetchMock = serve([besluit("b0000000-0000-4000-8000-000000000001", AGENDAPUNT_A)], () => new Response("", { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const payload = await callTool("tweede_kamer_search", { entity: "Besluit", top: 1 });
+
+    expect(payload.error).toBeUndefined();
+    expect(payload.records).toHaveLength(1);
+    expect(payload.records[0].date).toBe(CHANGED);
+    expect(payload.records[0].data.vergaderdatum).toBeNull();
+    expect(payload.access_note).toContain("De vergaderdatum kon niet (voor alle records) worden opgehaald");
+    expect(payload.access_note).toContain("wijzigingsdatum (GewijzigdOp)");
+  });
+
+  it("does not look up a record without a meeting and says which date it shows", async () => {
+    const fetchMock = serve([besluit("b0000000-0000-4000-8000-000000000001", null)], () => jsonResponse({ value: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const payload = await callTool("tweede_kamer_search", { entity: "Besluit", top: 1 });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(payload.records[0].date).toBe(CHANGED);
+    expect(payload.records[0].data.vergaderdatum).toBeNull();
+    expect(payload.access_note).toContain("Bij alle records is geen vergaderdatum bekend");
+  });
+
+  it("leaves other entities without a meeting-date lookup", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ "@odata.count": 1, value: [{ Id: "f-1", NaamNL: "Fractie", Afkorting: "F", GewijzigdOp: CHANGED }] }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const payload = await callTool("tweede_kamer_search", { entity: "Fractie", top: 1 });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(payload.records[0].date).toBe(CHANGED);
+    expect(payload.records[0].data.vergaderdatum).toBeUndefined();
+  });
+});
+
 describe("tweede_kamer_votes", () => {
   const BESLUIT_ID = "c32bfbe5-f046-48f3-bd56-4a074d4a5ae7";
   const besluit = {

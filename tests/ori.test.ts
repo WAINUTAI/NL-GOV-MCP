@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  apiMeetingCheck,
   buildOriCatalogue,
   dedupeOriItems,
   documentLink,
@@ -8,8 +9,10 @@ import {
   hasOriQuerySyntax,
   indexToGemeente,
   LIST_DATE_TYPE,
-  operatorWordsToSyntax,
+  meetingPage,
   parseBestuurslaag,
+  quoteOperatorWords,
+  recordProvenance,
   resolveOriScope,
   toOriItem,
   toQueryStringSyntax,
@@ -317,21 +320,30 @@ describe("hasOriQuerySyntax", () => {
   });
 });
 
-describe("operatorWordsToSyntax", () => {
-  it("reads or/and/not between two terms as the operator", () => {
-    expect(operatorWordsToSyntax("ov or fietsen")).toEqual({ query: "ov OR fietsen", changed: true });
-    expect(operatorWordsToSyntax("ov not stadsregio")).toEqual({ query: "ov NOT stadsregio", changed: true });
-    expect(operatorWordsToSyntax("parkeren and fietsen").query).toBe("parkeren AND fietsen");
-    expect(operatorWordsToSyntax("ov Or fietsen").query).toBe("ov OR fietsen");
+describe("quoteOperatorWords", () => {
+  it("keeps a lowercase or/and/not a search word, quoted, and reports the ones between two terms", () => {
+    expect(quoteOperatorWords("instemming or reorganisatie")).toEqual({ query: 'instemming "or" reorganisatie', quoted: ["or"], between: ["or"] });
+    expect(quoteOperatorWords("parkeren and fietsen").query).toBe('parkeren "and" fietsen');
+    expect(quoteOperatorWords("afvalinzameling not stikstof").query).toBe('afvalinzameling "not" stikstof');
+    expect(quoteOperatorWords("woningbouw Or jeugdzorg")).toMatchObject({ query: 'woningbouw "Or" jeugdzorg', between: ["Or"] });
   });
 
-  it("leaves them alone at the edges, inside a phrase, and when already uppercase", () => {
-    expect(operatorWordsToSyntax("not applicable").changed).toBe(false);
-    expect(operatorWordsToSyntax("ov or").changed).toBe(false);
-    expect(operatorWordsToSyntax('"black or white" beleid').changed).toBe(false);
-    expect(operatorWordsToSyntax('"zwart" or wit').query).toBe('"zwart" OR wit');
-    expect(operatorWordsToSyntax("OV OR fietsen")).toEqual({ query: "OV OR fietsen", changed: false });
-    expect(operatorWordsToSyntax("woningbouw organisatie").changed).toBe(false);
+  it("quotes them at the edges too, without reporting them as ambiguous", () => {
+    expect(quoteOperatorWords("or personeelsbeleid")).toEqual({ query: '"or" personeelsbeleid', quoted: ["or"], between: [] });
+    expect(quoteOperatorWords("fietspaden or")).toEqual({ query: 'fietspaden "or"', quoted: ["or"], between: [] });
+    expect(quoteOperatorWords("not")).toEqual({ query: '"not"', quoted: ["not"], between: [] });
+  });
+
+  it("leaves uppercase operators, phrases and other words alone", () => {
+    expect(quoteOperatorWords("parkeren OR fietsen")).toEqual({ query: "parkeren OR fietsen", quoted: [], between: [] });
+    expect(quoteOperatorWords("(parkeren OR fietsen) NOT stikstof").query).toBe("(parkeren OR fietsen) NOT stikstof");
+    expect(quoteOperatorWords('"fietsen or wandelen" beleid').query).toBe('"fietsen or wandelen" beleid');
+    expect(quoteOperatorWords('"fietsen" or wandelen').query).toBe('"fietsen" "or" wandelen');
+    expect(quoteOperatorWords("woningbouw organisatie notulen android").quoted).toEqual([]);
+  });
+
+  it("does not count an uppercase operator next to it as a term", () => {
+    expect(quoteOperatorWords("parkeren OR or").between).toEqual([]);
   });
 });
 
@@ -354,6 +366,176 @@ describe("fallbackIndexPatterns", () => {
 });
 
 const NOW = Date.parse("2026-10-03T10:00:00Z");
+
+/** ORI's provenance block of a record (was_generated_by), as the search returns it. */
+function provenanceOf(system: string, kind: string, fields: Record<string, string>) {
+  return { was_generated_by: { same_as: `https://openbesluitvorming.nl/voc/mapping/x/${system}/${kind}/1`, ...fields } };
+}
+
+const IBABS_MEETING_ID = "0a1b2c3d-0000-4000-8000-000000000001";
+const IBABS_ITEM_ID = "0a1b2c3d-0000-4000-8000-0000000000a1";
+
+describe("recordProvenance", () => {
+  it("reads the council information system and its ids from ORI's provenance block", () => {
+    expect(recordProvenance(provenanceOf("notubiz", "meeting", { original_identifier: "1400001", had_primary_source: "https://api.notubiz.nl/events/meetings/1400001" }))).toEqual({
+      system: "notubiz",
+      originalId: "1400001",
+      referenceId: "",
+      used: "",
+      primarySource: "https://api.notubiz.nl/events/meetings/1400001",
+    });
+  });
+
+  it("copes with a record without one", () => {
+    expect(recordProvenance({ name: "x" }).system).toBe("");
+    expect(recordProvenance(undefined).originalId).toBe("");
+  });
+});
+
+describe("meetingPage", () => {
+  const ibabs = (site: string) =>
+    recordProvenance(
+      provenanceOf("ibabs", "meeting", {
+        original_identifier: IBABS_MEETING_ID,
+        used: `https://api.openraadsinformatie.nl/v1/resolve/ibabs/GetMeetingsByDateRange/Sitename%3D${site}/StartDate%3D2026-06-09T00%3A00%3A00/EndDate%3D2026-06-11T00%3A00%3A00`,
+      }),
+    );
+
+  it("builds the iBabs page from the sitename ORI read the meeting with, anchored on an agenda item", () => {
+    const page = `https://noordholland.bestuurlijkeinformatie.nl/Agenda/Index/${IBABS_MEETING_ID}`;
+    expect(meetingPage("osi_noord-holland_20250720165905", ibabs("Noord-holland"))).toEqual({ page, url: page, system: "iBabs" });
+    const item = recordProvenance(provenanceOf("ibabs", "agenda_item", { reference_identifier: IBABS_ITEM_ID }));
+    expect(meetingPage("osi_noord-holland_20250720165905", ibabs("Noord-holland"), item)?.url).toBe(`${page}#${IBABS_ITEM_ID}`);
+    expect(meetingPage("ori_mook_en_middelaar_20250527041503", ibabs("Mook%20en%20Middelaar"))?.page).toBe(
+      `https://mookenmiddelaar.bestuurlijkeinformatie.nl/Agenda/Index/${IBABS_MEETING_ID}`,
+    );
+  });
+
+  it("builds the Notubiz page on the organisation's own site, anchored on an agenda item", () => {
+    const meeting = recordProvenance(provenanceOf("notubiz", "meeting", { original_identifier: "1400001" }));
+    const item = recordProvenance(provenanceOf("notubiz", "agenda_item", { reference_identifier: "9900001" }));
+    expect(meetingPage("ori_eindhoven_20250413114006", meeting, item)).toEqual({
+      page: "https://eindhoven.raadsinformatie.nl/vergadering/1400001",
+      url: "https://eindhoven.raadsinformatie.nl/vergadering/1400001#ai_9900001",
+      system: "Notubiz",
+    });
+    // Labels the slug does not predict, the layer's domain, and the twin of a
+    // site Notubiz publishes under its bot-checked notubiz.nl.
+    expect(meetingPage("ori_den_bosch_20250407152804", meeting)?.page).toBe("https://s-hertogenbosch.raadsinformatie.nl/vergadering/1400001");
+    expect(meetingPage("osi_zuid_holland_20250604055220", meeting)?.page).toBe("https://pzh.stateninformatie.nl/vergadering/1400001");
+    expect(meetingPage("owi_waterschap_amstel_gooi_en_vecht_20250610045825", meeting)?.page).toBe("https://agv.waterschapsinformatie.nl/vergadering/1400001");
+    expect(meetingPage("ori_hoeksche_waard_20250420212403", meeting)?.page).toBe("https://hoekschewaard.raadsinformatie.nl/vergadering/1400001");
+    // A page that can be checked itself needs no API.
+    expect(meetingPage("ori_eindhoven_20250413114006", meeting)?.api).toBeUndefined();
+  });
+
+  it("links Haarlem to the page Notubiz publishes and has the Notubiz API confirm the meeting", () => {
+    // gemeentebestuur.haarlem.nl is a retired site: every /vergadering/<id> is "Pagina niet gevonden".
+    const meeting = recordProvenance(provenanceOf("notubiz", "meeting", { original_identifier: "1400001" }));
+    const item = recordProvenance(provenanceOf("notubiz", "agenda_item", { reference_identifier: "9900001" }));
+    expect(meetingPage("ori_haarlem_20250416182404", meeting, item)).toEqual({
+      page: "https://gemeentebestuur-haarlem.notubiz.nl/vergadering/1400001",
+      url: "https://gemeentebestuur-haarlem.notubiz.nl/vergadering/1400001#ai_9900001",
+      system: "Notubiz",
+      api: "https://api.notubiz.nl/events/meetings/1400001?format=json&version=1.17.0",
+    });
+  });
+
+  it("has the GemeenteOplossingen API name the page, on the host ORI read the meeting from", () => {
+    const meeting = recordProvenance(
+      provenanceOf("gemeenteoplossingen", "meeting", {
+        original_identifier: "5000",
+        used: "https://api.openraadsinformatie.nl/v1/resolve/gemeenteoplossingen/gemeenteraad.groningen.nl/api/v1/meetings%3Fdate_from%3D1782864000%26date_to%3D1783036800",
+      }),
+    );
+    const item = recordProvenance(provenanceOf("gemeenteoplossingen", "agenda_item", { reference_identifier: "38000" }));
+    const expected = { page: "", url: "", system: "GemeenteOplossingen", api: "https://gemeenteraad.groningen.nl/api/v1/meetings/5000" };
+    expect(meetingPage("ori_groningen_20250329064314", meeting)).toEqual(expected);
+    // Its pages have no anchor per agenda item: an agenda item gets its meeting's page.
+    expect(meetingPage("ori_groningen_20250329064314", meeting, item)).toEqual(expected);
+    // An empty path segment ("api//v1") does not matter; the host does.
+    const doubled = recordProvenance(provenanceOf("gemeenteoplossingen", "meeting", { original_identifier: "5000", used: "https://api.openraadsinformatie.nl/v1/resolve/gemeenteoplossingen/gemeenteraad.groningen.nl/api//v1/meetings" }));
+    expect(meetingPage("ori_groningen_20250329064314", doubled)?.api).toBe("https://gemeenteraad.groningen.nl/api/v1/meetings/5000");
+  });
+
+  it("asks only the GemeenteOplossingen host it knows for the index, whatever host ORI's data names", () => {
+    const via = (host: string) =>
+      recordProvenance(
+        provenanceOf("gemeenteoplossingen", "meeting", {
+          original_identifier: "5000",
+          used: `https://api.openraadsinformatie.nl/v1/resolve/gemeenteoplossingen/${host}/api/v1/meetings`,
+        }),
+      );
+    // Addresses and names inside a network, and a public site that is not this council's.
+    for (const host of ["10.0.0.5", "169.254.169.254", "127.0.0.1", "localhost.localdomain", "intranet.local", "metadata.internal", "gemeenteraad.voorbeeld.nl", "raad.dordrecht.nl"]) {
+      expect(meetingPage("ori_groningen_20250329064314", via(host)), host).toBeUndefined();
+    }
+    // The host is right for its own index, and only there; an index not in the table gets no lookup.
+    expect(meetingPage("ori_dordrecht_20250328033305", via("raad.dordrecht.nl"))?.api).toBe("https://raad.dordrecht.nl/api/v1/meetings/5000");
+    expect(meetingPage("ori_voorbeeldstad_20250101000000", via("gemeenteraad.voorbeeld.nl"))).toBeUndefined();
+  });
+
+  it("builds the Parlaeus page from the meeting named in ORI's source request, also for an agenda item", () => {
+    const item = recordProvenance(
+      provenanceOf("parlaeus", "meeting", {
+        reference_identifier: "11112222333344445555666677778888",
+        had_primary_source: "https://voorbeeld.parlaeus.nl/receive/opendata?fn=agenda_detail&agid=aaaabbbbccccddddeeeeffff00001111",
+      }),
+    );
+    expect(meetingPage("ori_maastricht_20250408232130", item)).toEqual({
+      page: "https://voorbeeld.parlaeus.nl/user/agenda/action=view/ag=aaaabbbbccccddddeeeeffff00001111",
+      url: "https://voorbeeld.parlaeus.nl/user/agenda/action=view/ag=aaaabbbbccccddddeeeeffff00001111",
+      system: "Parlaeus",
+    });
+  });
+
+  it("derives nothing it cannot build reliably", () => {
+    // A GemeenteOplossingen meeting without the host ORI read it from, or with an id that is not a number.
+    expect(meetingPage("ori_groningen_20250329064314", recordProvenance(provenanceOf("gemeenteoplossingen", "meeting", { original_identifier: "5000" })))).toBeUndefined();
+    expect(meetingPage("ori_groningen_20250329064314", recordProvenance(provenanceOf("gemeenteoplossingen", "meeting", { original_identifier: "x", used: "https://api.openraadsinformatie.nl/v1/resolve/gemeenteoplossingen/gemeenteraad.groningen.nl/api/v1/meetings" })))).toBeUndefined();
+    // A Notubiz index whose meetings Notubiz no longer has, or that is not in the table.
+    expect(meetingPage("ori_leiden_20250424224414", recordProvenance(provenanceOf("notubiz", "meeting", { original_identifier: "1400001" })))).toBeUndefined();
+    // Ids that do not have the system's shape.
+    expect(meetingPage("ori_eindhoven_20250413114006", recordProvenance(provenanceOf("notubiz", "meeting", { original_identifier: "abc" })))).toBeUndefined();
+    expect(meetingPage("osi_noord-holland_20250720165905", recordProvenance(provenanceOf("ibabs", "meeting", { original_identifier: "1400001", used: "https://x/Sitename%3DNoord-holland/" })))).toBeUndefined();
+    expect(meetingPage("osi_noord-holland_20250720165905", recordProvenance(provenanceOf("ibabs", "meeting", { original_identifier: IBABS_MEETING_ID })))).toBeUndefined();
+    expect(meetingPage("ori_eindhoven_20250413114006", recordProvenance({}))).toBeUndefined();
+  });
+});
+
+describe("apiMeetingCheck", () => {
+  const go = { page: "", url: "", system: "GemeenteOplossingen", api: "https://gemeenteraad.voorbeeld.nl/api/v1/meetings/5000" };
+  const haarlem = {
+    page: "https://gemeentebestuur-haarlem.notubiz.nl/vergadering/1400001",
+    url: "https://gemeentebestuur-haarlem.notubiz.nl/vergadering/1400001",
+    system: "Notubiz",
+    api: "https://api.notubiz.nl/events/meetings/1400001?format=json&version=1.17.0",
+  };
+
+  it("takes the page GemeenteOplossingen names for the meeting", () => {
+    const fullUrl = "https://gemeenteraad.voorbeeld.nl/Vergaderingen/Commissie-Woningbouw/2026/1-juli/15:00";
+    expect(apiMeetingCheck(go, { id: 5000, confidential: false, fullUrl })).toEqual({ ok: true, url: fullUrl });
+  });
+
+  it("rejects a GemeenteOplossingen answer about another meeting, a closed one, or a page elsewhere", () => {
+    const fullUrl = "https://gemeenteraad.voorbeeld.nl/Vergaderingen/Raad/2026/1-juli/15:00";
+    expect(apiMeetingCheck(go, { id: 5001, fullUrl }).ok).toBe(false);
+    expect(apiMeetingCheck(go, { id: 5000, confidential: true, fullUrl })).toEqual({ ok: false, reason: "besloten vergadering" });
+    expect(apiMeetingCheck(go, { id: 5000, fullUrl: "https://elders.example/Vergaderingen/Raad" }).ok).toBe(false);
+    expect(apiMeetingCheck(go, { id: 5000, fullUrl: "http://gemeenteraad.voorbeeld.nl/Vergaderingen/Raad" }).ok).toBe(false);
+    expect(apiMeetingCheck(go, { id: 5000, fullUrl: "/Vergaderingen/Raad" }).ok).toBe(false);
+    expect(apiMeetingCheck(go, undefined).ok).toBe(false);
+    expect(apiMeetingCheck(go, [1, 2]).ok).toBe(false);
+  });
+
+  it("confirms a Notubiz meeting that the API has, public and on the linked site", () => {
+    expect(apiMeetingCheck(haarlem, { meeting: { id: 1400001, confidential: 0, url: "https://gemeentebestuur-haarlem.notubiz.nl/vergadering/1400001/Raad" } })).toEqual({ ok: true });
+    expect(apiMeetingCheck(haarlem, { meeting: { id: 1400001, confidential: 1 } })).toEqual({ ok: false, reason: "besloten vergadering" });
+    expect(apiMeetingCheck(haarlem, { meeting: { id: 1400001, url: "https://elders.notubiz.nl/vergadering/1400001" } }).ok).toBe(false);
+    expect(apiMeetingCheck(haarlem, { meeting: { id: 1400002 } }).ok).toBe(false);
+    expect(apiMeetingCheck(haarlem, { id: 1400001 }).ok).toBe(false);
+  });
+});
 
 describe("toOriItem", () => {
   it("links a document to its file and keeps the source system URL", () => {
@@ -403,6 +585,24 @@ describe("toOriItem", () => {
     expect(item.link_type).toBe("ori_record");
     expect(item.link_note).toContain("Geen openbare webpagina");
     expect(item.snippet).toBe("Agendapunt — vergaderdatum 2026-07-07");
+  });
+
+  it("names the system of a GemeenteOplossingen meeting while it still links to its ORI record", () => {
+    const item = toOriItem(
+      {
+        _index: "ori_groningen_20250415000000",
+        _id: "7800001",
+        _source: { "@id": "7800001", "@type": "Meeting", name: "Commissie Fietspaden", last_discussed_at: "2026-06-03T19:30:00+00:00", ...provenanceOf("gemeenteoplossingen", "meeting", { original_identifier: "5000" }) },
+      },
+      catalogue,
+      NOW,
+    );
+    expect(item.link_type).toBe("ori_record");
+    expect(item.url).toBe("https://api.openraadsinformatie.nl/v1/elastic/ori_groningen/_doc/7800001");
+    expect(item.source_system).toBe("GemeenteOplossingen");
+    // The page is looked up during the search (OriSource); a record on its own has none.
+    expect(item.link_note).toContain("Geen openbare webpagina bekend");
+    expect(item.link_note).toContain("JSON uit de ORI-API, geen webpagina");
   });
 
   it("uses the stable alias in record links and the catalogue name", () => {

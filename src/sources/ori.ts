@@ -1,6 +1,7 @@
 import type { AppConfig } from "../types.js";
 import { getJson, postJson, SourceRequestError } from "../utils/http.js";
 import { htmlToText } from "../utils/html-text.js";
+import { logger } from "../utils/logger.js";
 import { placeKey, placeVariants } from "../utils/place-aliases.js";
 
 /**
@@ -93,14 +94,59 @@ const MAX_ATTACHMENT_LOOKUP = 100;
 const MAX_ATTACHMENTS_PER_RECORD = 5;
 
 /**
+ * Where a record came from in the council information system: ORI's mapping
+ * URI names the system ("…/voc/mapping/<slug>/notubiz/meeting/<id>"),
+ * original_identifier is a meeting's id there, reference_identifier an agenda
+ * item's, `used`/had_primary_source the request ORI read it from.
+ */
+const PROVENANCE_FIELDS = [
+  "was_generated_by.same_as", "was_generated_by.original_identifier", "was_generated_by.reference_identifier",
+  "was_generated_by.used", "was_generated_by.had_primary_source",
+];
+/** What the meeting of an agenda item is looked up with: its type, its own parent, and the ids of its page. */
+const ANCESTOR_FIELDS = ["@type", "parent", ...PROVENANCE_FIELDS];
+/** Levels of agenda items above an agenda item that are followed to reach its meeting. */
+const MAX_AGENDA_NESTING = 2;
+/**
+ * A meeting page is checked before it becomes the link; this many per search
+ * at most, this many at a time. An iBabs page takes 0.6-1.6 s to answer a HEAD,
+ * also ten at a time on one site, so twenty fit in two rounds.
+ */
+const MAX_PAGE_CHECKS = 20;
+const PAGE_CHECK_CONCURRENCY = 10;
+const PAGE_CHECK_TIMEOUT_MS = 2_500;
+/**
+ * A search waits at most this long, counted from when ORI answered, for the
+ * meeting pages; what is not checked by then keeps its ORI record. Without it a
+ * slow portal platform held a search up for rounds of check timeouts.
+ */
+const PAGE_LINK_BUDGET_MS = 3_000;
+/**
+ * A host that did not answer this many checks in a row is left alone for
+ * PAGE_HOST_COOLDOWN_MS, so the next searches do not wait for it again. One
+ * miss is not enough: a single large meeting page can be slow on a working site.
+ */
+const PAGE_HOST_MISSES = 2;
+const PAGE_HOST_COOLDOWN_MS = 2 * 60 * 1000;
+/** After the pause, how long past its timeout the one check that asks the host again keeps the host's other checks out. */
+const PAGE_PROBE_MARGIN_MS = 1_000;
+/** A page that answered (or answered with an error) is not asked again for a day; one that did not answer, for ten minutes. */
+const PAGE_CHECK_TTL_MS = 24 * 60 * 60 * 1000;
+const PAGE_CHECK_RETRY_MS = 10 * 60 * 1000;
+const PAGE_CHECK_CACHE_MAX = 5_000;
+/** An API answer about one meeting is a few kB up to a few hundred; anything far larger is not read. */
+const PAGE_API_MAX_BYTES = 5 * 1024 * 1024;
+const PAGE_CHECK_USER_AGENT = "nl-gov-mcp/0.1.0";
+
+/**
  * Only these fields come back in `_source`. Everything heavy (`text`, `md_text`,
- * `text_pages`, `@context`, `was_generated_by`, member lists) stays upstream;
+ * `text_pages`, `@context`, the rest of `was_generated_by`, member lists) stays upstream;
  * the snippet is cut server-side by the highlighter instead.
  */
 const SOURCE_FIELDS = [
   "@id", "@type", "name", "title", "file_name", "url", "original_url", "content_type",
   "size_in_bytes", "last_discussed_at", "start_date", "date_modified", "description",
-  "classification", "attachment",
+  "classification", "attachment", "parent", ...PROVENANCE_FIELDS,
 ];
 
 /** ORI's top-level Organization record is wrong for this index (Noordwijkerhout merged into Noordwijk in 2019). */
@@ -482,31 +528,35 @@ export function hasOriQuerySyntax(query: string): boolean {
   return /(^|\s)(AND|OR|NOT)(?=\s|$)|&&|\|\||["*()]|(^|\s)[+-](?=[\p{L}\p{N}"(])/u.test(query);
 }
 
-const OPERATOR_WORDS: Record<string, string> = { or: "OR", and: "AND", not: "NOT" };
-
 /**
- * "ov or fietsen": with every word required, a lowercase operator word is a
- * required term of its own ("or"), which narrows an OR query to junk and turns
- * NOT around. Between two terms and outside a quoted phrase, "or", "and" and
- * "not" (any case) are therefore read as the operator. None of them is a Dutch
- * word; elsewhere they stay words.
+ * Only the explicit syntax is an operator: uppercase AND/OR/NOT (and && / ||),
+ * as the tool description documents and as Lucene itself reads the query. A
+ * lowercase (or mixed-case) "or", "and" or "not" is a word the caller searches
+ * for — nl_gov_ask keeps the acronym OR (ondernemingsraad) as the topic word
+ * "or", so "instemming or reorganisatie" must stay three terms instead of
+ * becoming "instemming OR reorganisatie". Outside a quoted phrase such a word
+ * is quoted, which keeps it a term whatever reads the query next.
+ *
+ * `between` lists the words that stood between two terms: there the caller may
+ * have meant the operator, so the search says how it read them.
  */
-export function operatorWordsToSyntax(query: string): { query: string; changed: boolean } {
+export function quoteOperatorWords(query: string): { query: string; quoted: string[]; between: string[] } {
   const parts = query.split(/(\s+)/);
   const isTerm = (p: string | undefined) => Boolean(p && p.trim() && !/^(AND|OR|NOT|&&|\|\|)$/.test(p));
   let inPhrase = false;
-  let changed = false;
+  const quoted: string[] = [];
+  const between: string[] = [];
   for (let i = 0; i < parts.length; i += 1) {
     const part = parts[i];
     if (!part.trim()) continue;
-    const word = part.toLowerCase();
-    if (!inPhrase && OPERATOR_WORDS[word] && part !== OPERATOR_WORDS[word] && isTerm(parts[i - 2]) && isTerm(parts[i + 2])) {
-      parts[i] = OPERATOR_WORDS[word];
-      changed = true;
+    if (!inPhrase && /^(and|or|not)$/i.test(part) && part !== part.toUpperCase()) {
+      parts[i] = `"${part}"`;
+      quoted.push(part);
+      if (isTerm(parts[i - 2]) && isTerm(parts[i + 2])) between.push(part);
     }
     if ((part.match(/"/g) ?? []).length % 2 === 1) inPhrase = !inPhrase;
   }
-  return { query: parts.join(""), changed };
+  return { query: parts.join(""), quoted, between };
 }
 
 function rangeBound(value: string): string {
@@ -617,6 +667,235 @@ interface AttachmentLink {
 /** date_type of a document dated by an iBabs report list rather than by a meeting. */
 export const LIST_DATE_TYPE = "lijstdatum (iBabs-rapportlijst)";
 
+/* ------------------------------------------------------------------ */
+/*  Meeting pages                                                      */
+/* ------------------------------------------------------------------ */
+
+/** Council information systems as ORI's mapping URIs name them, and as a reader knows them. */
+const SYSTEM_NAMES: Record<string, string> = {
+  ibabs: "iBabs",
+  notubiz: "Notubiz",
+  parlaeus: "Parlaeus",
+  gemeenteoplossingen: "GemeenteOplossingen",
+};
+
+/** Notubiz serves each organisation under one host per layer; NOTUBIZ_HOSTS holds the label in front of it. */
+const NOTUBIZ_DOMAIN: Record<OriPrefix, string> = {
+  ori_: "raadsinformatie.nl",
+  osi_: "stateninformatie.nl",
+  owi_: "waterschapsinformatie.nl",
+};
+
+/**
+ * Notubiz site per ORI index (without timestamp), from the meeting links
+ * Notubiz itself publishes (api.notubiz.nl, meeting.url), checked 2026-10-03
+ * against a meeting of every Notubiz index. A label is completed with the
+ * layer's domain (NOTUBIZ_DOMAIN); a value with a dot is a whole host. Sites
+ * that Notubiz publishes under notubiz.nl sit behind a bot check there, so
+ * their twin under the layer's domain is used, which serves the same pages.
+ * The slugs do not predict the labels ("den_bosch" is "s-hertogenbosch",
+ * "amsterdam_west" is "west", "zuid_holland" is "pzh"), hence a table.
+ * Purmerend, Leiden, Dongen and Oegstgeest are missing: Notubiz no longer has
+ * their meetings.
+ *
+ * Haarlem has no such twin (haarlem.raadsinformatie.nl redirects to
+ * notubiz.nl), and gemeentebestuur.haarlem.nl is a retired site that answers
+ * every path with a bot-check page and, past it, "Pagina niet gevonden". Its
+ * meetings therefore link to the notubiz.nl page Notubiz publishes, which works
+ * in a browser but answers a check with the bot check; whether the meeting is
+ * public there is asked of the Notubiz API instead (see meetingPage).
+ */
+const NOTUBIZ_HOSTS: Record<string, string> = {
+  ori_alkmaar: "alkmaar", ori_almere: "almere", "ori_alphen-chaam": "alphen-chaam", ori_altena: "altena",
+  ori_amersfoort: "amersfoort", ori_amsterdam: "amsterdam", ori_amsterdam_centrum: "centrum",
+  "ori_amsterdam_nieuw-west": "nieuw-west", ori_amsterdam_noord: "noord", ori_amsterdam_oost: "oost",
+  ori_amsterdam_west: "west", ori_amsterdam_zuid: "zuid", ori_amsterdam_zuidoost: "zuidoost",
+  ori_baarle_nassau: "baarle-nassau", ori_baarn: "baarn", ori_barendrecht: "barendrecht",
+  ori_berg_en_dal: "bergendal", ori_bergen: "bergen", ori_best: "best", ori_binnenmaas: "binnenmaas",
+  ori_blaricum: "blaricum", ori_borsele: "borsele", ori_breda: "breda", ori_brielle: "brielle",
+  ori_brummen: "brummen", ori_bunschoten: "bunschoten", ori_capelle_ad_ijssel: "capelleaandenijssel",
+  ori_castricum: "castricum", ori_de_ronde_venen: "derondevenen", ori_de_wolden: "dewolden", ori_delft: "delft",
+  ori_den_bosch: "s-hertogenbosch", ori_den_haag: "denhaag", ori_deventer: "deventer",
+  ori_drechterland: "drechterland", ori_ede: "ede", ori_eemnes: "eemnes", ori_eindhoven: "eindhoven",
+  ori_enkhuizen: "enkhuizen", ori_epe: "epe", ori_ermelo: "ermelo", ori_gilze_en_rijen: "gilzerijen",
+  ori_goes: "goes", ori_haaksbergen: "haaksbergen", ori_haarlem: "gemeentebestuur-haarlem.notubiz.nl",
+  ori_hardenberg: "hardenberg", ori_heemskerk: "heemskerk", ori_hellendoorn: "hellendoorn", ori_helmond: "helmond",
+  "ori_hendrik-ido-ambacht": "hendrikidoambacht", ori_het_hogeland: "hethogeland", ori_heumen: "heumen",
+  ori_hilvarenbeek: "hilvarenbeek", ori_hoeksche_waard: "hoekschewaard", ori_hoogeveen: "hoogeveen",
+  ori_horst_aan_de_maas: "horstaandemaas", ori_hulst: "hulst", ori_ijsselstein: "ijsselstein", ori_kapelle: "kapelle",
+  ori_katwijk: "katwijk", ori_krimpen_ad_ijssel: "krimpenaandenijssel", ori_landgraaf: "landgraaf",
+  ori_laren: "laren", ori_lochem: "lochem", ori_maasdriel: "maasdriel", ori_maassluis: "maassluis",
+  ori_middelburg: "middelburg", "ori_midden-groningen": "midden-groningen", "ori_neder-betuwe": "neder-betuwe",
+  ori_nissewaard: "nissewaard", ori_nuenen: "nuenen", ori_nunspeet: "nunspeet", ori_oisterwijk: "oisterwijk",
+  ori_oldenzaal: "oldenzaal", ori_ommen: "ommen", ori_oost_gelre: "oost-gelre",
+  ori_pijnacker_nootdorp: "pijnacker-nootdorp", ori_putten: "putten", ori_renswoude: "renswoude",
+  ori_rhenen: "rhenen", ori_rucphen: "rucphen", ori_schagen: "schagen", ori_schiedam: "schiedam",
+  ori_schouwen_duiveland: "schouwenduiveland", ori_sint_michielsgestel: "sint-michielsgestel",
+  ori_smallingerland: "smallingerland", ori_someren: "someren", ori_son_en_breugel: "sonenbreugel",
+  ori_stede_broec: "stedebroec", ori_sudwest_fryslan: "sudwestfryslan", ori_terneuzen: "terneuzen",
+  ori_tilburg: "tilburg", ori_veendam: "veendam", ori_veenendaal: "veenendaal", ori_veldhoven: "veldhoven",
+  ori_venray: "venray", ori_vlaardingen: "vlaardingen", ori_vlissingen: "vlissingen",
+  ori_voorne_aan_zee: "voorneaanzee", ori_voorst: "voorst", ori_waalwijk: "waalwijk", ori_waddinxveen: "waddinxveen",
+  ori_wageningen: "wageningen", ori_weesp: "weesp", ori_west_maas_en_waal: "westmaasenwaal",
+  ori_westvoorne: "westvoorne", ori_wijdemeren: "wijdemeren", ori_wijk_bij_duurstede: "wijkbijduurstede",
+  ori_zaanstad: "zaanstad", ori_zaltbommel: "zaltbommel", ori_zandvoort: "zandvoort", ori_zeist: "zeist",
+  ori_zuidplas: "zuidplas", ori_zundert: "zundert", ori_zwartewaterland: "zwartewaterland",
+  osi_flevoland: "flevoland", osi_fryslan: "fryslan", osi_groningen: "groningen", osi_overijssel: "overijssel",
+  osi_zuid_holland: "pzh", owi_scheldestromen: "scheldestromen", owi_waterschap_amstel_gooi_en_vecht: "agv",
+  owi_wetterskip_fryslan: "wetterskipfryslan",
+};
+
+/**
+ * GemeenteOplossingen site per ORI index (without timestamp): the host ORI
+ * read the index's meetings from, checked 2026-10-03 on the newest, the oldest
+ * and a few more meetings of every index (34 indices, one host each). The
+ * check of a meeting asks that host's API, so the host is not taken from ORI's
+ * data as it stands: a meeting is only looked up when ORI names the host this
+ * table holds for its index. Otherwise any host in that data (an IP address,
+ * localhost, an internal name) would get a request from the server.
+ */
+const GEMEENTEOPLOSSINGEN_HOSTS: Record<string, string> = {
+  ori_alblasserdam: "raad.alblasserdam.nl", ori_albrandswaard: "raad.albrandswaard.nl",
+  ori_beemster: "beemsterraadsinformatie.purmerend.nl", ori_bergen_nh: "www.raadbergen-nh.nl",
+  ori_bloemendaal: "gemeenteraad.bloemendaal.nl", ori_den_helder: "gemeenteraad.denhelder.nl",
+  ori_dinkelland: "gemeenteraad.dinkelland.nl", ori_doetinchem: "besluitvorming.doetinchem.nl",
+  ori_dordrecht: "raad.dordrecht.nl", ori_dronten: "gemeenteraad.dronten.nl", ori_goirle: "raad.goirle.nl",
+  ori_groningen: "gemeenteraad.groningen.nl", ori_halderberge: "gemeenteraad.halderberge.nl",
+  "ori_hardinxveld-giessendam": "raad.hardinxveld-giessendam.nl", ori_heemstede: "gemeentebestuur.heemstede.nl",
+  ori_hillegom: "gemeenteraad.hillegom.nl", ori_hofvantwente: "gemeenteraad.hofvantwente.nl",
+  ori_huizen: "ris.gemeenteraadhuizen.nl", ori_leusden: "gemeentebestuur.leusden.nl",
+  ori_noordoostpolder: "raad.noordoostpolder.nl", ori_oude_ijsselstreek: "raad.oude-ijsselstreek.nl",
+  ori_oudewater: "gemeenteraad.oudewater.nl", ori_papendrecht: "raad.papendrecht.nl", ori_renkum: "raad.renkum.nl",
+  ori_ridderkerk: "raad.ridderkerk.nl", ori_roosendaal: "raad.roosendaal.nl", ori_sliedrecht: "raad.sliedrecht.nl",
+  ori_steenbergen: "raad.gemeente-steenbergen.nl", ori_stichtse_vecht: "raadsinformatie.stichtsevecht.nl",
+  ori_tubbergen: "bestuur.tubbergen.nl", ori_venlo: "gemeenteraad.venlo.nl",
+  ori_west_betuwe: "gemeenteraad.westbetuwe.nl", ori_woudenberg: "gemeentebestuur.woudenberg.nl",
+  "osi_provincie-utrecht": "www.stateninformatie.provincie-utrecht.nl",
+};
+
+const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function decodeSafely(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+export interface OriProvenance {
+  /** Council information system as ORI's mapping URI names it: "ibabs", "notubiz", "parlaeus", "gemeenteoplossingen". */
+  system: string;
+  /** A meeting's id in that system. */
+  originalId: string;
+  /** An agenda item's id in that system. */
+  referenceId: string;
+  used: string;
+  primarySource: string;
+}
+
+export function recordProvenance(source: Record<string, unknown> | undefined): OriProvenance {
+  const raw = source?.was_generated_by;
+  const w = (raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {}) as Record<string, unknown>;
+  return {
+    system: /\/voc\/mapping\/[^/]+\/([^/]+)\//.exec(str(w.same_as))?.[1]?.toLowerCase() ?? "",
+    originalId: str(w.original_identifier),
+    referenceId: str(w.reference_identifier),
+    used: str(w.used),
+    primarySource: str(w.had_primary_source),
+  };
+}
+
+export interface MeetingPage {
+  /** The meeting's page; empty for GemeenteOplossingen, whose API names it during the check. */
+  page: string;
+  /** The link: the page, for an agenda item with an anchor on the item where the system has one. */
+  url: string;
+  /** "iBabs", "Notubiz", "Parlaeus" or "GemeenteOplossingen". */
+  system: string;
+  /**
+   * Set when the page cannot be checked itself: the meeting in the system's
+   * API, which is asked instead (GET) and must answer for this meeting.
+   */
+  api?: string;
+}
+
+/** Hostname of a URL, lowercased; "" when it is not one. */
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * The public page of a meeting in the council information system it came
+ * from, built from the ids ORI keeps. `meeting` is the provenance of the
+ * meeting; for an agenda item pass its meeting's provenance plus the item's own
+ * as `item` (a Parlaeus agenda item names its meeting itself). Checked
+ * 2026-10-03 on the newest, the oldest and a random meeting of every index:
+ *
+ *   iBabs     https://<sitename>.bestuurlijkeinformatie.nl/Agenda/Index/<meeting>#<item>
+ *             (sitename from ORI's request, lowercased, spaces and hyphens dropped)
+ *   Notubiz   https://<site>/vergadering/<meeting>#ai_<item>      (site: NOTUBIZ_HOSTS)
+ *   Parlaeus  https://<host>.parlaeus.nl/user/agenda/action=view/ag=<meeting>
+ *
+ * GemeenteOplossingen builds its meeting URLs from the committee's current name,
+ * a date and a time ("/Vergaderingen/<commissie>/2026/1-juli/15:00"), so they
+ * cannot be derived, and its sites answer any path with HTTP 200. Its own API,
+ * on the host ORI read the meeting from (when GEMEENTEOPLOSSINGEN_HOSTS holds
+ * that host for the index), names the page instead:
+ * https://<host>/api/v1/meetings/<meeting> answers `fullUrl` for a meeting it
+ * has and HTTP 500 for one it does not. Its agenda items have no anchor.
+ *
+ * A Notubiz site on notubiz.nl (Haarlem) answers a check with a bot check, so
+ * the meeting is asked of the Notubiz API, which answers 404 for one it no
+ * longer has.
+ *
+ * The pattern is right for the system, but not every meeting is still public
+ * there (removed, closed, moved to another system): about one in ten failed.
+ * The page is therefore checked before it becomes the link (OriSource).
+ */
+export function meetingPage(index: string, meeting: OriProvenance, item?: OriProvenance): MeetingPage | undefined {
+  const base = index.replace(/_\d{8,}$/, "");
+  const prefix = prefixOf(base);
+  if (!prefix) return undefined;
+  if (meeting.system === "ibabs") {
+    const label = decodeSafely(/\/Sitename%3D([^/?#]+)/i.exec(meeting.used)?.[1] ?? "").toLowerCase().replace(/[\s-]+/g, "");
+    if (!/^[a-z0-9]+$/.test(label) || !GUID_RE.test(meeting.originalId)) return undefined;
+    const page = `https://${label}.bestuurlijkeinformatie.nl/Agenda/Index/${meeting.originalId}`;
+    return { page, url: item && GUID_RE.test(item.referenceId) ? `${page}#${item.referenceId}` : page, system: "iBabs" };
+  }
+  if (meeting.system === "notubiz") {
+    const site = NOTUBIZ_HOSTS[base];
+    if (!site || !/^\d+$/.test(meeting.originalId)) return undefined;
+    const host = site.includes(".") ? site : `${site}.${NOTUBIZ_DOMAIN[prefix]}`;
+    const page = `https://${host}/vergadering/${meeting.originalId}`;
+    return {
+      page,
+      url: item && /^\d+$/.test(item.referenceId) ? `${page}#ai_${item.referenceId}` : page,
+      system: "Notubiz",
+      ...(host.endsWith(".notubiz.nl") ? { api: `https://api.notubiz.nl/events/meetings/${meeting.originalId}?format=json&version=1.17.0` } : {}),
+    };
+  }
+  if (meeting.system === "gemeenteoplossingen") {
+    const host = /\/resolve\/gemeenteoplossingen\/([a-z0-9-]+(?:\.[a-z0-9-]+)+)\/api\//i.exec(meeting.used)?.[1]?.toLowerCase();
+    if (!host || host !== GEMEENTEOPLOSSINGEN_HOSTS[base] || !/^\d+$/.test(meeting.originalId)) return undefined;
+    return { page: "", url: "", system: "GemeenteOplossingen", api: `https://${host}/api/v1/meetings/${meeting.originalId}` };
+  }
+  if (meeting.system === "parlaeus") {
+    const m = /^https:\/\/([a-z0-9-]+\.parlaeus\.nl)\/receive\/opendata\?(?:.*&)?agid=([0-9a-f]+)(?:&|$)/i.exec(meeting.primarySource);
+    if (!m) return undefined;
+    const page = `https://${m[1].toLowerCase()}/user/agenda/action=view/ag=${m[2]}`;
+    return { page, url: page, system: "Parlaeus" };
+  }
+  return undefined;
+}
+
+/** What follows a link_note when the link is ORI's record. */
+const ORI_RECORD_TAIL = "de link is het ORI-bronrecord: JSON uit de ORI-API, geen webpagina.";
+
 export function toOriItem(hit: ElasticHit, catalogue: OriCatalogue | undefined, now = Date.now()): OriItem {
   const source = hit._source ?? {};
   const index = hit._index ?? "";
@@ -645,8 +924,12 @@ export function toOriItem(hit: ElasticHit, catalogue: OriCatalogue | undefined, 
   const description = htmlToText(str(source.description));
   const snippet = snippetFromHighlight(hit);
   const label = TYPE_LABELS[type] ?? type;
+  // Meetings and agenda items get their page in the council information system
+  // later, once it answered (OriSource.linkMeetingPages); until then the ORI record.
+  const system = type === "Meeting" || type === "AgendaItem" ? recordProvenance(source).system : "";
+  const recordNote = `Geen openbare webpagina bekend voor dit ORI-record (${label.toLowerCase()}); ${ORI_RECORD_TAIL}`;
   const linkFields: Record<string, string> = !documentUrl
-    ? { link_note: `Geen openbare webpagina voor dit ${label.toLowerCase()} in ORI; de link is het ORI-bronrecord (JSON).` }
+    ? { link_note: recordNote, ...(SYSTEM_NAMES[system] ? { source_system: SYSTEM_NAMES[system] } : {}) }
     : link.viaOriginal
       ? { ori_resolve_url: str(source.url), link_note: VIA_ORIGINAL_NOTE }
       : originalUrl && originalUrl !== documentUrl ? { original_url: originalUrl } : {};
@@ -816,13 +1099,28 @@ function listNames(entries: OriIndexEntry[], max = 8): string {
   return entries.length > max ? `${names.join(", ")} en ${entries.length - max} meer` : names.join(", ");
 }
 
+export interface OriSourceOptions {
+  /** How long a search waits for meeting-page checks (PAGE_LINK_BUDGET_MS). */
+  pageLinkBudgetMs?: number;
+}
+
 export class OriSource {
   private catalogue?: { value: OriCatalogue; expiresAt: number };
   private catalogueLoad?: Promise<OriCatalogue | undefined>;
   private catalogueRetryAt = 0;
   private catalogueLoadStartedAt = 0;
+  /** Outcome of meeting-page checks, by what was checked (see linkMeetingPages). */
+  private readonly pageChecks = new Map<string, { result: PageCheck; expiresAt: number }>();
+  /** Hosts that did not answer their last checks: how many in a row, and until when they are left alone. */
+  private readonly silentHosts = new Map<string, { misses: number; until: number }>();
+  private readonly pageLinkBudgetMs: number;
 
-  constructor(private readonly config: AppConfig) {}
+  constructor(
+    private readonly config: AppConfig,
+    options: OriSourceOptions = {},
+  ) {
+    this.pageLinkBudgetMs = options.pageLinkBudgetMs ?? PAGE_LINK_BUDGET_MS;
+  }
 
   /** hasOriQuerySyntax, reachable for the tool layer through the class. */
   static hasQuerySyntax(query: string): boolean {
@@ -919,12 +1217,16 @@ export class OriSource {
     // --- request ----------------------------------------------------
     const effectiveTo = args.date_to ?? (wantDateSort ? "now" : undefined);
     const dateClause = dateRangeClause(args.date_from, effectiveTo);
-    const operatorWords = operatorWordsToSyntax(query);
-    if (operatorWords.changed) {
-      notes.push("'or', 'and' en 'not' tussen zoektermen zijn gelezen als de operatoren OR, AND en NOT.");
-    }
     // A query that was only operators ("AND") is searched as the plain word.
-    const luceneQuery = toQueryStringSyntax(operatorWords.query) || toQueryStringSyntax(query.toLowerCase());
+    const operatorWords = quoteOperatorWords(toQueryStringSyntax(query) || toQueryStringSyntax(query.toLowerCase()));
+    if (operatorWords.between.length) {
+      const words = [...new Set(operatorWords.between.map((w) => `'${w}'`))];
+      const read = words.length > 1 ? "zijn als zoekwoorden gezocht" : "is als zoekwoord gezocht";
+      notes.push(
+        `${words.join(", ")} tussen zoektermen ${read} (bijv. OR = ondernemingsraad), niet als operator; schrijf OR, AND of NOT in hoofdletters om termen te combineren of uit te sluiten.`,
+      );
+    }
+    const luceneQuery = operatorWords.query;
     const operator = match === "any" ? "OR" : "AND";
     const textClause = (kind: "query_string" | "simple_query_string"): Record<string, unknown> => {
       if (!query) return { match_all: {} };
@@ -1026,10 +1328,23 @@ export class OriSource {
     // --- records ----------------------------------------------------
     const hits: ElasticHit[] = Array.isArray(data.hits?.hits) ? (data.hits?.hits as ElasticHit[]) : [];
     const namingCatalogue = catalogue ?? (await this.catalogueForNaming(cataloguePromise));
-    const mapped = hits.map((hit) => toOriItem(hit, namingCatalogue)).filter((x) => x.id || x.title);
+    const hitOf = new Map<OriItem, ElasticHit>();
+    const mapped = hits
+      .map((hit) => {
+        const item = toOriItem(hit, namingCatalogue);
+        hitOf.set(item, hit);
+        return item;
+      })
+      .filter((x) => x.id || x.title);
     const deduped = dedupeOriItems(mapped);
     const items = deduped.items.slice(0, args.rows);
-    await this.attachAttachments(items, path, pathQuery, notes);
+    // Meeting pages that need no lookup are checked while the attachments and
+    // the meetings of agenda items load. The page checks have a time limit of
+    // their own; the attachments are always waited for, as before.
+    const related = this.attachAttachments(items, path, pathQuery, notes, parentMeetingIds(items, hitOf));
+    const linking = this.linkMeetingPages(items, hitOf, related, path, pathQuery);
+    await related;
+    await linking;
 
     const { total, lowerBound } = describeTotal(data);
 
@@ -1255,19 +1570,27 @@ export class OriSource {
     path: string,
     pathQuery: Record<string, string> | undefined,
     notes: string[],
-  ): Promise<void> {
-    const ids = [...new Set(items.flatMap((x) => (Array.isArray(x.attachment_ids) ? (x.attachment_ids as string[]).slice(0, MAX_ATTACHMENTS_PER_RECORD) : [])))].slice(0, MAX_ATTACHMENT_LOOKUP);
-    if (!ids.length) return;
-    let docs: Map<string, Omit<AttachmentLink, "id">>;
+    meetingIds: string[] = [],
+  ): Promise<Map<string, Record<string, unknown>> | undefined> {
+    const attachmentIds = [...new Set(items.flatMap((x) => (Array.isArray(x.attachment_ids) ? (x.attachment_ids as string[]).slice(0, MAX_ATTACHMENTS_PER_RECORD) : [])))].slice(0, MAX_ATTACHMENT_LOOKUP);
+    // The meetings of agenda items come along in the same request: they hold the ids of the meeting page.
+    const ids = [...new Set([...attachmentIds, ...meetingIds])];
+    if (!ids.length) return new Map();
+    const sources = new Map<string, Record<string, unknown>>();
+    const docs = new Map<string, Omit<AttachmentLink, "id">>();
     try {
       const { data } = await postJson<ElasticResponse>(
         path,
-        { size: ids.length, _source: ["name", "file_name", "url", "original_url"], query: { ids: { values: ids } } },
+        {
+          size: ids.length,
+          _source: ["name", "file_name", "url", "original_url", ...(meetingIds.length ? ANCESTOR_FIELDS : [])],
+          query: { ids: { values: ids } },
+        },
         { connector: CONNECTOR, timeoutMs: 10_000, retries: 0, query: pathQuery },
       );
-      docs = new Map();
       for (const hit of data.hits?.hits ?? []) {
         const s = hit._source ?? {};
+        if (hit._id) sources.set(hit._id, s);
         const original = str(s.original_url);
         const { url, viaOriginal } = documentLink(str(s.url), original);
         // As on a document: the source system's own link travels along as fallback.
@@ -1275,8 +1598,12 @@ export class OriSource {
         if (hit._id && url) docs.set(hit._id, { name: decodeTitle(str(s.name) || str(s.file_name)), url, ...fallback });
       }
     } catch {
-      notes.push("De bijlagen van agendapunten en rapporten konden niet worden opgehaald; die records linken naar hun ORI-bronrecord.");
-      return;
+      notes.push(
+        meetingIds.length
+          ? "De bijlagen en vergaderingen van agendapunten en rapporten konden niet worden opgehaald; die records linken naar hun ORI-bronrecord."
+          : "De bijlagen van agendapunten en rapporten konden niet worden opgehaald; die records linken naar hun ORI-bronrecord.",
+      );
+      return undefined;
     }
     for (const item of items) {
       const attached = (Array.isArray(item.attachment_ids) ? (item.attachment_ids as string[]) : [])
@@ -1293,7 +1620,356 @@ export class OriSource {
         if (attached[0].original_url) item.original_url = attached[0].original_url;
       }
     }
+    return sources;
   }
+
+  /**
+   * Link meetings and agenda items to their page in the council information
+   * system (meetingPage) — but only a page that answers HTTP 200 with HTML when
+   * checked now, or whose meeting the system's API confirms (MeetingPage.api); a
+   * closed, removed or moved meeting keeps its ORI record as the link, with the
+   * reason in link_note. Meetings and Parlaeus agenda items are checked at once;
+   * other agenda items once `related` has brought their meeting.
+   *
+   * The whole step waits at most pageLinkBudgetMs. Records whose check has not
+   * finished by then keep their ORI record ("niet gecontroleerd"); a check
+   * already under way still completes in the background and fills the cache
+   * for the next search, while checks still queued are dropped. The records are
+   * only changed after the wait, so nothing changes once the search returned.
+   */
+  private async linkMeetingPages(
+    items: OriItem[],
+    hitOf: Map<OriItem, ElasticHit>,
+    related: Promise<Map<string, Record<string, unknown>> | undefined>,
+    path: string,
+    pathQuery: Record<string, string> | undefined,
+  ): Promise<void> {
+    const candidates = items.filter((item) => (item.type === "Meeting" || item.type === "AgendaItem") && item.link_type === "ori_record");
+    if (!candidates.length) return;
+
+    const limit = concurrencyLimit(PAGE_CHECK_CONCURRENCY);
+    const checks = new Map<string, Promise<PageCheck | undefined>>();
+    /** Outcomes known so far, by check key; read once the wait is over. */
+    const outcomes = new Map<string, PageCheck>();
+    const overCount = new Set<string>();
+    let budget = MAX_PAGE_CHECKS;
+    let open = true;
+    const check = (page: MeetingPage): void => {
+      const key = checkKey(page);
+      if (checks.has(key) || overCount.has(key)) return;
+      const cached = this.cachedPageCheck(key);
+      if (cached) {
+        outcomes.set(key, cached);
+        checks.set(key, Promise.resolve(cached));
+        return;
+      }
+      if (budget <= 0) {
+        overCount.add(key);
+        return;
+      }
+      budget -= 1;
+      const pending = limit(async () => {
+        // A queued check whose turn comes after the wait is not made.
+        if (!open) return undefined;
+        const silent = this.hostIsSilent(hostOf(key));
+        return silent ?? this.checkPage(page);
+      }).then((result) => {
+        if (result) outcomes.set(key, result);
+        return result;
+      });
+      checks.set(key, pending);
+    };
+
+    const index = (item: OriItem) => str(hitOf.get(item)?._index);
+    const provenance = (item: OriItem) => recordProvenance(hitOf.get(item)?._source);
+    const viaMeeting = (item: OriItem) => item.type === "AgendaItem" && provenance(item).system !== "parlaeus";
+    const plans = new Map<OriItem, MeetingPage>();
+    const plan = (item: OriItem, page: MeetingPage | undefined): void => {
+      if (!page) return;
+      plans.set(item, page);
+      check(page);
+    };
+    const nested = candidates.filter(viaMeeting);
+    let ancestryDone = !nested.length;
+
+    const work = (async () => {
+      for (const item of candidates) if (!viaMeeting(item)) plan(item, meetingPage(index(item), provenance(item)));
+
+      // The agenda item's parent is its meeting, or — Notubiz nests agenda items —
+      // another agenda item, whose meeting is one level further up.
+      if (nested.length) {
+        const records = new Map((await related) ?? []);
+        const ancestry = (item: OriItem): { meeting?: Record<string, unknown>; missing?: string } => {
+          let id = idList(hitOf.get(item)?._source?.parent)[0];
+          for (let depth = 0; id && depth <= MAX_AGENDA_NESTING; depth += 1) {
+            const record = records.get(id);
+            if (!record) return { missing: id };
+            if (str(record["@type"]) !== "AgendaItem") return { meeting: record };
+            id = idList(record.parent)[0];
+          }
+          return {};
+        };
+        for (let hop = 0; hop < MAX_AGENDA_NESTING && records.size && open; hop += 1) {
+          const missing = [...new Set(nested.map((item) => ancestry(item).missing).filter((id): id is string => Boolean(id)))];
+          if (!missing.length) break;
+          for (const [id, record] of await this.fetchAncestors(missing, path, pathQuery)) records.set(id, record);
+        }
+        if (!open) return;
+        for (const item of nested) {
+          const meeting = ancestry(item).meeting;
+          const itemProvenance = provenance(item);
+          const meetingProvenance = meeting ? recordProvenance(meeting) : undefined;
+          if (meetingProvenance?.system === itemProvenance.system) plan(item, meetingPage(index(item), meetingProvenance, itemProvenance));
+        }
+        ancestryDone = true;
+      }
+      await Promise.all(checks.values());
+    })();
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, this.pageLinkBudgetMs);
+    });
+    try {
+      await Promise.race([work, deadline]);
+    } finally {
+      open = false;
+      clearTimeout(timer);
+    }
+
+    const seconds = `${Math.round(this.pageLinkBudgetMs / 100) / 10}`.replace(".", ",");
+    const timeLimit = `tijdslimiet van ${seconds} s voor het controleren van vergaderpagina's bereikt`;
+    for (const item of candidates) {
+      const page = plans.get(item);
+      if (!page) {
+        // Its meeting was still being looked up when the time was up.
+        if (!ancestryDone && viaMeeting(item) && SYSTEM_NAMES[provenance(item).system]) {
+          item.source_system = SYSTEM_NAMES[provenance(item).system];
+          item.link_note = `De vergadering van dit agendapunt is niet opgezocht (${timeLimit}); ${ORI_RECORD_TAIL}`;
+        }
+        continue;
+      }
+      const key = checkKey(page);
+      const outcome = outcomes.get(key);
+      item.source_system = page.system;
+      if (!outcome || outcome.skipped) {
+        const why = outcome?.reason ?? (overCount.has(key) ? `meer dan ${MAX_PAGE_CHECKS} vergaderpagina's in dit resultaat` : timeLimit);
+        item.link_note = `De vergaderpagina in ${page.system} is niet gecontroleerd (${why}); ${ORI_RECORD_TAIL}`;
+        continue;
+      }
+      if (!outcome.ok) {
+        item.link_note = page.api
+          ? `De vergaderpagina in ${page.system} is niet bevestigd door de API van ${page.system} (${outcome.reason}); ${ORI_RECORD_TAIL}`
+          : `De vergaderpagina in ${page.system} werkt niet (${outcome.reason}); ${ORI_RECORD_TAIL}`;
+        continue;
+      }
+      const url = outcome.url ?? page.url;
+      const how = page.api ? `bij het zoeken bevestigd via de API van ${page.system}` : "bij het zoeken gecontroleerd";
+      item.ori_record_url = str(item.url);
+      item.url = url;
+      item.link_type = "meeting_page";
+      item.link_note =
+        item.type === "AgendaItem"
+          ? `Pagina van de vergadering met dit agendapunt in ${page.system}${url.includes("#") ? ", met een anker op het agendapunt" : ""}; ${how}. ori_record_url is het ORI-bronrecord (JSON).`
+          : `Vergaderpagina in ${page.system}; ${how}. ori_record_url is het ORI-bronrecord (JSON).`;
+    }
+  }
+
+  /** The records above agenda items (meetings, or agenda items they are nested in); empty when the lookup fails. */
+  private async fetchAncestors(
+    ids: string[],
+    path: string,
+    pathQuery: Record<string, string> | undefined,
+  ): Promise<Map<string, Record<string, unknown>>> {
+    try {
+      const { data } = await postJson<ElasticResponse>(
+        path,
+        { size: ids.length, _source: ANCESTOR_FIELDS, query: { ids: { values: ids } } },
+        { connector: CONNECTOR, timeoutMs: 10_000, retries: 0, query: pathQuery },
+      );
+      return new Map((data.hits?.hits ?? []).filter((h) => h._id).map((h) => [str(h._id), h._source ?? {}]));
+    } catch {
+      return new Map();
+    }
+  }
+
+  private cachedPageCheck(key: string): PageCheck | undefined {
+    const entry = this.pageChecks.get(key);
+    if (!entry) return undefined;
+    if (entry.expiresAt > Date.now()) return entry.result;
+    this.pageChecks.delete(key);
+    return undefined;
+  }
+
+  /**
+   * A "not checked" outcome while this host is left alone (PAGE_HOST_MISSES);
+   * it is not cached. After the pause the host gets one check again: until
+   * that check is answered, or has timed out, the host's other checks are
+   * still left out, so a host that is still down costs one request and not a
+   * whole round of them. An answer ends the pause, another miss starts a new one.
+   */
+  private hostIsSilent(host: string): PageCheck | undefined {
+    const state = this.silentHosts.get(host);
+    if (!state || state.misses < PAGE_HOST_MISSES) return undefined;
+    const now = Date.now();
+    if (state.until > now) return { ok: false, skipped: true, reason: `${host} gaf kort daarvoor geen antwoord` };
+    this.silentHosts.set(host, { misses: state.misses, until: now + PAGE_CHECK_TIMEOUT_MS + PAGE_PROBE_MARGIN_MS });
+    return undefined;
+  }
+
+  /** Count checks in a row that a host did not answer; any answer clears the count. */
+  private noteHostAnswer(host: string, answered: boolean): void {
+    if (!host) return;
+    if (answered) {
+      this.silentHosts.delete(host);
+      return;
+    }
+    const misses = (this.silentHosts.get(host)?.misses ?? 0) + 1;
+    this.silentHosts.set(host, { misses, until: misses >= PAGE_HOST_MISSES ? Date.now() + PAGE_HOST_COOLDOWN_MS : 0 });
+  }
+
+  /**
+   * Check a meeting page: HEAD on the page, without following redirects
+   * (Notubiz sends a removed meeting to an empty page, Parlaeus to its list), or
+   * GET on the system's API when the page cannot be checked itself.
+   */
+  private async checkPage(page: MeetingPage): Promise<PageCheck> {
+    const target = checkKey(page);
+    const method = page.api ? "GET" : "HEAD";
+    const started = Date.now();
+    let result: PageCheck;
+    let ttl = PAGE_CHECK_TTL_MS;
+    try {
+      const response = await fetch(target, {
+        method,
+        redirect: "manual",
+        headers: { "User-Agent": PAGE_CHECK_USER_AGENT, Accept: page.api ? "application/json" : "text/html" },
+        signal: AbortSignal.timeout(PAGE_CHECK_TIMEOUT_MS),
+      });
+      const status = response.status;
+      if (page.api) {
+        result = status === 200 ? apiMeetingCheck(page, await readJsonCapped(response)) : { ok: false, reason: `HTTP ${status}` };
+        if (status !== 200) await response.body?.cancel().catch(() => undefined);
+      } else {
+        const html = /text\/html/i.test(response.headers.get("content-type") ?? "");
+        result =
+          status === 200 && html
+            ? { ok: true }
+            : { ok: false, reason: status === 200 ? "geen HTML-pagina" : status >= 300 && status < 400 ? `HTTP ${status}, doorverwezen` : `HTTP ${status}` };
+      }
+      if (status >= 500 || status === 429) ttl = PAGE_CHECK_RETRY_MS;
+      this.noteHostAnswer(hostOf(target), true);
+    } catch (error) {
+      // A page that did not answer in time may work, on a slow site or for a
+      // large meeting: not checked, rather than broken. A connection that
+      // failed (no such host, refused, reset) is a page that does not work.
+      // Both are misses toward leaving the host alone (noteHostAnswer).
+      result = (error as { name?: unknown } | undefined)?.name === "TimeoutError"
+        ? { ok: false, skipped: true, reason: `geen antwoord binnen ${(PAGE_CHECK_TIMEOUT_MS / 1000).toLocaleString("nl-NL")} s` }
+        : { ok: false, reason: "geen verbinding" };
+      ttl = PAGE_CHECK_RETRY_MS;
+      this.noteHostAnswer(hostOf(target), false);
+    }
+    logger.info({ method, url: target, connector: PAGE_CONNECTOR, ok: result.ok, elapsedMs: Date.now() - started }, "source_request");
+    if (this.pageChecks.size >= PAGE_CHECK_CACHE_MAX) {
+      const oldest = this.pageChecks.keys().next().value;
+      if (oldest !== undefined) this.pageChecks.delete(oldest);
+    }
+    this.pageChecks.set(target, { result, expiresAt: Date.now() + ttl });
+    return result;
+  }
+}
+
+interface PageCheck {
+  ok: boolean;
+  /** Why the page does not count as working, or why it was not checked, for link_note. */
+  reason?: string;
+  /** The page the system's API named (GemeenteOplossingen's fullUrl). */
+  url?: string;
+  /** Not checked: the host did not answer shortly before, or the page not within PAGE_CHECK_TIMEOUT_MS. */
+  skipped?: boolean;
+}
+
+/** What a meeting page's check asks, and the key its outcome is cached under. */
+function checkKey(page: MeetingPage): string {
+  return page.api ?? page.page;
+}
+
+/** The body of an API answer as JSON; undefined when it is not JSON or too large to read. */
+async function readJsonCapped(response: Response): Promise<unknown> {
+  const length = Number(response.headers.get("content-length") ?? "");
+  if (Number.isFinite(length) && length > PAGE_API_MAX_BYTES) {
+    await response.body?.cancel().catch(() => undefined);
+    return undefined;
+  }
+  const text = await response.text();
+  if (text.length > PAGE_API_MAX_BYTES) return undefined;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether an API answer (HTTP 200) confirms the meeting: it must be about this
+ * meeting and not be closed. GemeenteOplossingen names the page in `fullUrl`,
+ * which must be https on the host that was asked; Notubiz must name the page on
+ * the host the link goes to.
+ */
+export function apiMeetingCheck(page: MeetingPage, body: unknown): PageCheck {
+  const api = page.api ?? "";
+  const id = /\/meetings\/(\d+)(?:[?#]|$)/.exec(api)?.[1] ?? "";
+  const record = body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : undefined;
+  const meeting = page.system === "Notubiz" ? (record?.meeting as Record<string, unknown> | undefined) : record;
+  if (!meeting || typeof meeting !== "object" || !id || str(meeting.id) !== id) return { ok: false, reason: "de vergadering staat niet in het antwoord" };
+  if (meeting.confidential === true || meeting.confidential === 1 || meeting.confidential === "1") return { ok: false, reason: "besloten vergadering" };
+  if (page.system === "GemeenteOplossingen") {
+    const full = str(meeting.fullUrl);
+    let url: URL | undefined;
+    try {
+      url = new URL(full);
+    } catch {
+      url = undefined;
+    }
+    if (!url || url.protocol !== "https:" || url.hostname.toLowerCase() !== hostOf(api)) {
+      return { ok: false, reason: "het antwoord noemt geen pagina op deze site" };
+    }
+    return { ok: true, url: url.href };
+  }
+  const named = str(meeting.url);
+  if (named && hostOf(named) !== hostOf(page.page)) return { ok: false, reason: "Notubiz noemt een pagina op een andere site" };
+  return { ok: true };
+}
+
+const PAGE_CONNECTOR = "ori_pages";
+
+/** Runs at most `max` tasks at once; a finished task hands its slot to the next one waiting. */
+function concurrencyLimit(max: number): <T>(task: () => Promise<T>) => Promise<T> {
+  let active = 0;
+  const waiting: Array<() => void> = [];
+  return async (task) => {
+    if (active < max) active += 1;
+    else await new Promise<void>((resolve) => waiting.push(resolve));
+    try {
+      return await task();
+    } finally {
+      const next = waiting.shift();
+      if (next) next();
+      else active -= 1;
+    }
+  };
+}
+
+/** Meetings to fetch for the iBabs, Notubiz and GemeenteOplossingen agenda items on the page, whose page is their meeting's. */
+function parentMeetingIds(items: OriItem[], hitOf: Map<OriItem, ElasticHit>): string[] {
+  const ids = items.flatMap((item) => {
+    if (item.type !== "AgendaItem" || item.link_type !== "ori_record") return [];
+    const source = hitOf.get(item)?._source;
+    const system = recordProvenance(source).system;
+    return system === "ibabs" || system === "notubiz" || system === "gemeenteoplossingen" ? idList(source?.parent).slice(0, 1) : [];
+  });
+  return [...new Set(ids)].slice(0, MAX_PAGE_CHECKS * 2);
 }
 
 /**

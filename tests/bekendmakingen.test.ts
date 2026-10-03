@@ -586,6 +586,60 @@ describe("search — honest results", () => {
     ]);
   });
 
+  it("takes the chamber of an Aanhangsel answer from its publisher when the identifier has none", async () => {
+    // Since 2025-2026 the identifier is "ah-<number>", while both chambers number
+    // their Aanhangsel from 1 each session.
+    const current = (id: string, creator: string) =>
+      AANHANGSEL_RECORD.replaceAll("ah-tk-20192020-4046", id)
+        .replace("Tweede Kamer der Staten-Generaal", creator)
+        .replace("<overheidwetgeving:aanhangselnummer>4046<", "<overheidwetgeving:aanhangselnummer>1<")
+        .replace("<overheidwetgeving:vergaderjaar>2019-2020<", "<overheidwetgeving:vergaderjaar>2026-2027<");
+    stubFetch(() =>
+      xmlResponse(
+        sruResponse(
+          [
+            current("ah-1000001", "Tweede Kamer der Staten-Generaal"),
+            current("ah-1000002", "Eerste Kamer der Staten-Generaal"),
+            current("ah-1000003", "Staten-Generaal"),
+            current("ah-1000004", "Tweede Kamer der Staten-Generaal</dcterms:creator><dcterms:creator>Eerste Kamer der Staten-Generaal"),
+          ],
+          4,
+        ),
+      ),
+    );
+    const out = await source().search({ query: "afvalinzameling", maximumRecords: 5 });
+    expect(out.items.map((item) => [item.identifier, item.vindplaats])).toEqual([
+      ["ah-1000001", "Aanhangsel Handelingen II 2026-2027, nr. 1"],
+      ["ah-1000002", "Aanhangsel Handelingen I 2026-2027, nr. 1"],
+      // No chamber in the record, or two: left out, not guessed.
+      ["ah-1000003", "Aanhangsel Handelingen 2026-2027, nr. 1"],
+      ["ah-1000004", "Aanhangsel Handelingen 2026-2027, nr. 1"],
+    ]);
+  });
+
+  it("keeps the chamber of the identifier when it names one", async () => {
+    const mislabelled = AANHANGSEL_RECORD.replace("Tweede Kamer der Staten-Generaal", "Eerste Kamer der Staten-Generaal");
+    stubFetch(() => xmlResponse(sruResponse([mislabelled], 1)));
+    const out = await source().search({ query: "afvalinzameling", maximumRecords: 5 });
+    expect(out.items[0].vindplaats).toBe("Aanhangsel Handelingen II 2019-2020, nr. 4046");
+  });
+
+  it("cites a current Aanhangsel answer with its chamber in record_get", async () => {
+    const id = "ah-1000002";
+    const record = AANHANGSEL_RECORD.replaceAll("ah-tk-20192020-4046", id).replace(
+      "Tweede Kamer der Staten-Generaal",
+      "Eerste Kamer der Staten-Generaal",
+    );
+    stubFetch(() => xmlResponse(sruResponse([record], 1)));
+    const out = await source().getRecord(id, { include_text: false });
+    expect(out.item).toMatchObject({
+      identifier: id,
+      authority: "Eerste Kamer der Staten-Generaal",
+      vindplaats: "Aanhangsel Handelingen I 2019-2020, nr. 4046",
+      aanhangsel_number: "4046",
+    });
+  });
+
   it("builds a snippet with the citation, not just the publisher", async () => {
     stubFetch(() => xmlResponse(sruResponse([GMB_RECORD, KST_RECORD], 2)));
     const out = await source().search({ query: "afvalinzameling", maximumRecords: 5 });

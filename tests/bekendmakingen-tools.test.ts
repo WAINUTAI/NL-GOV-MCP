@@ -113,7 +113,8 @@ describe("officiele_bekendmakingen_search tool", () => {
     const queries = fetchMock.mock.calls.map((call) => new URL(String(call[0])).searchParams.get("query"));
     expect(queries[0]).toBe('"zorg en veiligheid" AND c.product-area="officielepublicaties"');
     expect(queries[1]).toBe('"2016/679" AND verordening AND c.product-area="officielepublicaties"');
-    expect(phrase.access_note).toContain('Zoekterm herschreven: "Wat is "zorg en veiligheid"?" → ""zorg en veiligheid"".');
+    expect(phrase.access_note).toContain('Zoekterm herschreven: "Wat is "zorg en veiligheid"?" → "zorg en veiligheid".');
+    expect(phrase.access_note).not.toContain('""');
     expect(phrase.access_note ?? "").not.toContain("Stopwoorden");
   });
 

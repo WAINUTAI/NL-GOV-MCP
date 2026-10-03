@@ -6,6 +6,7 @@ import {
   ALGORITME_ORGANISATIETYPES_BROKEN,
   AlgoritmeregisterSource,
   normalizeAlgoritmeCategorie,
+  pickMinistry,
   pickOrganisation,
   planAlgoritmeWindow,
   summarizeAlgoritmeSearch,
@@ -101,12 +102,19 @@ const MINISTRY_LIST: Array<[string, string, number]> = [
   ["mnre1010", "Ministerie van Algemene Zaken", 1],
 ];
 
+/** Live: the organisation overview with organisationtype 'ministerie' (all 14 ministries that publish). */
+const MINISTRY_TYPE_LIST: Array<[string, string, number]> = [
+  ...MINISTRY_LIST.filter(([id]) => id !== "oorg12355"),
+  ["mnre1162", "Asiel en Migratie", 2],
+];
+
 function cand(org_id: string, name: string, count = 1): OrganisationCandidate {
   return { org_id, name, count };
 }
 
 const MINISTRIES = MINISTRY_LIST.map(([id, name, count]) => cand(id, name, count));
 const ministry = (id: string) => MINISTRIES.find((m) => m.org_id === id)!;
+const ALL_MINISTRIES = MINISTRY_TYPE_LIST.map(([id, name, count]) => cand(id, name, count));
 
 /** One organisation as the overview (POST) and the name list (GET) return it. */
 function orgRow(org_id: string, name: string, count: number): Record<string, unknown> {
@@ -259,8 +267,9 @@ describe("pickOrganisation", () => {
 
   it("reads 'Min' in front of an abbreviation as the ministry's type word", () => {
     // Live: the search answers 'MinEZK' with BZK only, whose type word alone holds m-i-n-e.
+    // EZK is a known abbreviation of another ministry, so BZK is not even a look-alike.
     for (const input of ["MinEZK", "minezk", "Min EZK"]) {
-      expect(pickOrganisation(input, [ministry("mnre1034")])).toMatchObject({ status: "not_found", alternatives: [{ org_id: "mnre1034" }] });
+      expect(pickOrganisation(input, [ministry("mnre1034")])).toMatchObject({ status: "not_found", alternatives: [] });
     }
     // Live: the search answers each of these with the right ministry only.
     for (const input of ["MinIenW", "Min IenW", "Min. IenW", "minienw"]) {
@@ -286,8 +295,8 @@ describe("pickOrganisation", () => {
     for (const [input, id] of cases) {
       expect(pickOrganisation(input, MINISTRIES, 14)).toMatchObject({ status: "resolved", match: "deel", organisation: { org_id: id } });
     }
-    // In a partial list the one fit seen need not be the only one.
-    expect(pickOrganisation("Ministerie van JenV", MINISTRIES, 40).status).toBe("not_found");
+    // A known ministry abbreviation needs no complete list: the table names the ministry.
+    expect(pickOrganisation("Ministerie van JenV", MINISTRIES, 40).organisation?.org_id).toBe("mnre1058");
     // Only filler words after the type word: every ministry fits, nothing is guessed.
     expect(pickOrganisation("Ministerie van", MINISTRIES, 14).status).toBe("ambiguous");
     // The word itself cut short is no 'Min' form ("ist" would fit Infrastructuur en Waterstaat).
@@ -304,6 +313,8 @@ describe("pickOrganisation", () => {
       cand("ws0372", "Hoogheemraadschap van Delfland", 1),
     ];
     expect(pickOrganisation("Hoogheemraadschap HHNK", boards, 3)).toMatchObject({ status: "resolved", organisation: { org_id: "ws0651" } });
+    // In a partial list the one fit seen need not be the only one.
+    expect(pickOrganisation("Hoogheemraadschap HHNK", boards, 40).status).toBe("not_found");
     // 'van' does not lend its v to an abbreviation that does not start with the type word's letter.
     expect(pickOrganisation("MinVRO", [ministry("mnre1153")]).status).toBe("not_found");
   });
@@ -320,6 +331,113 @@ describe("pickOrganisation", () => {
     expect(pickOrganisation("KvK", [cand("zb000184", "Kamer van Koophandel", 4)]).status).toBe("resolved");
     expect(pickOrganisation("SodM", [cand("zb000999", "Staatstoezicht op de Mijnen", 1)]).status).toBe("resolved");
     expect(pickOrganisation("NZa", [cand("zb000158", "Nederlandse Zorgautoriteit (NZa)", 3)]).status).toBe("resolved");
+  });
+
+  describe("ministry abbreviations", () => {
+    const withAenM = [...MINISTRIES, cand("mnre1162", "Asiel en Migratie", 2)];
+
+    it("takes a ministry form only to the ministry the table of abbreviations names", () => {
+      const cases: Array<[string, string]> = [
+        ["MinOCW", "mnre1109"],
+        ["Ministerie van OCW", "mnre1109"],
+        ["Min. OCW", "mnre1109"],
+        ["Ministerie OCW", "mnre1109"],
+        ["ministerie van ocw", "mnre1109"],
+        ["MinOC&W", "mnre1109"],
+        ["MinLNV", "mnre1153"],
+        ["MinLVVN", "mnre1153"],
+        ["MinBZ", "mnre1013"],
+        ["Ministerie van AZ", "mnre1010"],
+        // The letters a-m also occur in "Algemene Zaken"; A&M is Asiel en Migratie.
+        ["Ministerie van A&M", "mnre1162"],
+        ["MinAenM", "mnre1162"],
+      ];
+      for (const [input, id] of cases) {
+        expect(pickOrganisation(input, withAenM, 15)).toMatchObject({ status: "resolved", match: "deel", organisation: { org_id: id } });
+      }
+    });
+
+    it("does not take another organisation when the named ministry is not among the candidates", () => {
+      // Live: 'MinOCW' and 'Ministerie van OCW' find only the inspectorate, whose name holds "(OCW)".
+      const inspectie = cand("oorg12355", "Inspectie van het Onderwijs (OCW)", 2);
+      for (const input of ["MinOCW", "Ministerie van OCW"]) {
+        expect(pickOrganisation(input, [inspectie])).toMatchObject({ status: "not_found", alternatives: [] });
+      }
+      expect(pickOrganisation("Ministerie van A&M", MINISTRIES, 14)).toMatchObject({ status: "not_found", alternatives: [] });
+    });
+
+    it("names the ministries an unknown abbreviation fits instead of choosing one", () => {
+      // v-e-n-w fits "Volksgezondheid, Welzijn en Sport"; VenW was Verkeer en Waterstaat.
+      expect(pickOrganisation("Ministerie van VenW", withAenM, 15)).toMatchObject({ status: "not_found", alternatives: [{ org_id: "mnre1025" }] });
+      expect(pickOrganisation("MinVenW", [ministry("mnre1025")])).toMatchObject({ status: "not_found", alternatives: [{ org_id: "mnre1025" }] });
+    });
+
+    it("leaves a bare abbreviation to the organisation search", () => {
+      // Bare forms are resolved by resolveOrganisation, which knows whether the ministry publishes.
+      expect(pickOrganisation("OCW", [cand("oorg12355", "Inspectie van het Onderwijs (OCW)", 2)]).organisation?.org_id).toBe("oorg12355");
+    });
+
+    it("does not take an unknown ministry form from candidates that need not hold every ministry", () => {
+      // The name search's list lacks Asiel en Migratie, and a short form finds one ministry at most.
+      expect(pickOrganisation("MinJus", [ministry("mnre1058")])).toMatchObject({ status: "not_found", alternatives: [{ org_id: "mnre1058" }] });
+      expect(pickOrganisation("MinOnd", MINISTRIES, 14)).toMatchObject({ status: "not_found", alternatives: [{ org_id: "mnre1109" }] });
+    });
+  });
+
+  describe("pickMinistry (the register's list of all ministries)", () => {
+    it("takes a ministry form the table does not know when it names exactly one ministry", () => {
+      const cases: Array<[string, string]> = [
+        // The letters start one word of the name.
+        ["MinJus", "mnre1058"],
+        ["Minjus", "mnre1058"],
+        ["MINJUS", "mnre1058"],
+        ["Min. Jus", "mnre1058"],
+        ["MinOnd", "mnre1109"],
+        ["Ministerie van Financ", "mnre1090"],
+        ["Ministerie van Onderw", "mnre1109"],
+        ["MinAsiel", "mnre1162"],
+        // Each capital starts the next word, the letters after it continue that word.
+        ["MinSoZaWe", "mnre1073"],
+        ["Ministerie van SoZa", "mnre1073"],
+        ["MinEcZa", "mnre1045"],
+        // Short names the table lists, so that lower case works too.
+        ["minsozawe", "mnre1073"],
+        ["MinBiZa", "mnre1034"],
+        ["minbiza", "mnre1034"],
+        ["MinBuZa", "mnre1013"],
+      ];
+      for (const [input, id] of cases) {
+        expect(pickMinistry(input, ALL_MINISTRIES, 14)).toMatchObject({ status: "resolved", match: "deel", organisation: { org_id: id } });
+      }
+    });
+
+    it("does not take a ministry whose name the letters merely occur in", () => {
+      // VenW was Verkeer en Waterstaat: in "Volksgezondheid, Welzijn en Sport" the word after V is not "en".
+      for (const input of ["MinVenW", "Ministerie van VenW"]) {
+        expect(pickMinistry(input, ALL_MINISTRIES, 14)).toMatchObject({ status: "not_found", alternatives: [{ org_id: "mnre1025" }] });
+      }
+      // IenM was Infrastructuur en Milieu; VenJ (Veiligheid en Justitie) has its words the other way round.
+      for (const input of ["MinIenM", "MinVenJ"]) expect(pickMinistry(input, ALL_MINISTRIES, 14).status).toBe("not_found");
+      // A&M is Asiel en Migratie, never Algemene Zaken (M starts no word there).
+      const withoutAenM = ALL_MINISTRIES.filter((m) => m.org_id !== "mnre1162");
+      expect(pickMinistry("Ministerie van A&M", withoutAenM, 13)).toMatchObject({ status: "not_found", alternatives: [] });
+    });
+
+    it("names the ministries a form fits when it names several or the list is incomplete", () => {
+      // "Vol" starts both Volksgezondheid and Volkshuisvesting.
+      const vol = pickMinistry("MinVol", ALL_MINISTRIES, 14);
+      expect(vol.status).toBe("not_found");
+      expect(vol.alternatives.slice(0, 2).map((c) => c.org_id)).toEqual(["mnre1025", "mnre1171"]);
+      // Without every ministry in the list, the one fit seen need not be the only one.
+      expect(pickMinistry("MinJus", ALL_MINISTRIES, 40)).toMatchObject({ status: "not_found", alternatives: [{ org_id: "mnre1058" }] });
+    });
+
+    it("leaves names, known abbreviations and plain words to pickOrganisation", () => {
+      expect(pickMinistry("MinOCW", ALL_MINISTRIES, 14).organisation?.org_id).toBe("mnre1109");
+      expect(pickMinistry("Ministerie van Defensie", ALL_MINISTRIES, 14)).toMatchObject({ status: "resolved", match: "exact" });
+      // "Zaken" is a word of five names: no guess.
+      expect(pickMinistry("Ministerie van Zaken", ALL_MINISTRIES, 14).status).toBe("ambiguous");
+    });
   });
 
   it("does not let an input of single letters fit every candidate", () => {
@@ -651,12 +769,10 @@ describe("AlgoritmeregisterSource.search", () => {
   it("resolves a lower-case or type-prefixed abbreviation the organisation search answers with one organisation", async () => {
     const calls = routedFetch((c) => {
       if (c.url === ORG_SEARCH && c.body?.searchtext === "uwv") return orgOverview([orgRow("zb000117", "Uitvoeringsinstituut Werknemersverzekeringen", 12)]);
-      if (c.url === ORG_SEARCH && c.body?.searchtext === "Ministerie van VWS") {
-        return orgOverview([orgRow("mnre1025", "Ministerie van Volksgezondheid, Welzijn en Sport", 5)]);
+      if (c.url === ORG_SEARCH && c.body?.organisationtype === "ministerie") {
+        return orgOverview(MINISTRY_TYPE_LIST.map(([id, name, count]) => orgRow(id, name, count)));
       }
       if (c.url === `${ORG_SEARCH}/uwv`) return jsonResponse({ organisations: [orgRow("zb000117", "Uitvoeringsinstituut Werknemersverzekeringen", 12)] });
-      if (c.url === `${ORG_SEARCH}/Ministerie%20van%20VWS`) return jsonResponse(null);
-      if (c.url === `${ORG_SEARCH}/VWS`) return jsonResponse({ organisations: [orgRow("mnre1025", "Ministerie van Volksgezondheid, Welzijn en Sport", 4)] });
       if (c.url === SEARCH) return page([algo({ organization: "x", org_id: String(c.body?.organisation) })], 12);
       throw new Error(`unexpected ${c.url}`);
     });
@@ -677,43 +793,197 @@ describe("AlgoritmeregisterSource.search", () => {
     const row = (id: string) => ministryRows.find((r) => r.org_id === id)!;
     const searchPage = (c: Call) => page([algo({ name: "Afvalinzameling plannen", organization: "x", org_id: String(c.body?.organisation) })], 3);
 
-    it("looks a 'Min' form up in the list of ministries when the short form finds another ministry", async () => {
+    const typeRows = MINISTRY_TYPE_LIST.map(([id, name, count]) => orgRow(id, name, count));
+    const isTypeList = (c: Call) => c.url === ORG_SEARCH && c.body?.organisationtype === "ministerie";
+
+    it("resolves a known ministry abbreviation from the register's list of ministries, without the name search", async () => {
       const calls = routedFetch((c) => {
-        // Live: 'MinEZK' finds BZK only; 'Ministerie van EZK' lists every ministry.
-        if (c.url === ORG_SEARCH && c.body?.searchtext === "MinEZK") return orgOverview([row("mnre1034")]);
-        if (c.url === ORG_SEARCH && c.body?.searchtext === "Ministerie van EZK") return orgOverview(ministryRows);
+        if (isTypeList(c)) return orgOverview(typeRows);
         if (c.url === SEARCH) return searchPage(c);
         throw new Error(`unexpected ${c.url} ${JSON.stringify(c.body)}`);
       });
+      const src = new AlgoritmeregisterSource(testConfig);
+      // Live, the name search answers 'MinOCW' and 'Ministerie van OCW' with the inspectorate only,
+      // 'MinEZK' with BZK only, and 'Ministerie van A&M' with every ministry.
+      const cases: Array<[string, string, string]> = [
+        ["MinOCW", "mnre1109", "Ministerie van Onderwijs, Cultuur en Wetenschap"],
+        ["Ministerie van OCW", "mnre1109", "Ministerie van Onderwijs, Cultuur en Wetenschap"],
+        ["MinEZK", "mnre1045", "Ministerie van Economische Zaken en Klimaat"],
+        ["Min. SZW", "mnre1073", "Ministerie van Sociale Zaken en Werkgelegenheid"],
+        ["Ministerie van JenV", "mnre1058", "Ministerie van Justitie en Veiligheid"],
+        ["Ministerie van A&M", "mnre1162", "Asiel en Migratie"],
+      ];
 
-      const out = await new AlgoritmeregisterSource(testConfig).search({ organisatie: "MinEZK" });
-
-      expect(calls.map((c) => c.body?.searchtext ?? c.url)).toEqual(["MinEZK", "Ministerie van EZK", ""]);
-      expect(calls.at(-1)?.body).toMatchObject({ organisation: "mnre1045" });
-      expect(out.organisation).toMatchObject({ status: "resolved", match: "deel" });
-      expect(out.access_note).toContain("Organisatie 'MinEZK' opgevat als Ministerie van Economische Zaken en Klimaat (mnre1045)");
-      expect(summarizeAlgoritmeSearch(out)).toContain("3 algoritmes in het Algoritmeregister van Ministerie van Economische Zaken en Klimaat");
+      for (const [input, id, name] of cases) {
+        clearHttpCache();
+        const before = calls.length;
+        const out = await src.search({ organisatie: input });
+        const made = calls.slice(before);
+        expect(made).toHaveLength(2);
+        expect(made[0].body).toEqual({ page: 1, limit: 100, organisationtype: "ministerie" });
+        expect(made[1].body).toMatchObject({ organisation: id });
+        expect(out.organisation).toMatchObject({ status: "resolved", match: "deel", organisation: { org_id: id } });
+        expect(out.access_note).toContain(`Organisatie '${input}' opgevat als ${name} (${id})`);
+        expect(summarizeAlgoritmeSearch(out)).toContain(`3 algoritmes in het Algoritmeregister van ${name}`);
+      }
     });
 
-    it("looks a 'Min' form up in the list of ministries when the short form finds nothing", async () => {
+    it("reports a known ministry without published algorithms instead of another organisation", async () => {
       const calls = routedFetch((c) => {
-        if (c.url === ORG_SEARCH && c.body?.searchtext === "Min. SZW") return orgOverview([]);
-        if (c.url === ORG_SEARCH && c.body?.searchtext === "Ministerie van SZW") return orgOverview(ministryRows);
-        if (c.url === SEARCH) return searchPage(c);
+        if (isTypeList(c)) return orgOverview(typeRows.filter((r) => r.org_id !== "mnre1109"));
+        if (c.url.endsWith("/api/organisation-relation/mnre1109")) {
+          return jsonResponse({ org_id: "mnre1109", hierarchy: [{ org_id: "mnre1109", name: "Ministerie van Onderwijs, Cultuur en Wetenschap", count: null, has_children: null }] });
+        }
         throw new Error(`unexpected ${c.url} ${JSON.stringify(c.body)}`);
       });
 
-      const out = await new AlgoritmeregisterSource(testConfig).search({ organisatie: "Min. SZW" });
+      const out = await new AlgoritmeregisterSource(testConfig).search({ organisatie: "MinOCW", query: "fietspaden" });
 
-      expect(calls.at(-1)?.body).toMatchObject({ organisation: "mnre1073" });
-      expect(out.organisation?.organisation?.name).toBe("Ministerie van Sociale Zaken en Werkgelegenheid");
+      expect(calls.some((c) => c.url === SEARCH)).toBe(false);
+      expect(out.total).toBe(0);
+      expect(out.organisation).toMatchObject({ status: "not_found", alternatives: [], without_algorithms: ["Ministerie van Onderwijs, Cultuur en Wetenschap (mnre1109)"] });
+      expect(out.access_note).toContain("Wel in het register bekend, maar zonder gepubliceerde algoritmes: Ministerie van Onderwijs, Cultuur en Wetenschap (mnre1109)");
+    });
+
+    it("keeps the not-found answer when the lookup of a known ministry without algorithms fails", async () => {
+      routedFetch((c) => {
+        if (isTypeList(c)) return orgOverview([]);
+        if (c.url.includes("/api/organisation-relation/")) return jsonResponse({ detail: "Bad request" }, 400);
+        throw new Error(`unexpected ${c.url} ${JSON.stringify(c.body)}`);
+      });
+
+      const out = await new AlgoritmeregisterSource(testConfig).search({ organisatie: "Ministerie van SZW" });
+
+      expect(out.organisation).toMatchObject({ status: "not_found", alternatives: [], without_algorithms: [] });
+    });
+
+    it("reads a bare ministry abbreviation as the ministry and names an organisation that carries it", async () => {
+      const calls = routedFetch((c) => {
+        // Live: the name search answers 'OCW' with the inspectorate only, 'VWS' with the ministry.
+        if (c.url === ORG_SEARCH && c.body?.searchtext === "OCW") return orgOverview([orgRow("oorg12355", "Inspectie van het Onderwijs (OCW)", 2)]);
+        if (c.url === ORG_SEARCH && c.body?.searchtext === "VWS") return orgOverview([row("mnre1025")]);
+        if (isTypeList(c)) return orgOverview(typeRows);
+        if (c.url === SEARCH) return searchPage(c);
+        throw new Error(`unexpected ${c.url} ${JSON.stringify(c.body)}`);
+      });
+      const src = new AlgoritmeregisterSource(testConfig);
+
+      const ocw = await src.search({ organisatie: "OCW" });
+      expect(calls.map((c) => c.body?.searchtext ?? c.body?.organisationtype)).toEqual(["OCW", "ministerie", ""]);
+      expect(calls.at(-1)?.body).toMatchObject({ organisation: "mnre1109" });
+      expect(ocw.organisation).toMatchObject({ status: "resolved", organisation: { org_id: "mnre1109" }, alternatives: [{ org_id: "oorg12355" }] });
+      expect(ocw.access_note).toContain(
+        "Organisatie 'OCW' opgevat als Ministerie van Onderwijs, Cultuur en Wetenschap (mnre1109). Ook passend: Inspectie van het Onderwijs (OCW) (oorg12355, 2 algoritmes)",
+      );
+
+      const before = calls.length;
+      const vws = await src.search({ organisatie: "VWS" });
+      expect(calls.slice(before).map((c) => c.body?.searchtext)).toEqual(["VWS", ""]);
+      expect(vws.organisation?.organisation?.org_id).toBe("mnre1025");
+    });
+
+    it("resolves a ministry form the table does not know when it names one ministry in the list of all ministries", async () => {
+      const calls = routedFetch((c) => {
+        // Live: the name search finds nothing for 'MinJus', only the inspectorate for 'MinOnd',
+        // and every ministry but Asiel en Migratie for 'Ministerie van Financ'.
+        if (c.url === ORG_SEARCH && c.body?.searchtext === "MinJus") return orgOverview([]);
+        if (c.url === ORG_SEARCH && c.body?.searchtext === "MinOnd") return orgOverview([orgRow("oorg12355", "Inspectie van het Onderwijs (OCW)", 2)]);
+        if (c.url === ORG_SEARCH && c.body?.searchtext === "Ministerie van Financ") return orgOverview(ministryRows);
+        if (isTypeList(c)) return orgOverview(typeRows);
+        if (c.url === SEARCH) return searchPage(c);
+        throw new Error(`unexpected ${c.url} ${JSON.stringify(c.body)}`);
+      });
+      const src = new AlgoritmeregisterSource(testConfig);
+      const cases: Array<[string, string, string]> = [
+        ["MinJus", "mnre1058", "Ministerie van Justitie en Veiligheid"],
+        ["MinOnd", "mnre1109", "Ministerie van Onderwijs, Cultuur en Wetenschap"],
+        ["Ministerie van Financ", "mnre1090", "Ministerie van Financiën"],
+      ];
+
+      for (const [input, id, name] of cases) {
+        clearHttpCache();
+        const before = calls.length;
+        const out = await src.search({ organisatie: input });
+        const made = calls.slice(before);
+        expect(made.map((c) => c.body?.searchtext ?? c.body?.organisationtype)).toEqual([input, "ministerie", ""]);
+        expect(made.at(-1)?.body).toMatchObject({ organisation: id });
+        expect(out.organisation).toMatchObject({ status: "resolved", match: "deel", organisation: { org_id: id } });
+        expect(out.access_note).toContain(`Organisatie '${input}' opgevat als ${name} (${id})`);
+      }
+    });
+
+    it("resolves the common short names SoZaWe and BiZa through the table, in any case and also alone", async () => {
+      routedFetch((c) => {
+        // Live, the name search finds nothing for 'SoZaWe' or 'BiZa' alone.
+        if (c.url === ORG_SEARCH && typeof c.body?.searchtext === "string" && c.body.searchtext !== "") return orgOverview([]);
+        if (isTypeList(c)) return orgOverview(typeRows);
+        if (c.url === SEARCH) return searchPage(c);
+        throw new Error(`unexpected ${c.url} ${JSON.stringify(c.body)}`);
+      });
+      const src = new AlgoritmeregisterSource(testConfig);
+      const cases: Array<[string, string]> = [
+        ["MinSoZaWe", "mnre1073"],
+        ["minsozawe", "mnre1073"],
+        ["SoZaWe", "mnre1073"],
+        ["sozawe", "mnre1073"],
+        // Live, the name search answers 'MinBiZa' with Buitenlandse Zaken only; BiZa is Binnenlandse Zaken.
+        ["MinBiZa", "mnre1034"],
+        ["BiZa", "mnre1034"],
+        ["BIZA", "mnre1034"],
+        // EZK is Economische Zaken en Klimaat, never BZK, whose type word holds m-i-n-e.
+        ["MinEZK", "mnre1045"],
+        ["EZK", "mnre1045"],
+      ];
+      for (const [input, id] of cases) {
+        const out = await src.search({ organisatie: input });
+        expect(out.organisation, input).toMatchObject({ status: "resolved", organisation: { org_id: id } });
+      }
+    });
+
+    it("resolves the official name of the ministry the register lists without its type word", async () => {
+      const calls = routedFetch((c) => {
+        // Live: the name search lists Asiel en Migratie, which as a name without a type word did not match.
+        if (c.url === ORG_SEARCH && typeof c.body?.searchtext === "string" && c.body.searchtext !== "") return orgOverview([orgRow("mnre1162", "Asiel en Migratie", 2)]);
+        if (isTypeList(c)) return orgOverview(typeRows);
+        if (c.url === SEARCH) return searchPage(c);
+        throw new Error(`unexpected ${c.url} ${JSON.stringify(c.body)}`);
+      });
+      const src = new AlgoritmeregisterSource(testConfig);
+
+      for (const input of ["Ministerie van Asiel en Migratie", "Ministerie Asiel en Migratie"]) {
+        clearHttpCache();
+        const before = calls.length;
+        const out = await src.search({ organisatie: input });
+        expect(calls.slice(before).map((c) => c.body?.searchtext ?? c.body?.organisationtype)).toEqual([input, "ministerie", ""]);
+        expect(out.organisation).toMatchObject({ status: "resolved", match: "naam", organisation: { org_id: "mnre1162" } });
+        expect(out.access_note).toContain(`Organisatie '${input}' opgevat als Asiel en Migratie (mnre1162)`);
+      }
+      // Another name after the ministry's type word is no ministry of the list.
+      clearHttpCache();
+      const other = await src.search({ organisatie: "Ministerie van Wegen en Vaarwegen" });
+      expect(other.organisation?.status).toBe("not_found");
+    });
+
+    it("names the ministries an unknown 'Min' form fits instead of choosing one", async () => {
+      const calls = routedFetch((c) => {
+        // VenW (Verkeer en Waterstaat) is no current ministry; its letters fit VWS.
+        if (c.url === ORG_SEARCH && c.body?.searchtext === "MinVenW") return orgOverview([row("mnre1025"), row("mnre1130")]);
+        if (isTypeList(c)) return orgOverview(typeRows);
+        throw new Error(`unexpected ${c.url} ${JSON.stringify(c.body)}`);
+      });
+
+      const out = await new AlgoritmeregisterSource(testConfig).search({ organisatie: "MinVenW" });
+
+      expect(calls.map((c) => c.body?.searchtext ?? c.body?.organisationtype)).toEqual(["MinVenW", "ministerie"]);
+      expect(out.organisation).toMatchObject({ status: "not_found", alternatives: [{ org_id: "mnre1025" }] });
+      expect(summarizeAlgoritmeSearch(out)).toContain("Gelijkende naam met gepubliceerde algoritmes: Ministerie van Volksgezondheid, Welzijn en Sport (mnre1025, 5 algoritmes)");
     });
 
     it("keeps a 'Min' form unresolved when no ministry fits, naming what the search found", async () => {
       const calls = routedFetch((c) => {
         // Live: 'MinVenJ' finds VWS only; no ministry is abbreviated V-en-J.
         if (c.url === ORG_SEARCH && c.body?.searchtext === "MinVenJ") return orgOverview([row("mnre1025")]);
-        if (c.url === ORG_SEARCH && c.body?.searchtext === "Ministerie van VenJ") return orgOverview(ministryRows);
+        if (isTypeList(c)) return orgOverview(typeRows);
         if (c.url === `${ORG_SEARCH}/MinVenJ`) return jsonResponse({ organisations: [] });
         if (c.url.endsWith("/api/organisation/MinVenJ") || c.url.endsWith("/api/organisation/minvenj")) {
           return jsonResponse({ detail: "Kan corresponderende org_id niet vinden." }, 404);
@@ -740,7 +1010,7 @@ describe("AlgoritmeregisterSource.search", () => {
 
       const out = await new AlgoritmeregisterSource(testConfig).search({ organisatie: "I&W" });
 
-      expect(calls.map((c) => c.body?.searchtext ?? c.url)).toEqual(["I&W", "IenW", `${ORG_SEARCH}/IenW`, ""]);
+      expect(calls.map((c) => c.body?.searchtext ?? c.url)).toEqual(["I&W", "IenW", ""]);
       expect(calls.at(-1)?.body).toMatchObject({ organisation: "mnre1130" });
       expect(out.access_note).toContain("Organisatie 'I&W' opgevat als Ministerie van Infrastructuur en Waterstaat (mnre1130)");
     });
@@ -1191,12 +1461,12 @@ describe("AlgoritmeregisterSource.search", () => {
     expect(known.access_note).not.toContain("geen bekende categorie");
 
     const unknown = await src.search({ categorie: "Defensie" });
-    expect(calls[1].body).toMatchObject({ category: "Defensie" });
+    expect(calls.at(-1)?.body).toMatchObject({ category: "Defensie" });
     expect(unknown.access_note).toContain("Categorie 'Defensie' is geen bekende categorie");
   });
 
   it("says that the register does not use every organisation type when a type finds nothing", async () => {
-    routedFetch((c) => {
+    const calls = routedFetch((c) => {
       // Live: no organisation has type 'omgevingsdienst'; omgevingsdiensten are filed under 'veiligheidsregio'.
       if (c.url === SEARCH && c.body?.organisationtype === "omgevingsdienst") return page([], 0);
       if (c.url === SEARCH) return page([algo({ name: "Afvalinzameling plannen", organization: "Omgevingsdienst Haaglanden", org_id: "so0700" })], 66);
@@ -1208,9 +1478,67 @@ describe("AlgoritmeregisterSource.search", () => {
     expect(none.total).toBe(0);
     expect(none.access_note).toContain("Geen treffers met organisatietype 'omgevingsdienst'");
     expect(none.access_note).toContain("staan onder 'veiligheidsregio'");
+    // The type is the only filter, so the zero is its own: no extra count.
+    expect(calls).toHaveLength(1);
+    expect(none.params.organisationtype_probe).toBeUndefined();
 
     const some = await src.search({ organisatietype: "veiligheidsregio" });
     expect(some.access_note).not.toContain("Geen treffers met organisatietype");
+  });
+
+  describe("a zero with an organisation type and other constraints", () => {
+    /** The type alone has `typeTotal` algorithms; any other constraint gives none. */
+    function typeRegister(typeTotal: number | "error") {
+      return routedFetch((c) => {
+        if (c.url === ORG_SEARCH) return orgOverview(UTRECHT_ORGS);
+        if (c.url !== SEARCH) throw new Error(`unexpected ${c.url}`);
+        const { page: _p, limit: _l, searchtext, organisationtype, ...rest } = c.body ?? {};
+        if (!searchtext && organisationtype && !Object.keys(rest).length) {
+          if (typeTotal === "error") return jsonResponse({ detail: "Unprocessable" }, 422);
+          return page(typeTotal ? [algo({ name: "Afvalinzameling plannen" })] : [], typeTotal);
+        }
+        return page([], 0);
+      });
+    }
+
+    it("does not blame the type when the type alone has hits, and names what the zero comes from", async () => {
+      const calls = typeRegister(988);
+      const src = new AlgoritmeregisterSource(testConfig);
+
+      const filtered = await src.search({ organisatietype: "gemeente", status: "Buiten gebruik", categorie: "Verkeer" });
+      expect(filtered.total).toBe(0);
+      expect(calls).toHaveLength(2);
+      expect(calls[1].body).toEqual({ searchtext: "", organisationtype: "gemeente", page: 1, limit: 1 });
+      expect(filtered.access_note).not.toContain("Geen treffers met organisatietype");
+      expect(filtered.access_note).toContain(
+        "Organisatietype 'gemeente' heeft op zichzelf wel treffers (988 algoritmes); de nul komt door de combinatie met status en categorie.",
+      );
+      expect(filtered.params.organisationtype_probe).toBe("organisationtype=gemeente&page=1&limit=1");
+
+      const withOrg = await src.search({ organisatietype: "gemeente", organisatie: "Provincie Utrecht", query: "parkeerbeleid" });
+      expect(withOrg.access_note).not.toContain("Geen treffers met organisatietype");
+      expect(withOrg.access_note).toContain("de nul komt door de combinatie met organisatie en zoekwoorden.");
+    });
+
+    it("keeps the note that the register does not use every type when the type alone finds nothing too", async () => {
+      const calls = typeRegister(0);
+
+      const out = await new AlgoritmeregisterSource(testConfig).search({ organisatietype: "omgevingsdienst", status: "In gebruik" });
+
+      expect(calls).toHaveLength(2);
+      expect(out.access_note).toContain("Geen treffers met organisatietype 'omgevingsdienst'");
+      expect(out.access_note).not.toContain("op zichzelf wel treffers");
+    });
+
+    it("makes no claim about the type when the count fails, and still returns the empty result", async () => {
+      typeRegister("error");
+
+      const out = await new AlgoritmeregisterSource(testConfig).search({ organisatietype: "provincie", publicatiecategorie: "Hoog-risico AI-systeem" });
+
+      expect(out.total).toBe(0);
+      expect(out.access_note).not.toContain("Geen treffers met organisatietype");
+      expect(out.access_note).not.toContain("op zichzelf wel treffers");
+    });
   });
 
   it("sends include_children=false and explains the scope for an organisation with children", async () => {

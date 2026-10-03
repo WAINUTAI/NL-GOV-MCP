@@ -55,24 +55,31 @@ interface Call {
   url: URL;
   method: string;
   body?: Record<string, unknown>;
+  redirect?: string;
 }
 
 type Handler = (call: Call) => Response | Promise<Response>;
 
 /**
  * Routes every request the ORI source makes: the index list, the organisation
- * names, the freshness aggregation, the attachment lookup, the index probe of
- * the no-index-list fallback, and the search itself.
+ * names, the freshness aggregation, the attachment lookup (which also brings
+ * the meetings of agenda items), the index probe of the no-index-list
+ * fallback, the check of a meeting page (HEAD), the meeting lookup in a
+ * council information system's own API (GET on another host), and the search
+ * itself.
  */
-function mockOri(handlers: { search: Handler; aliases?: Handler; orgs?: Handler; freshness?: Handler; attachments?: Handler; probe?: Handler }) {
+function mockOri(handlers: { search: Handler; aliases?: Handler; orgs?: Handler; freshness?: Handler; attachments?: Handler; probe?: Handler; page?: Handler; api?: Handler }) {
   const calls: Call[] = [];
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const call: Call = {
       url: new URL(String(input)),
       method: init?.method ?? "GET",
       body: init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined,
+      redirect: init?.redirect,
     };
     calls.push(call);
+    if (call.method === "HEAD") return handlers.page ? handlers.page(call) : new Response(null, { status: 404 });
+    if (call.url.hostname !== "api.openraadsinformatie.nl") return handlers.api ? handlers.api(call) : new Response(null, { status: 404 });
     const body = call.body as Record<string, any> | undefined;
     if (call.url.pathname.endsWith("/_aliases")) return handlers.aliases ? handlers.aliases(call) : json(ALIASES);
     if (JSON.stringify(body?.query ?? "").includes('"Organization"')) return handlers.orgs ? handlers.orgs(call) : json(ORGS);
@@ -353,14 +360,34 @@ describe("OriSource.search — request", () => {
     expect(out.access_note).toContain("geen vergaderdatum");
   });
 
-  it("reads lowercase or/and/not between terms as operators, and says so", async () => {
+  it("keeps a lowercase or/and/not a search word, quoted, and says how it read one between terms", async () => {
     const { searchCalls } = mockOri({ search: () => json(searchResponse([])) });
 
-    const out = await new OriSource(config).search({ query: "parkeren or fietsen", rows: 5, gemeente: "Eindhoven" });
+    // nl_gov_ask keeps the acronym OR (ondernemingsraad) as the topic word "or".
+    const out = await new OriSource(config).search({ query: "instemming or reorganisatie", rows: 5, gemeente: "Eindhoven" });
 
-    expect((searchCalls()[0].body as Record<string, any>).query.bool.must[0].query_string).toEqual({ query: "parkeren OR fietsen", default_operator: "AND" });
-    expect(out.params.q).toBe("parkeren OR fietsen");
-    expect(out.access_note).toContain("gelezen als de operatoren OR, AND en NOT");
+    expect((searchCalls()[0].body as Record<string, any>).query.bool.must[0].query_string).toEqual({ query: 'instemming "or" reorganisatie', default_operator: "AND" });
+    expect(out.params.q).toBe('instemming "or" reorganisatie');
+    expect(out.access_note).toContain("'or' tussen zoektermen is als zoekwoord gezocht");
+    expect(out.access_note).toContain("OR, AND of NOT in hoofdletters");
+  });
+
+  it("still reads uppercase OR/AND/NOT as operators, without a note", async () => {
+    const { searchCalls } = mockOri({ search: () => json(searchResponse([])) });
+
+    const out = await new OriSource(config).search({ query: "parkeren OR fietsen NOT stikstof", rows: 5, gemeente: "Eindhoven" });
+
+    expect((searchCalls()[0].body as Record<string, any>).query.bool.must[0].query_string.query).toBe("parkeren OR fietsen NOT stikstof");
+    expect(out.access_note ?? "").not.toContain("zoekwoord gezocht");
+  });
+
+  it("quotes a lowercase operator word at the edge without a note", async () => {
+    const { searchCalls } = mockOri({ search: () => json(searchResponse([])) });
+
+    const out = await new OriSource(config).search({ query: "or personeelsbeleid", rows: 5, gemeente: "Eindhoven" });
+
+    expect((searchCalls()[0].body as Record<string, any>).query.bool.must[0].query_string.query).toBe('"or" personeelsbeleid');
+    expect(out.access_note ?? "").not.toContain("zoekwoord gezocht");
   });
 
   it("applies date_from/date_to as a real range on meeting date, and start_date for reports", async () => {
@@ -653,6 +680,479 @@ describe("OriSource.search — index list availability", () => {
   });
 });
 
+describe("OriSource.search — meeting pages", () => {
+  const MEETING_GUID = "0a1b2c3d-0000-4000-8000-000000000001";
+  const ITEM_GUID = "0a1b2c3d-0000-4000-8000-0000000000a1";
+  const IBABS_USED = "https://api.openraadsinformatie.nl/v1/resolve/ibabs/GetMeetingsByDateRange/Sitename%3DNoord-holland/StartDate%3D2026-06-09T00%3A00%3A00/EndDate%3D2026-06-11T00%3A00%3A00";
+  const IBABS_PAGE = `https://noordholland.bestuurlijkeinformatie.nl/Agenda/Index/${MEETING_GUID}`;
+  const provenance = (system: string, kind: string, fields: Record<string, string>) => ({
+    was_generated_by: { same_as: `https://openbesluitvorming.nl/voc/mapping/x/${system}/${kind}/1`, ...fields },
+  });
+  const html = (status = 200) => new Response(null, { status, headers: { "content-type": "text/html; charset=utf-8" } });
+  const heads = (calls: Call[]) => calls.filter((c) => c.method === "HEAD").map((c) => c.url.href);
+
+  const ibabsMeeting = (id = "8100001", guid = MEETING_GUID) =>
+    hit("osi_noord-holland_20250720165905", id, {
+      "@type": "Meeting",
+      name: "Statencommissie Mobiliteit",
+      last_discussed_at: "2026-06-10T13:00:00+00:00",
+      ...provenance("ibabs", "meeting", { original_identifier: guid, used: IBABS_USED }),
+    });
+
+  it("links a meeting to its checked page in the council information system and keeps the ORI record", async () => {
+    const { calls } = mockOri({ search: () => json(searchResponse([ibabsMeeting()])), page: () => html() });
+
+    const out = await new OriSource(config).search({ query: "fietspaden", rows: 5, gemeente: "Provincie Noord-Holland" });
+
+    const meeting = out.items[0];
+    expect(meeting.url).toBe(IBABS_PAGE);
+    expect(meeting.link_type).toBe("meeting_page");
+    expect(meeting.source_system).toBe("iBabs");
+    expect(meeting.ori_record_url).toBe("https://api.openraadsinformatie.nl/v1/elastic/osi_noord-holland/_doc/8100001");
+    expect(meeting.link_note).toContain("Vergaderpagina in iBabs");
+    // Checked without following redirects: a removed meeting redirects to an empty page or a list.
+    const head = calls.find((c) => c.method === "HEAD");
+    expect(head?.url.href).toBe(IBABS_PAGE);
+    expect(head?.redirect).toBe("manual");
+  });
+
+  it("keeps the ORI record, and says why, when the page does not work", async () => {
+    const cases: Array<[() => Response, string]> = [
+      [() => html(403), "HTTP 403"],
+      [() => new Response(null, { status: 303, headers: { location: "https://elders.example/" } }), "HTTP 303, doorverwezen"],
+      [() => new Response(null, { status: 200, headers: { "content-type": "application/json" } }), "geen HTML-pagina"],
+    ];
+    for (const [response, reason] of cases) {
+      clearHttpCache();
+      mockOri({ search: () => json(searchResponse([ibabsMeeting()])), page: response });
+
+      const out = await new OriSource(config).search({ query: "fietspaden", rows: 5, gemeente: "Provincie Noord-Holland" });
+
+      expect(out.items[0].url).toBe("https://api.openraadsinformatie.nl/v1/elastic/osi_noord-holland/_doc/8100001");
+      expect(out.items[0].link_type).toBe("ori_record");
+      expect(out.items[0].source_system).toBe("iBabs");
+      expect(out.items[0].link_note).toContain(`De vergaderpagina in iBabs werkt niet (${reason})`);
+      expect(out.items[0].link_note).toContain("JSON uit de ORI-API, geen webpagina");
+      expect(out.items[0].ori_record_url).toBeUndefined();
+    }
+  });
+
+  it("treats a page whose connection fails as not working", async () => {
+    mockOri({ search: () => json(searchResponse([ibabsMeeting()])), page: () => Promise.reject(new TypeError("fetch failed")) });
+
+    const out = await new OriSource(config).search({ query: "fietspaden", rows: 5, gemeente: "Provincie Noord-Holland" });
+
+    expect(out.items[0].link_type).toBe("ori_record");
+    expect(out.items[0].link_note).toContain("werkt niet (geen verbinding)");
+  });
+
+  it("reports a page that did not answer in time as not checked, not as broken", async () => {
+    mockOri({
+      search: () => json(searchResponse([ibabsMeeting()])),
+      page: () => Promise.reject(new DOMException("The operation was aborted due to timeout", "TimeoutError")),
+    });
+
+    const out = await new OriSource(config).search({ query: "fietspaden", rows: 5, gemeente: "Provincie Noord-Holland" });
+
+    expect(out.items[0].link_type).toBe("ori_record");
+    expect(out.items[0].source_system).toBe("iBabs");
+    expect(out.items[0].link_note).toContain("De vergaderpagina in iBabs is niet gecontroleerd (geen antwoord binnen 2,5 s)");
+    expect(out.items[0].link_note).not.toContain("werkt niet");
+  });
+
+  it("checks a page once, also across searches", async () => {
+    const { calls } = mockOri({ search: () => json(searchResponse([ibabsMeeting("8100001"), ibabsMeeting("8100002")])), page: () => html() });
+    const ori = new OriSource(config);
+
+    await ori.search({ query: "fietspaden", rows: 5, gemeente: "Provincie Noord-Holland" });
+    await ori.search({ query: "stikstof", rows: 5, gemeente: "Provincie Noord-Holland" });
+
+    expect(heads(calls)).toEqual([IBABS_PAGE]);
+  });
+
+  it("links an iBabs agenda item to its meeting's page, anchored on the item, via one lookup", async () => {
+    const item = hit("osi_noord-holland_20250720165905", "8100010", {
+      "@type": "AgendaItem",
+      name: "Fietspaden langs provinciale wegen",
+      parent: "8100001",
+      attachment: ["8100011"],
+      last_discussed_at: "2026-06-10T13:00:00+00:00",
+      ...provenance("ibabs", "agenda_item", { reference_identifier: ITEM_GUID }),
+    });
+    const { calls } = mockOri({
+      search: () => json(searchResponse([item])),
+      attachments: (call) => {
+        expect((call.body as Record<string, any>).query.ids.values).toEqual(["8100011", "8100001"]);
+        return json(
+          searchResponse([
+            ibabsMeeting(),
+            hit("osi_noord-holland_20250720165905", "8100011", { name: "Notitie fietspaden", url: "https://api.openraadsinformatie.nl/v1/resolve/ibabs/agenda/1" }),
+          ]),
+        );
+      },
+      page: () => html(),
+    });
+
+    const out = await new OriSource(config).search({ query: "fietspaden", rows: 5, gemeente: "Provincie Noord-Holland" });
+
+    expect(out.items[0].url).toBe(`${IBABS_PAGE}#${ITEM_GUID}`);
+    expect(out.items[0].link_type).toBe("meeting_page");
+    expect(out.items[0].link_note).toContain("met een anker op het agendapunt");
+    expect(out.items[0].attachments).toEqual([{ id: "8100011", name: "Notitie fietspaden", url: "https://api.openraadsinformatie.nl/v1/resolve/ibabs/agenda/1" }]);
+    expect(heads(calls)).toEqual([IBABS_PAGE]);
+  });
+
+  it("follows a nested Notubiz agenda item up to its meeting", async () => {
+    const subItem = hit("ori_eindhoven_20250413114006", "7900201", {
+      "@type": "AgendaItem",
+      name: "Afvalinzameling: nieuwe inzamelroutes",
+      parent: "7900200",
+      last_discussed_at: "2026-06-16T19:30:00+02:00",
+      ...provenance("notubiz", "agenda_item", { reference_identifier: "9900002" }),
+    });
+    const lookups: string[][] = [];
+    const { calls } = mockOri({
+      search: () => json(searchResponse([subItem])),
+      attachments: (call) => {
+        const ids = (call.body as Record<string, any>).query.ids.values as string[];
+        lookups.push(ids);
+        if (ids.includes("7900200")) {
+          return json(
+            searchResponse([
+              hit("ori_eindhoven_20250413114006", "7900200", { "@type": "AgendaItem", parent: "7900100", ...provenance("notubiz", "agenda_item", { reference_identifier: "9900001" }) }),
+            ]),
+          );
+        }
+        return json(searchResponse([hit("ori_eindhoven_20250413114006", "7900100", { "@type": "Meeting", ...provenance("notubiz", "meeting", { original_identifier: "1400001" }) })]));
+      },
+      page: () => html(),
+    });
+
+    const out = await new OriSource(config).search({ query: "afvalinzameling", rows: 5, gemeente: "Eindhoven" });
+
+    expect(lookups).toEqual([["7900200"], ["7900100"]]);
+    expect(out.items[0].url).toBe("https://eindhoven.raadsinformatie.nl/vergadering/1400001#ai_9900002");
+    expect(out.items[0].source_system).toBe("Notubiz");
+    expect(heads(calls)).toEqual(["https://eindhoven.raadsinformatie.nl/vergadering/1400001"]);
+  });
+
+  it("keeps an agenda item on its ORI record when its meeting cannot be looked up", async () => {
+    const item = hit("ori_eindhoven_20250413114006", "7900201", {
+      "@type": "AgendaItem",
+      name: "Parkeerbeleid binnenstad",
+      parent: "7900100",
+      last_discussed_at: "2026-06-16T19:30:00+02:00",
+      ...provenance("notubiz", "agenda_item", { reference_identifier: "9900002" }),
+    });
+    const { calls } = mockOri({ search: () => json(searchResponse([item])), attachments: () => json({ error: "x" }, 400), page: () => html() });
+
+    const out = await new OriSource(config).search({ query: "parkeerbeleid", rows: 5, gemeente: "Eindhoven" });
+
+    expect(out.items[0].link_type).toBe("ori_record");
+    expect(out.items[0].link_note).toContain("Geen openbare webpagina bekend");
+    expect(out.access_note).toContain("De bijlagen en vergaderingen van agendapunten");
+    expect(heads(calls)).toEqual([]);
+  });
+
+  it("links a Parlaeus agenda item from its own record, and needs no lookup for it", async () => {
+    const parlaeusItem = hit("ori_maastricht_20250408232130", "7954121", {
+      "@type": "AgendaItem",
+      name: "Woningbouwprogramma",
+      parent: "7954120",
+      last_discussed_at: "2026-07-07T17:00:00",
+      ...provenance("parlaeus", "meeting", {
+        reference_identifier: "11112222333344445555666677778888",
+        had_primary_source: "https://voorbeeld.parlaeus.nl/receive/opendata?fn=agenda_detail&agid=aaaabbbbccccddddeeeeffff00001111",
+      }),
+    });
+    // A GemeenteOplossingen meeting without the host ORI read it from has no page to look up.
+    const goMeeting = hit("ori_groningen_20250329064314", "7938185", {
+      "@type": "Meeting",
+      name: "Commissie Woningbouw",
+      last_discussed_at: "2026-07-01T15:00:00+00:00",
+      ...provenance("gemeenteoplossingen", "meeting", { original_identifier: "5000" }),
+    });
+    const { calls } = mockOri({ search: () => json(searchResponse([parlaeusItem, goMeeting])), page: () => html() });
+
+    const out = await new OriSource(config).search({ query: "woningbouw", rows: 5 });
+
+    expect(out.items[0].url).toBe("https://voorbeeld.parlaeus.nl/user/agenda/action=view/ag=aaaabbbbccccddddeeeeffff00001111");
+    expect(out.items[0].link_type).toBe("meeting_page");
+    expect(out.items[1].link_type).toBe("ori_record");
+    expect(out.items[1].source_system).toBe("GemeenteOplossingen");
+    expect(out.items[1].link_note).toContain("Geen openbare webpagina bekend");
+    expect(heads(calls)).toEqual(["https://voorbeeld.parlaeus.nl/user/agenda/action=view/ag=aaaabbbbccccddddeeeeffff00001111"]);
+    // No lookup for records that need none.
+    expect(calls.some((c) => Boolean((c.body as Record<string, any> | undefined)?.query?.ids))).toBe(false);
+  });
+
+  it("checks at most 20 pages per search and says so for the rest", async () => {
+    const meetings = Array.from({ length: 22 }, (_, i) => ibabsMeeting(String(8200000 + i), `0a1b2c3d-0000-4000-8000-${String(i).padStart(12, "0")}`));
+    const { calls } = mockOri({ search: () => json(searchResponse(meetings)), page: () => html() });
+
+    const out = await new OriSource(config).search({ query: "fietspaden", rows: 22, gemeente: "Provincie Noord-Holland" });
+
+    expect(heads(calls)).toHaveLength(20);
+    expect(out.items.filter((x) => x.link_type === "meeting_page")).toHaveLength(20);
+    expect(out.items.filter((x) => String(x.link_note).includes("niet gecontroleerd"))).toHaveLength(2);
+  });
+
+  describe("GemeenteOplossingen and Haarlem, confirmed through the system's API", () => {
+    const GO_USED = "https://api.openraadsinformatie.nl/v1/resolve/gemeenteoplossingen/gemeenteraad.groningen.nl/api/v1/meetings%3Fdate_from%3D1782864000%26date_to%3D1783036800";
+    const GO_API = "https://gemeenteraad.groningen.nl/api/v1/meetings/5423";
+    const GO_PAGE = "https://gemeenteraad.groningen.nl/Vergaderingen/gemeenteraad/2026/1-juli/15:00";
+    const goMeeting = hit("ori_groningen_20250415000000", "7938185", {
+      "@type": "Meeting",
+      name: "Raadsvergadering",
+      last_discussed_at: "2026-07-01T15:00:00+00:00",
+      ...provenance("gemeenteoplossingen", "meeting", { original_identifier: "5423", used: GO_USED }),
+    });
+    const goItem = hit("ori_groningen_20250415000000", "7938190", {
+      "@type": "AgendaItem",
+      name: "Fietspaden in de binnenstad",
+      parent: "7938185",
+      last_discussed_at: "2026-07-01T15:00:00+00:00",
+      ...provenance("gemeenteoplossingen", "agenda_item", { reference_identifier: "38439" }),
+    });
+    const gets = (calls: Call[]) => calls.filter((c) => c.method === "GET" && c.url.hostname !== "api.openraadsinformatie.nl").map((c) => c.url.href);
+
+    it("links a meeting and its agenda item to the page the GemeenteOplossingen API names", async () => {
+      const { calls } = mockOri({
+        search: () => json(searchResponse([goItem, goMeeting])),
+        attachments: () => json(searchResponse([goMeeting])),
+        api: () => json({ id: 5423, confidential: false, fullUrl: GO_PAGE, items: [] }),
+      });
+
+      const out = await new OriSource(config).search({ query: "fietspaden", rows: 5, gemeente: "Groningen" });
+
+      for (const item of out.items) {
+        expect(item.url).toBe(GO_PAGE);
+        expect(item.link_type).toBe("meeting_page");
+        expect(item.source_system).toBe("GemeenteOplossingen");
+        expect(item.link_note).toContain("bevestigd via de API van GemeenteOplossingen");
+      }
+      expect(out.items[0].link_note).toContain("Pagina van de vergadering met dit agendapunt");
+      expect(out.items[0].link_note).not.toContain("anker");
+      expect(out.items[1].ori_record_url).toBe("https://api.openraadsinformatie.nl/v1/elastic/ori_groningen/_doc/7938185");
+      // One API lookup for both, without following redirects; no HEAD, since any path answers 200 there.
+      expect(gets(calls)).toEqual([GO_API]);
+      expect(calls.find((c) => c.url.href === GO_API)?.redirect).toBe("manual");
+      expect(heads(calls)).toEqual([]);
+    });
+
+    it("keeps the ORI record, and says why, when the API does not confirm the meeting", async () => {
+      const cases: Array<[() => Response, string]> = [
+        // GemeenteOplossingen answers HTTP 500 for a meeting it does not have.
+        [() => json({ status: "Internal Server Error", code: 500, result: null }, 500), "HTTP 500"],
+        [() => json({ id: 5423, fullUrl: "https://elders.example/Vergaderingen/Raad" }), "geen pagina op deze site"],
+        [() => json({ id: 5423, confidential: true, fullUrl: GO_PAGE }), "besloten vergadering"],
+        [() => new Response("<html></html>", { status: 200, headers: { "content-type": "text/html" } }), "staat niet in het antwoord"],
+      ];
+      for (const [response, reason] of cases) {
+        clearHttpCache();
+        mockOri({ search: () => json(searchResponse([goMeeting])), api: response });
+
+        const out = await new OriSource(config).search({ query: "fietspaden", rows: 5, gemeente: "Groningen" });
+
+        expect(out.items[0].link_type).toBe("ori_record");
+        expect(out.items[0].url).toBe("https://api.openraadsinformatie.nl/v1/elastic/ori_groningen/_doc/7938185");
+        expect(out.items[0].link_note).toContain("niet bevestigd door de API van GemeenteOplossingen");
+        expect(out.items[0].link_note).toContain(reason);
+      }
+    });
+
+    it("links Haarlem to the Notubiz page once the Notubiz API has the meeting, and not when it is gone", async () => {
+      const meeting = hit("ori_haarlem_20250416182404", "7951001", {
+        "@type": "Meeting",
+        name: "Commissie Ontwikkeling",
+        last_discussed_at: "2026-06-11T19:30:00+02:00",
+        ...provenance("notubiz", "meeting", { original_identifier: "1400001" }),
+      });
+      const item = hit("ori_haarlem_20250416182404", "7951002", {
+        "@type": "AgendaItem",
+        name: "Parkeerbeleid binnenstad",
+        parent: "7951001",
+        last_discussed_at: "2026-06-11T19:30:00+02:00",
+        ...provenance("notubiz", "agenda_item", { reference_identifier: "9900001" }),
+      });
+      const api = "https://api.notubiz.nl/events/meetings/1400001?format=json&version=1.17.0";
+      const page = "https://gemeentebestuur-haarlem.notubiz.nl/vergadering/1400001";
+      const { calls } = mockOri({
+        search: () => json(searchResponse([meeting, item])),
+        attachments: () => json(searchResponse([meeting])),
+        api: () => json({ meeting: { id: 1400001, confidential: 0, url: `${page}/Commissie+Ontwikkeling` } }),
+      });
+
+      const out = await new OriSource(config).search({ query: "parkeerbeleid", rows: 5 });
+
+      expect(out.items[0].url).toBe(page);
+      expect(out.items[1].url).toBe(`${page}#ai_9900001`);
+      expect(out.items.every((x) => x.link_type === "meeting_page")).toBe(true);
+      expect(out.items[1].link_note).toContain("bevestigd via de API van Notubiz");
+      expect(gets(calls)).toEqual([api]);
+      // The page itself sits behind a bot check and is not asked.
+      expect(heads(calls)).toEqual([]);
+
+      clearHttpCache();
+      mockOri({ search: () => json(searchResponse([meeting])), api: () => json({ resource: "meeting", error_code: 404 }, 404) });
+      const gone = await new OriSource(config).search({ query: "parkeerbeleid", rows: 5 });
+      expect(gone.items[0].link_type).toBe("ori_record");
+      expect(gone.items[0].link_note).toContain("niet bevestigd door de API van Notubiz (HTTP 404)");
+    });
+  });
+
+  describe("time limit", () => {
+    const meetings = (n: number, from = 0) => Array.from({ length: n }, (_, i) => ibabsMeeting(String(8300000 + from + i), `0a1b2c3d-0000-4000-8000-${String(from + i).padStart(12, "0")}`));
+
+    it("stops waiting for page checks after the time limit and drops the checks still queued", async () => {
+      let answered = 0;
+      const { calls } = mockOri({
+        search: () => json(searchResponse(meetings(25))),
+        // A portal that answers, but only after the search's time limit.
+        page: () => new Promise<Response>((resolve) => setTimeout(() => {
+          answered += 1;
+          resolve(html());
+        }, 150)),
+      });
+      const ori = new OriSource(config, { pageLinkBudgetMs: 50 });
+
+      const out = await ori.search({ query: "fietspaden", rows: 25, gemeente: "Provincie Noord-Holland" });
+
+      // Returned before any page answered.
+      expect(answered).toBe(0);
+      expect(out.items.every((x) => x.link_type === "ori_record")).toBe(true);
+      expect(out.items.filter((x) => String(x.link_note).includes("tijdslimiet"))).toHaveLength(20);
+      expect(out.items.filter((x) => String(x.link_note).includes("meer dan 20"))).toHaveLength(5);
+      expect(heads(calls)).toHaveLength(10);
+
+      // The checks under way finish in the background and are kept for the next
+      // search; the queued ones are never made, and the returned records do not change.
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(answered).toBe(10);
+      expect(heads(calls)).toHaveLength(10);
+      expect(out.items.every((x) => x.link_type === "ori_record")).toBe(true);
+      const again = await ori.search({ query: "fietspaden", rows: 25, gemeente: "Provincie Noord-Holland" });
+      expect(again.items.filter((x) => x.link_type === "meeting_page")).toHaveLength(10);
+    });
+
+    it("says so when an agenda item's meeting was still being looked up", async () => {
+      const item = hit("osi_noord-holland_20250720165905", "8100010", {
+        "@type": "AgendaItem",
+        name: "Fietspaden langs provinciale wegen",
+        parent: "8100001",
+        last_discussed_at: "2026-06-10T13:00:00+00:00",
+        ...provenance("ibabs", "agenda_item", { reference_identifier: ITEM_GUID }),
+      });
+      const { calls } = mockOri({
+        search: () => json(searchResponse([item])),
+        attachments: () => new Promise<Response>((resolve) => setTimeout(() => resolve(json(searchResponse([ibabsMeeting()]))), 120)),
+        page: () => html(),
+      });
+
+      const out = await new OriSource(config, { pageLinkBudgetMs: 30 }).search({ query: "fietspaden", rows: 5, gemeente: "Provincie Noord-Holland" });
+
+      expect(out.items[0].link_type).toBe("ori_record");
+      expect(out.items[0].source_system).toBe("iBabs");
+      expect(out.items[0].link_note).toContain("De vergadering van dit agendapunt is niet opgezocht (tijdslimiet");
+      expect(heads(calls)).toEqual([]);
+    });
+
+    it("leaves a host that missed two checks in a row alone for a while, also in the next search", async () => {
+      const { calls } = mockOri({
+        search: (call) => json(searchResponse(String(JSON.stringify(call.body)).includes("stikstof") ? meetings(1, 2) : meetings(2))),
+        page: () => Promise.reject(new TypeError("fetch failed")),
+      });
+      const ori = new OriSource(config);
+
+      const first = await ori.search({ query: "fietspaden", rows: 5, gemeente: "Provincie Noord-Holland" });
+      const second = await ori.search({ query: "stikstof", rows: 5, gemeente: "Provincie Noord-Holland" });
+
+      expect(first.items.every((x) => String(x.link_note).includes("werkt niet (geen verbinding)"))).toBe(true);
+      expect(second.items[0].link_type).toBe("ori_record");
+      expect(second.items[0].link_note).toContain("is niet gecontroleerd (noordholland.bestuurlijkeinformatie.nl gaf kort daarvoor geen antwoord)");
+      expect(heads(calls)).toHaveLength(2);
+
+      // After the pause the host is asked again.
+      vi.setSystemTime(new Date(NOW.getTime() + 3 * 60 * 1000));
+      await ori.search({ query: "stikstof", rows: 5, gemeente: "Provincie Noord-Holland" });
+      expect(heads(calls)).toHaveLength(3);
+    });
+
+    it("also leaves a host alone after two checks that timed out, which it reports as not checked", async () => {
+      const { calls } = mockOri({
+        search: (call) => json(searchResponse(String(JSON.stringify(call.body)).includes("stikstof") ? meetings(1, 2) : meetings(2))),
+        page: () => Promise.reject(new DOMException("The operation was aborted due to timeout", "TimeoutError")),
+      });
+      const ori = new OriSource(config);
+
+      const first = await ori.search({ query: "fietspaden", rows: 5, gemeente: "Provincie Noord-Holland" });
+      const second = await ori.search({ query: "stikstof", rows: 5, gemeente: "Provincie Noord-Holland" });
+
+      expect(first.items.every((x) => String(x.link_note).includes("is niet gecontroleerd (geen antwoord binnen 2,5 s)"))).toBe(true);
+      expect(second.items[0].link_note).toContain("is niet gecontroleerd (noordholland.bestuurlijkeinformatie.nl gaf kort daarvoor geen antwoord)");
+      expect(heads(calls)).toHaveLength(2);
+    });
+
+    it("asks a paused host once after the pause, not a whole round of checks, and pauses it again when it is still down", async () => {
+      const { calls } = mockOri({
+        search: (call) => json(searchResponse(String(JSON.stringify(call.body)).includes("stikstof") ? meetings(6, 10) : meetings(2))),
+        page: () => Promise.reject(new TypeError("fetch failed")),
+      });
+      const ori = new OriSource(config);
+      await ori.search({ query: "fietspaden", rows: 5, gemeente: "Provincie Noord-Holland" });
+      expect(heads(calls)).toHaveLength(2);
+
+      vi.setSystemTime(new Date(NOW.getTime() + 3 * 60 * 1000));
+      const after = await ori.search({ query: "stikstof", rows: 10, gemeente: "Provincie Noord-Holland" });
+
+      // One check goes; the other five wait for its answer and are left out.
+      expect(heads(calls)).toHaveLength(3);
+      expect(after.items.filter((x) => String(x.link_note).includes("werkt niet (geen verbinding)"))).toHaveLength(1);
+      expect(after.items.filter((x) => String(x.link_note).includes("gaf kort daarvoor geen antwoord"))).toHaveLength(5);
+      // The miss started a new pause.
+      await ori.search({ query: "stikstof", rows: 10, gemeente: "Provincie Noord-Holland" });
+      expect(heads(calls)).toHaveLength(3);
+    });
+
+    it("lets every check through again once the one check after the pause is answered", async () => {
+      let down = true;
+      const { calls } = mockOri({
+        search: (call) => json(searchResponse(String(JSON.stringify(call.body)).includes("stikstof") ? meetings(1, 10) : String(JSON.stringify(call.body)).includes("woningbouw") ? meetings(3, 20) : meetings(2))),
+        page: () => (down ? Promise.reject(new TypeError("fetch failed")) : html()),
+      });
+      const ori = new OriSource(config);
+      await ori.search({ query: "fietspaden", rows: 5, gemeente: "Provincie Noord-Holland" });
+
+      down = false;
+      vi.setSystemTime(new Date(NOW.getTime() + 3 * 60 * 1000));
+      await ori.search({ query: "stikstof", rows: 5, gemeente: "Provincie Noord-Holland" });
+      const next = await ori.search({ query: "woningbouw", rows: 5, gemeente: "Provincie Noord-Holland" });
+
+      expect(heads(calls)).toHaveLength(2 + 1 + 3);
+      expect(next.items.every((x) => x.link_type === "meeting_page")).toBe(true);
+    });
+
+    it("keeps asking a host after a single miss: one slow page does not pause a working site", async () => {
+      let first = true;
+      const { calls } = mockOri({
+        search: (call) => json(searchResponse(String(JSON.stringify(call.body)).includes("stikstof") ? meetings(1, 1) : meetings(1))),
+        page: () => {
+          if (!first) return html();
+          first = false;
+          return Promise.reject(new DOMException("The operation was aborted due to timeout", "TimeoutError"));
+        },
+      });
+      const ori = new OriSource(config);
+
+      await ori.search({ query: "fietspaden", rows: 5, gemeente: "Provincie Noord-Holland" });
+      const second = await ori.search({ query: "stikstof", rows: 5, gemeente: "Provincie Noord-Holland" });
+
+      expect(heads(calls)).toHaveLength(2);
+      expect(second.items[0].link_type).toBe("meeting_page");
+    });
+  });
+});
+
 describe("ori_search tool", () => {
   async function callTool(args: Record<string, unknown>): Promise<Record<string, any>> {
     const server = createServer();
@@ -728,10 +1228,19 @@ describe("ori_search tool", () => {
     await callTool({ query: "OV OR fietsen", gemeente: "Eindhoven" });
     await callTool({ query: "OV NOT Stadsregio", gemeente: "Eindhoven" });
     await callTool({ query: '"sociale woningbouw"', gemeente: "Eindhoven" });
-    await callTool({ query: "ov or fietsen", gemeente: "Eindhoven" });
+    await callTool({ query: "parkeren OR fietsen", gemeente: "Eindhoven" });
 
     const sent = searchCalls().map((c) => (c.body as Record<string, any>).query.bool.must[0].query_string.query);
-    expect(sent).toEqual(["OV OR fietsen", "OV NOT Stadsregio", '"sociale woningbouw"', "ov OR fietsen"]);
+    expect(sent).toEqual(["OV OR fietsen", "OV NOT Stadsregio", '"sociale woningbouw"', "parkeren OR fietsen"]);
+  });
+
+  it("keeps a lowercase 'or' a search word through the rewriter, and tells the caller how to write the operator", async () => {
+    const { searchCalls } = mockOri({ search: () => json(searchResponse([])) });
+
+    const payload = await callTool({ query: "parkeren or fietsen", gemeente: "Eindhoven" });
+
+    expect((searchCalls()[0].body as Record<string, any>).query.bool.must[0].query_string.query).toBe('parkeren "or" fietsen');
+    expect(payload.access_note).toContain("OR, AND of NOT in hoofdletters");
   });
 
   it("still strips the question frame from a plain question", async () => {
@@ -745,6 +1254,36 @@ describe("ori_search tool", () => {
 
     const plain = await callTool({ query: "parkeerbeleid", gemeente: "Eindhoven" });
     expect(String(plain.access_note ?? "")).not.toContain("Zoekterm herschreven");
+  });
+
+  it("gives a meeting its checked page as canonical_url and keeps the ORI record in the data", async () => {
+    const guid = "0a1b2c3d-0000-4000-8000-0000000000f1";
+    const page = `https://noordholland.bestuurlijkeinformatie.nl/Agenda/Index/${guid}`;
+    mockOri({
+      search: () =>
+        json(
+          searchResponse([
+            hit("osi_noord-holland_20250720165905", "8300001", {
+              "@type": "Meeting",
+              name: "Statencommissie Natuur",
+              last_discussed_at: "2026-06-15T13:00:00+00:00",
+              was_generated_by: {
+                same_as: `https://openbesluitvorming.nl/voc/mapping/noord-holland/ibabs/meeting/${guid}`,
+                original_identifier: guid,
+                used: "https://api.openraadsinformatie.nl/v1/resolve/ibabs/GetMeetingsByDateRange/Sitename%3DNoord-holland/StartDate%3D2026-06-14T00%3A00%3A00/EndDate%3D2026-06-16T00%3A00%3A00",
+              },
+            }),
+          ]),
+        ),
+      page: () => new Response(null, { status: 200, headers: { "content-type": "text/html" } }),
+    });
+
+    const payload = await callTool({ query: "stikstof", gemeente: "Provincie Noord-Holland" });
+
+    expect(payload.records[0].canonical_url).toBe(page);
+    expect(payload.records[0].data.link_type).toBe("meeting_page");
+    expect(payload.records[0].data.source_system).toBe("iBabs");
+    expect(payload.records[0].data.ori_record_url).toBe("https://api.openraadsinformatie.nl/v1/elastic/osi_noord-holland/_doc/8300001");
   });
 
   it("summarises a name without an index as such", async () => {

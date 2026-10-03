@@ -42,6 +42,9 @@ const CONNECTOR_CATEGORY: Record<string, ConnectorCategory> = {
   ngr: "discovery",
   rivm: "discovery",
   ori: "discovery",
+  // Label of the checks that a council system's agenda page answers (ori.ts
+  // fetches those pages itself; the name keeps them apart from ORI in the logs).
+  ori_pages: "discovery",
   api_register: "discovery",
   bag_linked_data: "discovery",
   rce_linked_data: "discovery",
@@ -63,12 +66,20 @@ const CONNECTOR_CATEGORY: Record<string, ConnectorCategory> = {
   ns: "live",
   dnb: "static",
   tenderned: "semi_live",
+  // Split from `tenderned` (rectified deadlines from the detail records), like
+  // luchtmeetnet_lki: the same data, so the same freshness.
+  tenderned_recheck: "semi_live",
   tuchtrecht: "static",
   samenwerkende_catalogi: "static",
   brp_gewaspercelen: "static",
   verkiezingsuitslagen: "static",
   eu_cellar: "static",
   lido: "semi_live",
+  // A register organisations publish to themselves, a few entries a day: searched
+  // like the API register and NGR catalogues.
+  algoritmeregister: "discovery",
+  // TOOI organisation metadata (abbreviations, end dates) changes with reorganisations only.
+  tooi_sparql: "static",
 };
 
 const FAILURE_THRESHOLD = 3;

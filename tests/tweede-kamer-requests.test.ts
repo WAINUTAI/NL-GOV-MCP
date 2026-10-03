@@ -329,3 +329,32 @@ describe("links are looked up by Id after the search", () => {
     expect(persoon).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("a document search that reports no total", () => {
+  /** The service sends a count only when asked ($count=true). */
+  const answer = (input: string) =>
+    isLookup(input) ? jsonResponse({ value: [] }) : jsonResponse({ ...(new URL(input).searchParams.has("$count") ? { "@odata.count": 1 } : {}), value: [DOC] });
+
+  it("leaves $count out with count: false, which the service runs as a second pass", async () => {
+    const fetchMock = vi.fn(async (input: string) => answer(input));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const out = await new TweedeKamerSource(testConfig).searchDocuments({ query: "fietspaden", top: 5, count: false });
+
+    const [search] = searchUrls(fetchMock);
+    expect(search.searchParams.has("$count")).toBe(false);
+    expect(out.params.$count).toBeUndefined();
+    expect(out.total).toBeNull();
+    expect(out.items).toHaveLength(1);
+  });
+
+  it("still counts by default", async () => {
+    const fetchMock = vi.fn(async (input: string) => answer(input));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const out = await new TweedeKamerSource(testConfig).searchDocuments({ query: "fietspaden", top: 5 });
+
+    expect(searchUrls(fetchMock)[0].searchParams.get("$count")).toBe("true");
+    expect(out.total).toBe(1);
+  });
+});

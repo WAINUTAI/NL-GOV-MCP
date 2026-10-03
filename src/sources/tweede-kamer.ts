@@ -149,6 +149,34 @@ const LINK_EXPANDS: Record<string, { nav: string; expand: string }> = {
 const LOOKUP_BATCH = 25;
 
 /**
+ * The meeting date (vergaderdatum) of Agendapunt, Besluit and Stemming records:
+ * date_from/date_to filter on it (TK_DATE_FIELDS), but the records themselves
+ * only carry GewijzigdOp, the last change. It is looked up afterwards for the
+ * distinct parent ids of a page (Activiteit, Agendapunt or Besluit), so one
+ * request per 25 of them: 30–40 ms live, and a page of 25 records is one
+ * request. Expanded on the search itself it made the service slower (Stemming
+ * with a date filter: 0.6 s without, 4.8 s with the expand; October 2026).
+ */
+const SESSION_DATE_LOOKUPS: Record<
+  string,
+  { key: string; entity: string; query: { $select: string; $expand?: string }; date: (row: Record<string, unknown>) => unknown }
+> = {
+  Agendapunt: { key: "Activiteit_Id", entity: "Activiteit", query: { $select: "Id,Datum" }, date: (row) => row.Datum },
+  Besluit: {
+    key: "Agendapunt_Id",
+    entity: "Agendapunt",
+    query: { $select: "Id", $expand: "Activiteit($select=Id,Datum)" },
+    date: (row) => firstObject(row.Activiteit)?.Datum,
+  },
+  Stemming: {
+    key: "Besluit_Id",
+    entity: "Besluit",
+    query: { $select: "Id", $expand: "Agendapunt($select=Id;$expand=Activiteit($select=Id,Datum))" },
+    date: (row) => firstObject(firstObject(row.Agendapunt)?.Activiteit)?.Datum,
+  },
+};
+
+/**
  * Decision details for votes: outcome, the zaak voted on (with one document
  * number for its page) and the date of the voting session. Fetched for the
  * distinct Besluit ids of a page of votes, not expanded on every Stemming row:
@@ -938,17 +966,23 @@ export function tkRecordView(entity: string, item: Record<string, unknown>, apiB
     case "Fractie":
     case "Commissie":
       return { title: str(item.NaamNL) || str(item.Afkorting) || str(item.Id) || entity, url, snippet: str(item.Afkorting), date: str(item.GewijzigdOp) };
+    // vergaderdatum: the meeting date tweede_kamer_search adds (SESSION_DATE_LOOKUPS).
     case "Besluit":
-      return { title: str(item.BesluitTekst) || str(item.BesluitSoort) || str(item.Id) || "Besluit", url, snippet: str(item.BesluitSoort), date: str(item.GewijzigdOp) };
+      return {
+        title: str(item.BesluitTekst) || str(item.BesluitSoort) || str(item.Id) || "Besluit",
+        url,
+        snippet: str(item.BesluitSoort),
+        date: str(item.vergaderdatum) || str(item.GewijzigdOp),
+      };
     case "Stemming": {
       const actor = str(item.ActorFractie) || str(item.ActorNaam) || "Stemming";
-      return { title: `${actor}: ${str(item.Soort) || "stemming"}`, url, snippet: str(item.Soort), date: str(item.GewijzigdOp) };
+      return { title: `${actor}: ${str(item.Soort) || "stemming"}`, url, snippet: str(item.Soort), date: str(item.vergaderdatum) || str(item.GewijzigdOp) };
     }
     case "Toezegging":
       return { title: truncate(str(item.Tekst) || str(item.Nummer) || "Toezegging", 200), url, snippet: str(item.Status), date: str(item.Aanmaakdatum) || str(item.GewijzigdOp) };
     default: {
       const title = str(item.Titel) || str(item.Onderwerp) || str(item.NaamNL) || str(item.Naam) || str(item.Id) || entity;
-      return { title, url, snippet: str(item.Onderwerp) || str(item.Soort), date: str(item.Datum) || str(item.GewijzigdOp) };
+      return { title, url, snippet: str(item.Onderwerp) || str(item.Soort), date: str(item.Datum) || str(item.vergaderdatum) || str(item.GewijzigdOp) };
     }
   }
 }
@@ -1181,11 +1215,15 @@ export class TweedeKamerSource {
    * the page size, and reporting that as the total told every caller their
    * 25 results were all there was. Verified present on Document, Zaak, Persoon,
    * Fractie, Besluit and Stemming; `null` when a response omits it.
+   *
+   * `count: false` leaves it out, for a caller that does not report the total:
+   * the service runs a text filter a second time for the count, and a Document
+   * search took 4.5-7 s with it against 2.3-3.7 s without (October 2026).
    */
   private async fetchEntity(
     entity: string,
     params: Record<string, string>,
-    options: { timeoutMs?: number; retries?: number } = {},
+    options: { timeoutMs?: number; retries?: number; count?: boolean } = {},
   ): Promise<{
     items: Array<Record<string, unknown>>;
     total: number | null;
@@ -1193,8 +1231,9 @@ export class TweedeKamerSource {
     params: Record<string, string>;
   }> {
     const endpoint = `${this.apiBase}/${entity}`;
-    const query = { $count: "true", ...params };
-    const { data, meta } = await getJson<Record<string, unknown>>(endpoint, { query, ...options });
+    const { count = true, ...requestOptions } = options;
+    const query = count ? { $count: "true", ...params } : { ...params };
+    const { data, meta } = await getJson<Record<string, unknown>>(endpoint, { query, ...requestOptions });
     const rawCount = Number(data["@odata.count"]);
     return {
       items: toItems(data),
@@ -1221,10 +1260,10 @@ export class TweedeKamerSource {
     }
   }
 
-  /** One search request (see SEARCH_TIMEOUT_MS and withTransientRetry). */
-  private async fetchSearch(plan: TkQueryPlan): Promise<EntityPage> {
+  /** One search request (see SEARCH_TIMEOUT_MS and withTransientRetry); `count` as in fetchEntity. */
+  private async fetchSearch(plan: TkQueryPlan, count = true): Promise<EntityPage> {
     return this.withTransientRetry(() =>
-      this.fetchEntity(plan.entity, plan.params, { timeoutMs: SEARCH_TIMEOUT_MS, retries: 0 }),
+      this.fetchEntity(plan.entity, plan.params, { timeoutMs: SEARCH_TIMEOUT_MS, retries: 0, count }),
     );
   }
 
@@ -1262,7 +1301,7 @@ export class TweedeKamerSource {
   private async lookupByIds(
     entity: string,
     ids: string[],
-    query: { $select: string; $expand: string },
+    query: { $select: string; $expand?: string },
   ): Promise<{ byId: Map<string, Record<string, unknown>>; failed: boolean }> {
     const byId = new Map<string, Record<string, unknown>>();
     const batches: string[][] = [];
@@ -1311,6 +1350,58 @@ export class TweedeKamerSource {
   }
 
   /**
+   * Agendapunt, Besluit and Stemming records with the date of their meeting as
+   * `vergaderdatum` (see SESSION_DATE_LOOKUPS), null where it is not known.
+   * Other entities are returned as they are. A failed lookup leaves the
+   * records usable and is explained in the notes, as is a record without a
+   * meeting date: its date stays GewijzigdOp.
+   *
+   * The notes say which date a record shows only after the lookup, so they
+   * never claim a meeting date the lookup did not bring. `sortedOnChange`: the
+   * page is in the default order, GewijzigdOp; when records show their meeting
+   * date, that order is not the order of the dates shown, and the note says
+   * how to sort on the meeting date instead.
+   */
+  private async withSessionDates(
+    entity: string,
+    items: Array<Record<string, unknown>>,
+    sortedOnChange = false,
+  ): Promise<{ items: Array<Record<string, unknown>>; notes: string[] }> {
+    const lookup = SESSION_DATE_LOOKUPS[entity];
+    if (!lookup || !items.length) return { items, notes: [] };
+    const parentId = (item: Record<string, unknown>) => str(item[lookup.key]).toLowerCase();
+    const ids = Array.from(new Set(items.map(parentId).filter((id) => GUID_RE.test(id))));
+    const found = ids.length ? await this.lookupByIds(lookup.entity, ids, lookup.query) : { byId: new Map(), failed: false };
+    let missing = 0;
+    const dated = items.map((item) => {
+      const parent = found.byId.get(parentId(item));
+      const date = parent ? str(lookup.date(parent)) : "";
+      if (!date) missing += 1;
+      return { ...item, vergaderdatum: date || null };
+    });
+    const notes: string[] = [];
+    if (missing < items.length) {
+      const sortPath = TK_DATE_FIELDS[entity];
+      notes.push(
+        `De datum van een record is de datum van de vergadering (vergaderdatum); GewijzigdOp is de wijzigingsdatum.${
+          sortedOnChange && sortPath
+            ? ` De records staan op GewijzigdOp (laatste wijziging), niet op die datum; sorteer op vergaderdatum met orderby '${sortPath} desc'.`
+            : ""
+        }`,
+      );
+    }
+    if (missing) {
+      const share = missing === items.length ? "alle records" : `${missing} van de ${items.length} records`;
+      notes.push(
+        found.failed
+          ? `De vergaderdatum kon niet (voor alle records) worden opgehaald; bij ${share} is de datum de wijzigingsdatum (GewijzigdOp).`
+          : `Bij ${share} is geen vergaderdatum bekend; daar is de datum de wijzigingsdatum (GewijzigdOp).`,
+      );
+    }
+    return { items: dated, notes };
+  }
+
+  /**
    * Build (without fetching) the OData request for tweede_kamer_search.
    * `extraReserve` leaves that many more nodes free (used for the retry after
    * the service rejected a plan whose caller filter was underestimated).
@@ -1355,7 +1446,7 @@ export class TweedeKamerSource {
       if (part) parts.push(part);
       notes.push(
         dateField.includes("/")
-          ? `Datumfilter op ${entity}.${dateField} (Nederlandse tijd); de datum bij elk record is de wijzigingsdatum (GewijzigdOp).`
+          ? `Datumfilter op ${entity}.${dateField} (Nederlandse tijd): de datum van de vergadering (vergaderdatum).`
           : `Datumfilter op ${entity}.${dateField} (Nederlandse tijd).`,
       );
       const open = openBoundNote(dateFrom, dateTo);
@@ -1453,13 +1544,14 @@ export class TweedeKamerSource {
       };
     }
     const linked = await this.linkPage(plan.entity, out.items);
+    const dated = await this.withSessionDates(plan.entity, linked.items, !args.orderby?.trim());
     return {
       ...out,
       entity: plan.entity,
-      notes: linked.failed ? [...plan.notes, LINKS_FAILED_NOTE] : plan.notes,
+      notes: [...plan.notes, ...(linked.failed ? [LINKS_FAILED_NOTE] : []), ...dated.notes],
       terms: plan.terms,
       fields: plan.fields,
-      items: linked.items,
+      items: dated.items,
     };
   }
 
@@ -1517,6 +1609,10 @@ export class TweedeKamerSource {
     };
   }
 
+  /**
+   * Documents matching the query. `count: false` asks for no total (`total`
+   * is then null), which makes the search about twice as fast; see fetchEntity.
+   */
   async searchDocuments(args: {
     query?: string;
     top: number;
@@ -1524,10 +1620,11 @@ export class TweedeKamerSource {
     date_from?: string;
     date_to?: string;
     skip?: number;
+    count?: boolean;
   }) {
     const candidateRows = await this.countCandidates(this.planDocuments(args).probe);
     const plan = this.planDocuments(args, { candidateRows });
-    const out = await this.fetchSearch(plan);
+    const out = await this.fetchSearch(plan, args.count !== false);
     const linked = await this.linkPage("Document", out.items);
     return {
       ...out,

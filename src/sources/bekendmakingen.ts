@@ -3,7 +3,7 @@ import { getText } from "../utils/http.js";
 import { htmlToText } from "../utils/html-text.js";
 import { fetchPdfText } from "../utils/pdf-text.js";
 import { placeKey, placeVariants } from "../utils/place-aliases.js";
-import type { RewriteResult } from "../utils/query-rewriter.js";
+import { rewriteNote, type RewriteResult } from "../utils/query-rewriter.js";
 import { extractSruRecords, parseXml } from "../utils/xml-parser.js";
 import { compoundSearchParts, escapeSruValue, freeTextCqlPlan } from "../utils/sru-cql.js";
 
@@ -489,6 +489,8 @@ interface BekendmakingMeta {
   publicationDate?: string;
   modified?: string;
   authority?: string;
+  /** Each dcterms:creator on its own ("Tweede Kamer der Staten-Generaal"). */
+  creators: string[];
   authorityType?: string;
   type?: string;
   productArea?: string;
@@ -533,6 +535,7 @@ function extractMeta(record: Record<string, unknown>): BekendmakingMeta {
     publicationDate: first(owmsmantel.available),
     modified: first(owmskern.modified),
     authority: strings(owmskern.creator).join("; ") || undefined,
+    creators: strings(owmskern.creator),
     authorityType: first(tpmeta.organisatietype),
     type: first(owmskern.type),
     productArea: first(tpmeta["product-area"]),
@@ -560,11 +563,26 @@ function extractMeta(record: Record<string, unknown>): BekendmakingMeta {
   };
 }
 
-/** "II" for the Tweede Kamer (h-tk-…, ah-tk-…), "I" for the Eerste Kamer (h-ek-…, ah-ek-…). */
-function chamber(identifier: string | undefined): string | undefined {
+/**
+ * "II" for the Tweede Kamer, "I" for the Eerste Kamer: from the identifier when
+ * it names the chamber (h-tk-…, ah-tk-…, h-ek-…, ah-ek-…), otherwise from the
+ * publisher. Since the 2025-2026 session Aanhangsel publications are numbered
+ * "ah-1000001", without the chamber, while the Aanhangsel numbering still runs
+ * per chamber: in 2026-2027 both chambers have an "nr. 1". Every Aanhangsel
+ * record has one chamber as its creator ("Tweede Kamer der Staten-Generaal" or
+ * "Eerste Kamer der Staten-Generaal"; 91,419 + 463 of 91,882, verified live,
+ * October 2026). No chamber, or both, gives undefined: the citation then leaves
+ * the chamber out instead of guessing.
+ */
+function chamber(identifier: string | undefined, creators: readonly string[] = []): string | undefined {
   const match = /^a?h-(tk|ek)-/i.exec(identifier ?? "");
-  if (!match) return undefined;
-  return match[1].toLowerCase() === "tk" ? "II" : "I";
+  if (match) return match[1].toLowerCase() === "tk" ? "II" : "I";
+  const houses = new Set<string>();
+  for (const creator of creators) {
+    const house = /^(tweede|eerste) kamer(?: der staten-generaal)?$/i.exec(creator.replace(/\s+/g, " ").trim());
+    if (house) houses.add(house[1].toLowerCase() === "tweede" ? "II" : "I");
+  }
+  return houses.size === 1 ? [...houses][0] : undefined;
 }
 
 /**
@@ -574,7 +592,7 @@ function chamber(identifier: string | undefined): string | undefined {
  */
 function vindplaats(m: BekendmakingMeta): string | undefined {
   if (!m.journal) return undefined;
-  const house = chamber(m.identifier);
+  const house = chamber(m.identifier, m.creators);
   // Every item of one meeting shares the meeting number; the item tells them apart.
   if (/^handelingen$/i.test(m.journal) && m.sessionYear && m.number) {
     return `Handelingen${house ? ` ${house}` : ""} ${m.sessionYear}, nr. ${m.number}${m.handelingenItem ? `, item ${m.handelingenItem}` : ""}`;
@@ -877,7 +895,9 @@ export function rewriteKeepingSyntax(query: string, rewrite: (text: string) => R
     ...out,
     original: query,
     rewritten,
-    explanation: out.explanation ? restore(out.explanation) : undefined,
+    // Written from the restored query: the note on the masked one, restored,
+    // put a held phrase in quotes twice ('""zorg en veiligheid""').
+    explanation: out.explanation ? rewriteNote({ original: query, rewritten, recency: out.recency }) : undefined,
     ...(syntaxQuery && syntaxQuery !== rewritten ? { syntaxQuery } : {}),
   };
 }

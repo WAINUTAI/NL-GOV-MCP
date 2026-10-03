@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractKeywords, looseTimePhrases, metaNounBinding, rewriteNote, rewriteQuery } from "../src/utils/query-rewriter.js";
+import { extractKeywordTerms, extractKeywords, looseTimePhrases, metaNounBinding, rewriteNote, rewriteQuery } from "../src/utils/query-rewriter.js";
 
 const moderate = (q: string) => rewriteQuery(q, "moderate").rewritten;
 const strict = (q: string) => rewriteQuery(q, "strict").rewritten;
@@ -355,5 +355,65 @@ describe("extractKeywords", () => {
   it("returns nothing for a question without a topic", () => {
     expect(extractKeywords("Wat is er?")).toEqual([]);
     expect(extractKeywords("")).toEqual([]);
+  });
+
+  it("treats a comparison as the frame of the question, not as its topic", () => {
+    // "vergelijk" was a required word: the Tweede Kamer route found nothing and
+    // fell back to the single term "kabinetsbeleid".
+    expect(extractKeywords("Vergelijk de moties met het kabinetsbeleid over stikstof", { exclude: ["moties"] })).toEqual(["kabinetsbeleid", "stikstof"]);
+    expect(extractKeywords("Wat is het verschil tussen huurtoeslag en zorgtoeslag?")).toEqual(["huurtoeslag", "zorgtoeslag"]);
+    expect(extractKeywords("Een vergelijking tussen de woningbouw in Utrecht en Amsterdam")).toEqual(["woningbouw", "utrecht", "amsterdam"]);
+    expect(extractKeywords("Kun je het parkeerbeleid van Delft en Leiden vergelijken?")).toEqual(["parkeerbeleid", "delft", "leiden"]);
+    expect(extractKeywords("vergelijking van fietspaden")).toEqual(["fietspaden"]);
+  });
+
+  it("keeps a comparison noun that is part of the topic", () => {
+    expect(extractKeywords("Wat zijn de regionale verschillen in de jeugdzorg?")).toEqual(["regionale", "verschillen", "jeugdzorg"]);
+    expect(extractKeywords('Zoek "verschil tussen" afvalinzameling')).toEqual(["verschil tussen", "afvalinzameling"]);
+  });
+});
+
+describe("extractKeywordTerms", () => {
+  it("tells a run of capitalised words from a phrase the question holds", () => {
+    // A name need not stand in a document in that form: as a phrase,
+    // "schiphol geluidsoverlast" found no motion about noise around Schiphol.
+    expect(extractKeywordTerms("Welke moties gaan over Schiphol Geluidsoverlast?")).toEqual([
+      { text: "moties", kind: "word" },
+      { text: "schiphol geluidsoverlast", kind: "name" },
+    ]);
+    expect(extractKeywordTerms("Welke kamerstukken gaan over de Wet Kwaliteitsborging Bouwen?")).toContainEqual({ text: "wet kwaliteitsborging bouwen", kind: "name" });
+    expect(extractKeywordTerms("Welke kamerstukken gaan over Den Haag en afvalinzameling?")).toContainEqual({ text: "den haag", kind: "name" });
+    expect(extractKeywordTerms('Welke moties gaan over "omgekeerd inzamelen"?')).toContainEqual({ text: "omgekeerd inzamelen", kind: "quoted" });
+  });
+
+  it("marks a meta noun bound into a term as bound, capitalised or not", () => {
+    expect(extractKeywordTerms("Welke gemeenten hebben een open data portaal?")).toContainEqual({ text: "open data portaal", kind: "bound" });
+    expect(extractKeywordTerms("Welke gemeenten hebben een Open Data Portaal?")).toContainEqual({ text: "open data portaal", kind: "bound" });
+    expect(extractKeywordTerms("Open Data Portaal van de gemeente")).toContainEqual({ text: "open data portaal", kind: "bound" });
+    expect(extractKeywordTerms("Hoe werkt de data strategie?")).toContainEqual({ text: "data strategie", kind: "bound" });
+    // A longer name that holds such a term is a name.
+    expect(extractKeywordTerms("Wat is het beleid voor de Open Data Portaal Utrecht?")).toContainEqual({ text: "open data portaal utrecht", kind: "name" });
+  });
+
+  it("gives the same terms as extractKeywords", () => {
+    for (const question of [
+      "Welke moties gaan over Schiphol Geluidsoverlast?",
+      "Welke gemeenten hebben een Open Data Portaal?",
+      'Welke moties gaan over "omgekeerd inzamelen" in Den Haag?',
+      "Wat doet de Belastingdienst met de BTW?",
+    ]) {
+      expect(extractKeywordTerms(question, { exclude: ["moties"] }).map((term) => term.text)).toEqual(extractKeywords(question, { exclude: ["moties"] }));
+    }
+  });
+});
+
+describe("rewriteQuery comparison frames", () => {
+  it("strips a leading comparison like the other question frames", () => {
+    expect(moderate("Vergelijk de moties over stikstof")).toBe("moties over stikstof");
+    expect(moderate("Wat is het verschil tussen huurtoeslag en zorgtoeslag?")).toBe("huurtoeslag en zorgtoeslag");
+    expect(moderate("Een vergelijking van fietspaden")).toBe("fietspaden");
+    expect(strict("Vergelijk uitspraken over huurrecht")).toBe("huurrecht");
+    // Not at the start, and not a frame: the words stay.
+    expect(moderate("regionale verschillen in de jeugdzorg")).toBe("regionale verschillen in de jeugdzorg");
   });
 });
