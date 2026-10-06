@@ -23,7 +23,7 @@ Technical overview of how NL-GOV-MCP is structured internally.
                                    │
                      ┌─────────────┴─────────────┐
                      │   tools.ts                 │
-                     │   76 tool handlers         │
+                     │   77 tool handlers         │
                      │   Zod schemas + logic      │
                      └───┬────────┬────────┬─────┘
                          │        │        │
@@ -80,7 +80,7 @@ A single tool call flows through these steps:
 |------|------|
 | `src/index.ts` | Entry point. Reads `--sse` / `--streamable-http` flags or `MCP_TRANSPORT` env, starts the matching transport. |
 | `src/server.ts` | Creates `McpServer`, calls `registerTools()`, sets up Express routes for HTTP transports, adds `/health` and `/health/sources` endpoints. |
-| `src/tools.ts` | All 76 tool registrations. Each tool has a Zod input schema and an async handler that calls a source, transforms results, and returns via `toMcpToolPayload()`. |
+| `src/tools.ts` | All 77 tool registrations. Each tool has a Zod input schema and an async handler that calls a source, transforms results, and returns via `toMcpToolPayload()`. |
 | `src/types.ts` | Shared TypeScript interfaces: `MCPRecord`, `Provenance`, `MCPToolResponse`, `MCPErrorResponse`, `AppConfig`. |
 | `src/config.ts` | Loads `config/default.json`, merges env var overrides. |
 
@@ -123,7 +123,7 @@ The tool handler in `tools.ts` maps `items` to `MCPRecord[]` and wraps provenanc
 | `eurostat.ts` | REST | `eurostat` |
 | `data-europa.ts` | Custom Search API | `data_europa` |
 | `ruimtelijke-plannen.ts` | PDOK WMS GetFeatureInfo | `ruimtelijke_plannen` |
-| `dso-omgevingsdocumenten.ts` | REST HAL (key required) | `dso_omgevingsdocumenten` |
+| `dso-omgevingsdocumenten.ts` | REST HAL (key required) | `dso_omgevingsdocumenten`, `dso_locatieserver`, `dso_bekendmakingen` |
 | `bagDetail.ts` | Kadaster REST (key required) | `pdok_bag` (bag_address_detail) |
 | `data-politie.ts` | OData v3 (dataderden) | `data_politie` |
 | `cbs-iv3.ts` | OData v3 (dataderden) | `cbs_iv3` |
@@ -141,7 +141,8 @@ The tool handler in `tools.ts` maps `items` to `MCPRecord[]` and wraps provenanc
 | `ns-reisinformatie.ts` | REST (key required) | `ns` |
 | `dnb-statistics.ts` | REST (key required) | `dnb` |
 | `ruimtelijke-plannen.ts` | PDOK WMS GetFeatureInfo + Locatieserver | `ruimtelijke_plannen` |
-| `dso-omgevingsdocumenten.ts` | DSO Presenteren API v8 (REST/HAL+JSON, key required) | `dso_omgevingsdocumenten` |
+| `dso-omgevingsdocumenten.ts` | DSO Presenteren API v8 (REST/HAL+JSON, key required) + PDOK Locatieserver + identifier.overheid.nl and the Officiële Bekendmakingen SRU (bekendmaking of an ontwerp) | `dso_omgevingsdocumenten`; its Locatieserver and bekendmakingen lookups under `dso_locatieserver` and `dso_bekendmakingen`, apart from the circuits of the PDOK and bekendmakingen tools |
+| `dso-regeltekst.ts` | STOP XML of the DSO documentstructuur → plain text (no I/O) | used by `dso_omgevingsdocument_tekst` |
 | `tenderned.ts` | REST JSON (`papi`) + HTML award parse + PDF text extraction | `tenderned`, `tenderned_recheck` |
 | `koop-collecties.ts` | KOOP SRU 2.0, one class per product-area | `tuchtrecht`, `samenwerkende_catalogi` |
 | `brp-gewaspercelen.ts` | PDOK WFS 2.0 (GeoJSON) + Locatieserver | `brp_gewaspercelen` |
@@ -198,7 +199,7 @@ Request arrives
 | Category | TTL | Sources |
 |----------|-----|---------|
 | static | 1 hour | CBS, Rijksbegroting, DUO, Eurostat |
-| semi_live | 10 min | Tweede Kamer, Rechtspraak, Bekendmakingen, Rijksoverheid, data.overheid, PDOK, data.europa |
+| semi_live | 10 min | Tweede Kamer, Rechtspraak, Bekendmakingen, Rijksoverheid, data.overheid, PDOK, data.europa, the DSO search's Locatieserver and bekendmakingen lookups |
 | live | 2 min | Luchtmeetnet, NDW, RDW, Rijkswaterstaat, KNMI |
 | discovery | 30 min | NGR, RIVM, ORI, API Register, BAG/RCE Linked Data, Ruimtelijke Plannen, DSO Omgevingsdocumenten |
 
@@ -245,7 +246,7 @@ The HTTP client, caching, circuit breaker, retry, and concurrency limiting are a
 
 ## Transport modes
 
-All three transports expose the same 76 tools and are created by `server.ts`:
+All three transports expose the same 77 tools and are created by `server.ts`:
 
 | Mode | Protocol | Session model | Use case |
 |------|----------|---------------|----------|

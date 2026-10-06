@@ -45,8 +45,11 @@ import { BrpGewasperceelSource } from "./sources/brp-gewaspercelen.js";
 import { VerkiezingsuitslagenSource } from "./sources/verkiezingsuitslagen.js";
 import { EuCellarSource, normalizeCelex, parseDocumentNumber } from "./sources/eu-cellar.js";
 import { LidoSource, parseLidoId, normalizeLidoType, clampLidoRows } from "./sources/lido.js";
+import { DsoOmgevingsdocumentenSource, DsoInputError, DSO_DOCUMENT_TYPES, DSO_PRESENTEREN_BASE, DSO_RODK_URL, dsoApiKeyProblem, type DocumentType as DsoDocumentType, type DsoSearchArgs, type DsoSearchItem } from "./sources/dso-omgevingsdocumenten.js";
+import { DSO_TEXT_DEFAULT_CHARS, DSO_TEXT_MAX_CHARS, selectDsoText, zoektermWords, type DsoTextPart } from "./sources/dso-regeltekst.js";
 import { AlgoritmeregisterSource, ALGORITMEREGISTER_SEARCH_ENDPOINT, ALGORITMEREGISTER_ORG_ENDPOINT, ALGORITMEREGISTER_MAX_ROWS, ALGORITME_STATUSSEN, ALGORITME_PUBLICATIECATEGORIEEN, ALGORITME_ORGANISATIETYPES, clampAlgoritmeRows, planAlgoritmeWindow, summarizeAlgoritmeSearch } from "./sources/algoritmeregister.js";
 import { mapSourceError, nowIso, successResponse, toMcpToolPayload, errorResponse } from "./utils/response.js";
+import { SourceRequestError } from "./utils/http.js";
 import { parseTemporalRange } from "./utils/temporal.js";
 import { applyOutputFormat } from "./utils/output-format.js";
 import { getConnectorHealth } from "./utils/connector-runtime.js";
@@ -126,6 +129,34 @@ const TK_WORDS_APART = "woorden afzonderlijk";
 function tkDocumentRecord(item: Record<string, unknown>): MCPRecord {
   const view = tkRecordView("Document", item, config.endpoints.tweedeKamer);
   return record("tweedekamer", view.title, view.url, item, view.snippet, view.date);
+}
+
+/**
+ * A DSO omgevingsdocument as dso_omgevingsdocumenten_search and nl_gov_ask show
+ * it: linked to its readable text (documentUrl), dated by the start of its
+ * current version or, for an ontwerp, by its announcement. An ontwerp's snippet
+ * says whether it is ter inzage, or that the DSO does not know; a version that
+ * a newer one replaces says through which day it applies. A DSO record that is
+ * no rule document (the Omgevingswet's pointer, the Rijk's aansluitdocument)
+ * says so in its title.
+ */
+function dsoRecord(x: DsoSearchItem): MCPRecord {
+  const date = x.soort === "ontwerpregeling" ? x.bekendOp : (x.beginGeldigheid ?? x.beginInwerking);
+  const inzage =
+    x.soort !== "ontwerpregeling"
+      ? undefined
+      : x.terInzage === true
+        ? `ter inzage tot en met ${x.eindeInzagetermijn}`
+        : x.terInzage === false
+          ? `inzagetermijn ${x.beginInzagetermijn ?? "?"} tot en met ${x.eindeInzagetermijn ?? "?"}${x.inzagetermijnOpvallendKort ? " (opvallend kort; de werkelijke termijn staat in de bekendmaking)" : ""}`
+          : x.mogelijkTerInzage
+            ? `mogelijk ter inzage: geen inzagetermijn in het DSO, bekendgemaakt ${x.dagenSindsBekendmaking} dagen geleden; zie de bekendmaking`
+            : "geen inzagetermijn in het DSO";
+  const versie = x.versieGeldigTotEnMet ? `deze versie${x.versie ? ` (${x.versie})` : ""} geldt tot en met ${x.versieGeldigTotEnMet}, vanaf ${x.eindGeldigheid?.slice(0, 10)} de volgende` : undefined;
+  const bekendmaking = x.bekendmakingId ? `bekendmaking ${x.bekendmakingId}` : undefined;
+  const snippet = [x.documentType, inzage, versie, bekendmaking, x.opmerking].filter(Boolean).join(" · ") || undefined;
+  const title = x.alleenVerwijzing ? `${x.title} (alleen een verwijzing in het DSO)` : x.technisch ? `${x.title} (technisch DSO-document, geen regels)` : x.title;
+  return record("dso_omgevingsdocumenten", title, x.documentUrl, { ...x, raw: undefined }, snippet, date);
 }
 
 /**
@@ -668,6 +699,693 @@ export function detectPolicyIntent(question: string): PolicyIntent | undefined {
   if (municipal) signals.push("gemeente");
 
   return { ...(gemeente ? { gemeente } : {}), municipal, signals, strength: strong ? "strong" : "weak" };
+}
+
+/**
+ * Questions longer than this get no DSO intent and keep the route they had
+ * before the DSO route: real questions are far shorter, and the detector's
+ * work stays bounded whatever nl_gov_ask is sent.
+ */
+const DSO_QUESTION_MAX_CHARS = 500;
+
+/** The Omgevingswet documents the DSO holds, as a question names them. */
+const DSO_DOCUMENT_NOUNS = [
+  "omgevingsplan(?:nen)?",
+  "omgevingsvisies?",
+  "omgevingsverordening(?:en)?",
+  "waterschapsverordening(?:en)?",
+  "omgevingsprogramma(?:'s|s)?",
+  "omgevingsdocument(?:en)?",
+  "voorbereidingsbesluit(?:en)?",
+  "voorbeschermingsregels?",
+  "projectbesluit(?:en)?",
+  "ontwerpregeling(?:en)?",
+];
+const DSO_DOCUMENT_WORDS_RE = new RegExp(`(?:^|[^\\p{L}])(?:${DSO_DOCUMENT_NOUNS.join("|")})(?=$|[^\\p{L}])|regels\\s+op\\s+de\\s+kaart`, "iu");
+/** One document word as a lowercase token (the apostrophe of "programma's" splits it off). */
+const DSO_DOCUMENT_TOKEN_RE = new RegExp(`^(?:${DSO_DOCUMENT_NOUNS.join("|")}|novi)$`, "u");
+/** The document words with a case-free first letter only, for patterns whose PLACE_CORE needs its capitals. */
+const DSO_DOCUMENT_NOUNS_CASED = DSO_DOCUMENT_NOUNS.map((n) => `[${n[0].toUpperCase()}${n[0]}]${n.slice(1)}`).join("|");
+/** "de NOVI", the Nationale Omgevingsvisie: in capitals only. */
+const DSO_NOVI_RE = /(?:^|[^\p{L}])NOVI(?=$|[^\p{L}])/u;
+/** A document word in the plural: the question asks for every such document. */
+const DSO_PLURAL_DOCUMENT_RE = /(?:^|[^\p{L}])(?:omgevingsplannen|omgevingsvisies|omgevingsverordeningen|waterschapsverordeningen|omgevingsprogramma(?:'s|s)|omgevingsdocumenten|voorbereidingsbesluiten|voorbeschermingsregels|projectbesluiten|ontwerpregelingen|ontwerpen)(?=$|[^\p{L}])/iu;
+/** Words that ask for a list, which a document word without a place may get. */
+const DSO_LIST_RE = /(?:^|[^\p{L}])(?:welke|hoeveel|alle|lijst|overzicht|toon|geef|noem|which|list|zijn\s+er|bestaan)(?=$|[^\p{L}])/iu;
+
+/**
+ * Qualifiers that keep a question on the documents: "onder de Omgevingswet"
+ * names the regime, not the law's text, and "beroep aan huis" is no appeal.
+ * Masked before the checks below.
+ */
+const DSO_NEUTRAL_PHRASE_RE = /(?:^|[^\p{L}])(?:onder\s+de\s+(?:nieuwe\s+)?omgevingswet|beroep\s+aan\s+huis|aan[\s-]huis[\s-]gebonden\s+beroep(?:en)?)(?=$|[^\p{L}])/giu;
+/**
+ * Words that give a question another route, also next to a document word:
+ * the council, Staten, parliament or government as the subject, opinions,
+ * other sources and their documents, money, procedures and participation,
+ * and the law or a concept rather than a document. Lowercase whole words;
+ * DSO_OTHER_ROUTE_WORD_RE has the word families.
+ */
+const DSO_OTHER_ROUTE_WORDS = new Set([
+  "kabinet", "regering", "premier", "stemde", "stemden", "stemt", "besprak", "bespraken", "bespreekt", "bespreken", "besproken",
+  "besloot", "besloten", "beslist", "woo", "wob", "vng", "ipo", "iplo", "bzk",
+  "vindt", "vond", "vonden", "denkt", "denken", "dacht", "dachten", "zei", "zeiden", "mening", "standpunt", "reageert", "reageerde", "kritiek", "oordeel", "oordeelt", "adviseert", "adviseerde",
+  "rechtspraak", "gesanctioneerd", "gegund", "inkoop", "procurement", "cbs", "cijfers", "rijksoverheid", "nieuws", "toespraak",
+  "api", "apis", "apv", "eu", "europese", "europa", "notitie", "onderzoek", "keur", "legger",
+  "kost", "kosten", "kostte", "kostten", "gekost", "geld", "begroot", "budget", "uitgaven", "woz", "planning",
+  "inwoners", "wetten", "wetgeving", "omgevingsregeling", "bkl", "bal", "bbl", "amvb", "amvbs", "prijs", "prijzen", "vragen", "vraag", "aangenomen", "verworpen",
+  "definitie", "betekenis", "betekent", "betekenen", "verschil", "verschillen", "waarom", "why", "wie", "who", "bindend", "moet", "moeten", "bewoners",
+]);
+/** Word families with the same effect: prefixes, compounds of another document type, permits, the law. */
+const DSO_OTHER_ROUTE_WORD_RE = new RegExp(
+  "^(?:raads|college|staten|gedeputeerde|wethouder|burgemeester|kamer|parlement|minister|staatssecretaris|fractie|motie|amendement|stemming|agenda|commissie|rekenkamer|ombudsman|vacature|klacht|persbericht|persconferentie|nieuwsbericht" +
+    "|bekendmaking|publicatie|uitspra|rechter|rechtbank|rechtszaak|rechtszaken|gerechtshof|bestuursrecht|beroep|bezwaar|jurisprudentie|ecli|vonnis|arrest|tucht|handhav|boete|sanctie|overtreding|beschikking|dwangsom" +
+    "|aanbesteding|tender|gunning|marktconsultatie|offerteaanvra|overheidsopdracht|statistiek|dataset|databestand|algoritme|bestemmingsplan|structuurvisie|beleidsregel" +
+    "|jaarrekening|financ|investe|belasting|heffing|tarie|leges|inspraak|zienswijze|evaluat|aanvra|melding|invoering|inwerkingtreding|implementatie|overgang|ambtena|medewerker" +
+    "|wets|wettelijk|wettekst|instructieregel|juridisch|verplicht|advie|reactie|politie|partij|verkiezing|griffie|commissaris|protest|petitie|referendum" +
+    "|bijeenkomst|webinar|cursus|training|opleiding|software|leverancier|applicatie|systeem|storing|omgevingsdienst|staalkaart|modelregel|handreiking" +
+    "|informatiepunt|uitleg|voorbeeld|vergelijk|geschiedenis|historie|voortgang|monitor|antwoord|beantwoord|besluitvorming|vaststelling|ingediend" +
+    "|toezicht|inspectie|rapport)" +
+    "|(?:raad|raden|blad|courant|nota|brief|brieven|avond|wet)$" +
+    "|debat|vergader|begroting|subsidie|participatie|vergunning(?!s?vrij|s?plichtig)" +
+    "|(?<!omgevings)(?<!waterschaps)verordening(?:en)?$|(?<!voorbereidings)(?<!project)besluit(?:en)?$|(?<!omgevings)programma$|(?<!omgevings)visies?$|(?<!omgevings)plan(?:nen)?$|.(?<!omgevings)document(?:en)?$",
+  "u",
+);
+/** Phrases with the same effect: parliament, data, definitions and how-it-works questions. */
+const DSO_OTHER_ROUTE_PHRASE_RE = /(?:^|[^\p{L}])(?:open\s+data|data\s+over|dagelijks\s+bestuur|algemeen\s+bestuur|stand\s+van\s+zaken|b\s*(?:&|en)\s*w|sinds\s+wanneer|in\s+werking\s+(?:getreden|treedt|trad|traden|treden)|wat\s+(?:is|zijn)\s+(?:een|eigenlijk)|wat\s+houdt|wat\s+(?:vind|vindt|vinden|vond|vonden)|wie\s+(?:stelt|stellen|maakt|maken|beslist|beslissen|bepaalt|bepalen|neemt|nemen)|what\s+is\s+an?|how\s+(?:does|do|is|are))(?=$|[^\p{L}])/u;
+/** Abbreviations in capitals: Provinciale and Gedeputeerde Staten, associations, agencies. */
+const DSO_OTHER_ROUTE_ACRONYM_RE = /(?:^|[^\p{L}])(?:PS|GS|VNG|IPO|IPLO|BZK|RCE|ILT|PBL)(?=$|[^\p{L}])/u;
+/** Verbs whose subject must be the document: "Wat zegt het omgevingsplan", not "Wat zegt de VNG over het omgevingsplan". */
+const DSO_DOCUMENT_SUBJECT_VERBS = new Set(["zegt", "zeggen", "regelt", "regelen", "schrijft", "schreef", "stelt", "stelde", "doet", "deed", "gaat", "ging", "meldt", "meldde"]);
+const DSO_ARTICLES = new Set(["de", "het", "een", "dit", "deze", "dat", "die", "the"]);
+/** "Hoe hoog mag ik bouwen" asks for rules; any other "hoe" asks how something works or went. */
+const DSO_HOW_RULES = new Set(["hoog", "hoger", "groot", "groter", "diep", "dieper", "breed", "breder", "ver", "verder", "dicht", "high", "big", "tall", "far", "deep", "wide"]);
+
+/** The question's words in lowercase, letters only. */
+function dsoWords(text: string): string[] {
+  return text.toLowerCase().split(/[^\p{L}]+/u).filter(Boolean);
+}
+
+/** Whether a question belongs to another route (see the word lists above). */
+function dsoOtherRoute(text: string): boolean {
+  if (DSO_OTHER_ROUTE_ACRONYM_RE.test(text) || COUNCIL_RE.test(text) || DSO_OTHER_ROUTE_PHRASE_RE.test(text.toLowerCase())) return true;
+  const words = dsoWords(text);
+  const documentFollows = (i: number) => {
+    const j = DSO_ARTICLES.has(words[i] ?? "") ? i + 1 : i;
+    return DSO_DOCUMENT_TOKEN_RE.test(words[j] ?? "") || DSO_DOCUMENT_TOKEN_RE.test(words[j + 1] ?? "");
+  };
+  return words.some(
+    (w, i) =>
+      DSO_OTHER_ROUTE_WORDS.has(w) ||
+      DSO_OTHER_ROUTE_WORD_RE.test(w) ||
+      ((w === "hoe" || w === "how") && !DSO_HOW_RULES.has(words[i + 1] ?? "")) ||
+      (DSO_DOCUMENT_SUBJECT_VERBS.has(w) && !documentFollows(i + 1)),
+  );
+}
+
+/** documentType per word, for a question that names exactly one kind of document. */
+const DSO_TYPE_WORDS: Array<[RegExp, DsoDocumentType]> = [
+  [/(?:^|[^\p{L}])omgevingsplan(?:nen)?(?=$|[^\p{L}])/iu, "omgevingsplan"],
+  [/(?:^|[^\p{L}])omgevingsvisies?(?=$|[^\p{L}])/iu, "omgevingsvisie"],
+  [DSO_NOVI_RE, "omgevingsvisie"],
+  [/(?:^|[^\p{L}])omgevingsverordening(?:en)?(?=$|[^\p{L}])/iu, "omgevingsverordening"],
+  [/(?:^|[^\p{L}])(?:waterschapsverordening(?:en)?|waterschapsregels)(?=$|[^\p{L}])/iu, "waterschapsverordening"],
+  [/(?:^|[^\p{L}])omgevingsprogramma(?:'s|s)?(?=$|[^\p{L}])/iu, "programma"],
+  [/(?:^|[^\p{L}])(?:voorbereidingsbesluit(?:en)?|voorbeschermingsregels?)(?=$|[^\p{L}])/iu, "voorbereidingsbesluit"],
+  [/(?:^|[^\p{L}])projectbesluit(?:en)?(?=$|[^\p{L}])/iu, "projectbesluit"],
+];
+
+const DUTCH_MONTHS: Record<string, number> = {
+  januari: 1, jan: 1, februari: 2, feb: 2, maart: 3, mrt: 3, april: 4, apr: 4, mei: 5, juni: 6, jun: 6, juli: 7, jul: 7,
+  augustus: 8, aug: 8, september: 9, sep: 9, sept: 9, oktober: 10, okt: 10, november: 11, nov: 11, december: 12, dec: 12,
+};
+
+const DSO_STREET_SUFFIXES = "straat|straatweg|laan|weg|plein|gracht|burgwal|kade|singel|baan|dijk|dreef|hof|pad|steeg|markt|park|plantsoen|ring|wal|haven|veld|dam|allee|boulevard|kanaal|erf|zijde|brink|oord|kwartier|plaats";
+const DSO_STREET_SUFFIX_RE = new RegExp(`(?:${DSO_STREET_SUFFIXES})$`, "u");
+const DSO_STREET_SUFFIX_WORD_RE = new RegExp(`^(?:${DSO_STREET_SUFFIXES})$`, "u");
+/** Lowercase words inside a street name: "Van Asch van Wijckstraat", "Weg der Verenigde Naties". */
+const DSO_STREET_INFIXES = "van|de|der|den|des|het|['’]t|ter|ten|en";
+const DSO_STREET_INFIX_RE = new RegExp(`^(?:${DSO_STREET_INFIXES})$`, "u");
+/** Place names that end like a street ("Amsterdam 31 december" is no address). */
+const DSO_PLACES_LIKE_STREETS = new Set(["amsterdam", "rotterdam", "schiedam", "zaandam", "edam", "volendam", "monnickendam", "alblasserdam", "leidschendam", "veendam", "moerdijk", "langedijk", "stadskanaal", "barneveld", "westerveld", "noordenveld"]);
+/** A house number, but no year: "Omgevingsvisie Amsterdam 2050" and "invoering 2024" are no address. */
+const DSO_HOUSE_NUMBER = "(?!(?:19|20)\\d\\d(?![\\d\\p{L}]))\\d{1,5}(?:\\s?[a-zA-Z](?![\\p{L}])|-[\\dA-Za-z]{1,4}(?![\\p{L}\\d]))?";
+/**
+ * Capitalised words (an ordinal like "1e" or "Tweede" and infixes allowed),
+ * then a house number, after a word that introduces an address ("op", "aan",
+ * "bij", "voor", "adres") or at the very start. Every other start needs that
+ * word and a space, so a long run of name characters is scanned once.
+ */
+const DSO_ADDRESS_RE = new RegExp(
+  `(?:^|[^\\p{L}](?:op|aan|bij|voor|nabij|rond(?:om)?|adres|at)\\s+(?:(?:de|het)\\s+)?)` +
+    `((?:(?:\\d{1,2}(?:e|de|ste)|Eerste|Tweede|Derde|Vierde)\\s+)?(?:['’]s-|['’]t\\s+)?[A-ZÀ-Þ][\\p{L}'’.-]*(?:\\s+(?:(?:${DSO_STREET_INFIXES})\\s+)*(?:['’]s-)?[A-ZÀ-Þ][\\p{L}'’.-]*){0,4})` +
+    `\\s+(${DSO_HOUSE_NUMBER})(?![\\p{L}\\d])`,
+  "dgu",
+);
+/** Words that open an address phrase at the start of a question ("Op Brennerbaan 150"), not the street. */
+const DSO_ADDRESS_LEAD_WORDS = new Set(["op", "aan", "bij", "voor", "nabij", "rond", "rondom", "adres"]);
+/** Capitalised words before a number that name no street ("voor Box 3", "op Schiphol Terminal 3"). */
+const DSO_NOT_A_STREET = new Set([
+  "artikel", "hoofdstuk", "afdeling", "paragraaf", "bijlage", "lid", "natura", "box", "groep", "fase", "categorie", "formule", "euro", "covid", "windkracht",
+  "terminal", "rijksmonument", "monument", "sectie", "code", "klasse", "niveau", "zone", "gate", "pier", "versie", "week", "dag", "jaar", "nummer",
+]);
+/** A number followed by these is a day, a unit or a duration, not a house number. */
+const DSO_NOT_AFTER_HOUSE_NUMBER = new Set([
+  ...Object.keys(DUTCH_MONTHS),
+  "uur", "uren", "minuut", "minuten", "dag", "dagen", "week", "weken", "maand", "maanden", "jaar", "jaren", "meter", "m", "km", "cm", "mm",
+  "kilo", "kg", "gram", "ton", "liter", "procent", "euro", "mw", "kw", "kwh", "gw", "db", "graden", "keer", "stuks", "personen", "mensen",
+]);
+/** A Dutch postcode, letters in capitals ("2026 de" is no postcode). */
+const DSO_POSTCODE_RE = /(?:^|[^\p{L}\d])([1-9]\d{3})\s?(?!SA|SD|SS)([A-Z]{2})(?![\p{L}\d])/dgu;
+/** Two capitals after a number that are a unit or a country, not postcode letters ("1000 MW", "3500 KG"). */
+const DSO_POSTCODE_UNITS = new Set(["MW", "KW", "KG", "GW", "GB", "MB", "TB", "KB", "PJ", "TJ", "GJ", "MJ", "KV", "KM", "CM", "MM", "HA", "PK", "CC", "ML", "CL", "DL", "MG", "KJ", "EU", "NL", "US", "UK", "VS"]);
+/** What may stand right before a postcode for it to be one: "op 3524 BN", "postcode 3524 BN", "adres: 3524 BN". */
+const DSO_BEFORE_POSTCODE_RE = /(?:^|[^\p{L}])(?:op|aan|bij|voor|nabij|postcode|adres|at)\s*:?\s*$|,\s*$/iu;
+const DSO_POSTCODE_AFTER_RE = /\s*,?\s*([1-9]\d{3})\s?(?!SA|SD|SS)([A-Z]{2})(?![\p{L}\d])/uy;
+const DSO_NUMBER_AFTER_RE = /\s*,?\s*(\d{1,5}(?:\s?[a-zA-Z](?![\p{L}]))?)(?![\p{L}\d])/uy;
+/** The place written behind an address: ", Utrecht", " te Utrecht", " in (de gemeente) Utrecht", " (Utrecht)", " Utrecht". */
+const DSO_PLACE_AFTER_RE = new RegExp(`(?:\\s*,\\s*|\\s+te\\s+|\\s+in\\s+(?:de\\s+gemeente\\s+)?|\\s*\\(\\s*|\\s+)(${PLACE_CORE})`, "uy");
+
+/** "provincie Utrecht", "Hoogheemraadschap De Stichtse Rijnlanden", "gemeente Utrecht". */
+const DSO_BODY_RE = new RegExp(`(?:^|[^\\p{L}])((?:[Gg]emeente|[Pp]rovincie|[Ww]aterschap|[Hh]oogheemraadschap(?:\\s+van)?|[Ww]etterskip)\\s+${PLACE_CORE})`, "du");
+/** "province of Utrecht", "municipality of Ede". */
+const DSO_ENGLISH_BODY_RE = new RegExp(`(?:^|[^\\p{L}])([Pp]rovince|[Mm]unicipality)\\s+of\\s+(?:the\\s+)?(${PLACE_CORE})`, "du");
+/** "in de provincie Utrecht", "in the province of Utrecht": an area, not the provincie as the body that adopts. */
+const DSO_PROVINCE_AREA_RE = new RegExp(`(?:^|[^\\p{L}])(?:in|binnen)\\s+(?:de\\s+|the\\s+)?(?:[Pp]rovincie|[Pp]rovince\\s+of)\\s+(${PLACE_CORE})`, "du");
+const DSO_IN_PLACE_RE = new RegExp(`(?:^|[^\\p{L}])in\\s+(${PLACE_CORE})`, "du");
+/**
+ * The place right after a document word: "omgevingsplan Utrecht", "Omgevingsvisie
+ * van Amsterdam", "the omgevingsplan of Groningen", "het omgevingsplan voor Utrecht".
+ */
+const DSO_DOCUMENT_PLACE_RE = new RegExp(`(?:^|[^\\p{L}])(?:${DSO_DOCUMENT_NOUNS_CASED})\\s+(?:([Vv]an|[Vv]oor|of|for)\\s+(?:de\\s+|het\\s+|the\\s+)?)?(${PLACE_CORE})`, "du");
+/** The place before the document word: "Utrecht omgevingsplan" at the start, "the Utrecht omgevingsplan". */
+const DSO_PLACE_DOCUMENT_RE = new RegExp(`(?:^|[^\\p{L}]the\\s+)(${PLACE_CORE})\\s+(?:${DSO_DOCUMENT_NOUNS_CASED})(?=$|[^\\p{L}])`, "du");
+/** "heeft Utrecht", "geldt voor Rotterdam", "gelden er voor Ede". */
+const DSO_VERB_PLACE_RE = new RegExp(`(?:^|[^\\p{L}])(?:[Hh]eeft|[Hh]ebben|geldt|gelden|gold|golden)\\s+(?:er\\s+)?(?:voor\\s+)?(${PLACE_CORE})`, "du");
+/** "in het centrum van Utrecht": any "van <Place>", the last resort. */
+const DSO_OF_PLACE_RE = new RegExp(`(?:^|[^\\p{L}])van\\s+(?:de\\s+|het\\s+)?(${PLACE_CORE})`, "du");
+/** "Welke omgevingsplannen gelden er op Schiphol?": a place without a number, as a point. */
+const DSO_AT_PLACE_RE = new RegExp(`(?:^|[^\\p{L}])op\\s+(${PLACE_CORE})\\s*[?.!]?\\s*$`, "du");
+/** A place in a question typed in lowercase: after "gemeente", "provincie", "van", "in" or a document word. */
+const DSO_LOWER_PLACE = "(?:(?:den|['’]s-|['’]t)\\s*)?\\p{Ll}[\\p{Ll}'’-]+(?:\\s+(?:aan|op|bij|en)\\s+\\p{Ll}[\\p{Ll}'’-]+)?";
+const DSO_LOWER_BODY_RE = new RegExp(`(?:^|[^\\p{L}])(gemeente|provincie|waterschap)\\s+(${DSO_LOWER_PLACE})`, "du");
+const DSO_LOWER_PLACE_RE = new RegExp(`(?:^|[^\\p{L}])(?:(?:${DSO_DOCUMENT_NOUNS_CASED})\\s+(?:van\\s+|of\\s+)?|in\\s+)(${DSO_LOWER_PLACE})(?=\\s*(?:[?.!,]|over\\b|voor\\b|\\d|$))`, "du");
+/** Lowercase words that are no place after those cues. */
+const DSO_LOWER_NOT_A_PLACE = new Set([
+  "de", "het", "een", "die", "dat", "deze", "dit", "mijn", "onze", "uw", "alle", "elke", "welke", "wat", "regels", "regel", "over", "voor", "met", "zonder",
+  "heel", "nationale", "rijk", "nu", "er", "hier", "daar", "toepassing", "werking", "kracht", "inzage", "ontwerp", "ontwerpen", "gemeente", "provincie",
+  "waterschap", "buurt", "wijk", "centrum", "stad", "dorp", "totaal", "principe", "feite", "gebruik", "voorbereiding", "ontwikkeling", "belang", "geval",
+  "kaart", "praktijk", "algemeen", "wijzigen", "gewijzigd", "vastgesteld", "zien", "vinden", "bouwen",
+]);
+/** Words that open a question or describe a document: no place, also when capitalised before a document word. */
+const DSO_NOT_A_PLACE_START = new Set([
+  "welke", "welk", "wat", "wie", "waar", "wanneer", "hoe", "hoeveel", "is", "zijn", "heeft", "hebben", "toon", "geef", "laat", "lees", "zoek", "mag", "kan",
+  "geldt", "gelden", "ligt", "liggen", "wordt", "de", "het", "een", "nieuwste", "nieuwe", "recente", "recentste", "laatste", "alle", "nationale", "ontwerp",
+  "ontwerpen", "gemeentelijke", "provinciale", "huidige", "oude", "geldende", "actuele", "vigerende", "which", "what", "show", "the", "all", "list", "mijn",
+  "onze", "uw", "dit", "deze", "die", "elk", "elke",
+]);
+/** Words a place name cannot hold: it ends before them ("provincie Gelderland de Omgevingswet"). */
+const DSO_NOT_A_PLACE_WORD_RE = new RegExp(`^(?:\\p{L}*wet|${DSO_DOCUMENT_NOUNS.join("|")}|raad|staten|kamer|regels?|artikel|hoofdstuk|afdeling|paragraaf|bijlage|novi|dso)$`, "iu");
+/** English names of places the DSO knows in Dutch. */
+const DSO_ENGLISH_PLACES: Record<string, string> = { "north holland": "Noord-Holland", "south holland": "Zuid-Holland", "north brabant": "Noord-Brabant", "the hague": "Den Haag", frisia: "Fryslân" };
+/** Provincie names no gemeente shares: "in Noord-Holland" is an area like "in de provincie Noord-Holland". */
+const DSO_PROVINCES = new Set(["noord-holland", "zuid-holland", "noord-brabant", "brabant", "gelderland", "overijssel", "drenthe", "friesland", "fryslân", "flevoland", "limburg", "zeeland"]);
+/** Capitalised words that name no place: an unscoped list question with any other capitalised word is not answered nationwide. */
+const DSO_NOT_A_PLACE_CAPITAL = new RegExp(`^(?:${DSO_DOCUMENT_NOUNS.join("|")}|novi|dso|rijk|nationale|nederland|europa|regels|kaart|omgevingswet|ontwerp\\p{L}*)$`, "iu");
+
+/** A body or place the question names ("gemeente Utrecht", "Utrecht"), and where it stands in the question. */
+interface DsoPlaceHit {
+  name: string;
+  start: number;
+  end: number;
+}
+
+/** A place cut where it runs on into the question ("Gelderland de Omgevingswet"), English names in Dutch, no country. */
+function dsoPlace(captured: string | undefined, start: number): DsoPlaceHit | undefined {
+  const words = (captured ?? "").replace(/[?.,;:!)]+$/, "").split(/\s+/).filter(Boolean);
+  if (!words.length || DSO_NOT_A_PLACE_WORD_RE.test(words[0])) return undefined;
+  let end = words.findIndex((w, i) => i > 0 && DSO_NOT_A_PLACE_WORD_RE.test(w));
+  if (end < 0) end = words.length;
+  while (end > 1 && PLACE_INFIX_WORDS.has(words[end - 1].toLowerCase())) end--;
+  const place = words.slice(0, end).join(" ");
+  if (place.length < 2 || /^(?:nederland|europa|eu|(?:the\s+)?netherlands)$/i.test(place)) return undefined;
+  return { name: DSO_ENGLISH_PLACES[place.toLowerCase()] ?? place, start, end: start + place.length };
+}
+
+/** The place in a pattern's capture group (the pattern has the "d" flag). */
+function dsoPlaceIn(re: RegExp, text: string, group = 1): DsoPlaceHit | undefined {
+  const m = re.exec(text);
+  return m?.[group] && m.indices?.[group] ? dsoPlace(m[group], m.indices[group][0]) : undefined;
+}
+
+/** A place in a lowercase question, unless it is a common word after the same cue ("in werking", "van toepassing"). */
+function dsoLowerPlaceIn(re: RegExp, text: string, group: number): DsoPlaceHit | undefined {
+  const hit = dsoPlaceIn(re, text, group);
+  return hit && !hit.name.split(/\s+/).some((w) => DSO_LOWER_NOT_A_PLACE.has(w)) ? hit : undefined;
+}
+
+/** Replace a span by "§", so the checks after it neither read it nor join words across it. */
+function dsoMask(text: string, hit: { start: number; end: number } | undefined): string {
+  return hit ? text.slice(0, hit.start) + "§".repeat(Math.max(0, hit.end - hit.start)) + text.slice(hit.end) : text;
+}
+
+interface DsoAddressHit {
+  /** As the search's locatie takes it: "Brennerbaan 150, Utrecht", "3524 BN 150". */
+  locatie: string;
+  /** A street with a street ending, or with a postcode, or a postcode; else only capitalised words before a number. */
+  strict: boolean;
+  /** A place or postcode is written behind it. */
+  hasPlace: boolean;
+  start: number;
+  end: number;
+}
+
+/** The postcode, or the place, written behind an address that ends at `end`. */
+function dsoAfterAddress(text: string, end: number): { place?: string; postcode?: string; end: number } {
+  DSO_POSTCODE_AFTER_RE.lastIndex = end;
+  const pc = DSO_POSTCODE_AFTER_RE.exec(text);
+  const postcode = pc && !DSO_POSTCODE_UNITS.has(pc[2]) ? `${pc[1]} ${pc[2]}` : undefined;
+  if (postcode) end = DSO_POSTCODE_AFTER_RE.lastIndex;
+  DSO_PLACE_AFTER_RE.lastIndex = end;
+  const m = DSO_PLACE_AFTER_RE.exec(text);
+  const place = m ? dsoPlace(m[1], DSO_PLACE_AFTER_RE.lastIndex - m[1].length) : undefined;
+  return { postcode, place: place?.name, end: place?.end ?? end };
+}
+
+/**
+ * The address a question names: a street that ends like one ("Brennerbaan",
+ * "Grote Markt", "Laan van Meerdervoort") with a house number, or a postcode
+ * after "op", "postcode" or "adres", each with the place or postcode written
+ * behind it. Without a street suffix only capitalised words and a number
+ * with a place behind them, which counts only next to a document word.
+ */
+function dsoAddress(text: string): DsoAddressHit | undefined {
+  let lenient: DsoAddressHit | undefined;
+  for (const m of text.matchAll(DSO_ADDRESS_RE)) {
+    let [start] = m.indices![1];
+    const numberEnd = m.indices![2][1];
+    const words = m[1].split(/\s+/);
+    // "Op Brennerbaan 150" at the start: the word opens the address, it is no part of the street.
+    const led = words.length > 1 && DSO_ADDRESS_LEAD_WORDS.has(words[0].toLowerCase());
+    if (led) start += words.shift()!.length + 1;
+    const next = /^\s*([\p{L}%]+)/u.exec(text.slice(numberEnd, numberEnd + 24))?.[1]?.toLowerCase();
+    if (next && DSO_NOT_AFTER_HOUSE_NUMBER.has(next)) continue;
+    const head = words.find((w) => /^\p{Lu}/u.test(w) && !/^(?:Eerste|Tweede|Derde|Vierde)$/.test(w))?.toLowerCase() ?? "";
+    if (DSO_NOT_A_STREET.has(head)) continue;
+    const after = dsoAfterAddress(text, numberEnd);
+    const hit: DsoAddressHit = {
+      locatie: [`${words.join(" ")} ${m[2]}`, after.postcode ?? after.place].filter(Boolean).join(", "),
+      strict: dsoStrictStreet(words) || Boolean(after.postcode),
+      hasPlace: Boolean(after.postcode ?? after.place),
+      start,
+      end: after.end,
+    };
+    if (hit.strict) return hit;
+    // Without a street ending: after "op", "voor" and the like, and with a place behind it.
+    if (!lenient && after.place && (m.indices![1][0] > 0 || led)) lenient = hit;
+  }
+  for (const m of text.matchAll(DSO_POSTCODE_RE)) {
+    if (DSO_POSTCODE_UNITS.has(m[2])) continue;
+    const [start, end] = [m.indices![1][0], m.indices![2][1]];
+    DSO_NUMBER_AFTER_RE.lastIndex = end;
+    const number = DSO_NUMBER_AFTER_RE.exec(text);
+    if (!number && !DSO_BEFORE_POSTCODE_RE.test(text.slice(Math.max(0, start - 12), start))) continue;
+    const after = dsoAfterAddress(text, number ? DSO_NUMBER_AFTER_RE.lastIndex : end);
+    return { locatie: [`${m[1]} ${m[2]}`, number?.[1]].filter(Boolean).join(" "), strict: true, hasPlace: true, start, end: after.end };
+  }
+  return lenient;
+}
+
+/**
+ * A street name: its last word ends like a street and is more than the
+ * ending ("Brennerbaan", "'s-Gravendijkwal"); or the bare ending after
+ * another capitalised word ("Grote Markt"); or a street word opening the
+ * name ("Laan van Meerdervoort", "Weg der Verenigde Naties"). Not "Ring 10",
+ * "de Dam 4 mei" or "Amsterdam 31".
+ */
+function dsoStrictStreet(words: string[]): boolean {
+  const named = words.filter((w) => !/^\d/.test(w));
+  const capitals = named.filter((w) => /^(?:\p{Lu}|['’]s-)/u.test(w)).length;
+  const last = (named[named.length - 1] ?? "").toLowerCase().replace(/^['’]s-/, "");
+  const suffix = DSO_STREET_SUFFIX_RE.exec(last)?.[0];
+  if (suffix) return last.length > suffix.length ? !DSO_PLACES_LIKE_STREETS.has(last) : capitals >= 2;
+  return named.length >= 3 && DSO_STREET_SUFFIX_WORD_RE.test(named[0].toLowerCase()) && DSO_STREET_INFIX_RE.test(named[1]);
+}
+
+/** The question's words outside the masked spans, all from the given sets. */
+function dsoOnlyWords(text: string, ...allowed: ReadonlySet<string>[]): boolean {
+  return dsoWords(text).every((w) => allowed.some((set) => set.has(w)));
+}
+
+/** Words a question about the rules at an address may hold besides the address and its place. */
+const DSO_ADDRESS_QUESTION_WORDS = new Set([
+  ...Object.keys(DUTCH_MONTHS),
+  "welke", "welk", "wat", "zijn", "is", "er", "zit", "zitten", "de", "het", "een", "op", "aan", "bij", "voor", "nabij", "rond", "rondom", "in", "te", "ter", "van",
+  "en", "of", "ook", "nu", "hier", "daar", "dit", "deze", "die", "dat", "mijn", "ons", "onze", "me", "mij", "ik", "je", "u", "men", "we", "wij", "nog", "al",
+  "alle", "allemaal", "precies", "eigenlijk", "graag", "toon", "laat", "zien", "geef", "noem", "lijst", "overzicht", "gelden", "geldt", "golden", "gold",
+  "geldig", "geldende", "actuele", "huidige", "toepassing", "momenteel", "vandaag", "per", "vanaf", "tot", "sindsdien", "bijgekomen", "gewijzigd", "veranderd",
+  "nieuw", "nieuwe", "adres", "postcode", "huisnummer", "locatie", "perceel", "kavel", "pand", "huis", "woning", "tuin", "achtertuin", "voortuin", "plek",
+  "grond", "terrein", "onder",
+  "rijk", "gemeente", "provincie", "waterschap", "gemeentelijke", "provinciale", "kan", "kun", "kunt", "kunnen", "hoe", "hoog", "hoger", "groot", "groter",
+  "diep", "breed", "ver", "which", "what", "are", "the", "at", "on", "for", "there", "my", "to", "can", "apply", "applies",
+]);
+/** Rule words: "Welke regels gelden op <adres>". */
+const DSO_ADDRESS_RULE_WORDS = new Set(["regels", "regel", "regelgeving", "regelingen", "regeling", "omgevingsregels", "omgevingsplanregels", "waterschapsregels", "bouwregels", "rules", "regulations", "zoning"]);
+/** Permission words: "Mag ik een dakkapel plaatsen op <adres>", with a building topic. */
+const DSO_ADDRESS_PERMISSION_WORDS = new Set(["mag", "mogen", "toegestaan", "verboden", "vergunningvrij", "vergunningsvrij", "vergunningplichtig", "vergunningsplichtig", "allowed"]);
+/** What one builds or changes on a plot: the topics of an omgevingsplan and the Bbl. */
+const DSO_BUILDING_TOPICS = new Set([
+  "bouwen", "bouw", "verbouwen", "bijbouwen", "plaatsen", "maken", "aanleggen", "neerzetten", "zetten", "slopen", "sloop", "kappen", "vellen", "splitsen",
+  "dakkapel", "dakkapellen", "aanbouw", "uitbouw", "opbouw", "dakopbouw", "optopping", "bijgebouw", "bijgebouwen", "bijbehorend", "bijbehorende", "bouwwerk",
+  "bouwwerken", "schuur", "schuurtje", "schutting", "erfafscheiding", "hek", "hekwerk", "tuinhuis", "tuinhuisje", "blokhut", "carport", "overkapping", "veranda",
+  "serre", "uitrit", "inrit", "boom", "bomen", "zonnepanelen", "dakterras", "balkon", "gevel", "kozijnen", "airco", "warmtepomp", "bed", "and", "breakfast", "b",
+  "mantelzorgwoning", "woningsplitsing", "bouwhoogte", "goothoogte", "hoogte", "bouwvlak", "bestemming", "functie", "gebruik", "wonen", "build", "extension",
+]);
+/** Words a question for the ontwerpen ter inzage of a body or place may hold besides that name. */
+const DSO_ONTWERP_QUESTION_WORDS = new Set([
+  ...Object.keys(DUTCH_MONTHS),
+  "welke", "welk", "wat", "zijn", "is", "er", "liggen", "ligt", "lagen", "lag", "nu", "momenteel", "op", "dit", "moment", "ter", "inzage", "ontwerp",
+  "ontwerpen", "de", "het", "een", "in", "bij", "van", "alle", "nog", "toon", "geef", "overzicht", "lijst", "recent", "recente", "nieuwste", "laatste", "open",
+  "zie", "zien", "laat", "kan", "ik", "gemeente", "provincie", "waterschap", "hoogheemraadschap", "wetterskip", "vandaag",
+]);
+
+/** "ontwerp" or "ontwerpen" as a word of its own: "ontwerpbegroting" and "wetsontwerp" are other documents. */
+const DSO_ONTWERP_WORD_RE = /(?:^|[^\p{L}-])ontwerp(?:en)?(?=$|[^\p{L}-])/iu;
+const DSO_TER_INZAGE_RE = /\bter\s+inzage\b|\binzagetermijn(?:en)?\b/i;
+/** "de Nationale Omgevingsvisie", "de programma's van het Rijk": the Rijk's documents (bevoegd gezag type ministerie). */
+const DSO_RIJK_RE = /(?:^|[^\p{L}])(?:nationale|het\s+rijk)(?=$|[^\p{L}])/iu;
+const DSO_APPLY_RE = /(?:^|[^\p{L}])(?:gelden|geldt|golden|gold|van\s+toepassing)(?=$|[^\p{L}])/iu;
+const DSO_RECENT_RE = /(?:^|[^\p{L}])(?:nieuwste|recentste|recente?|laatste|onlangs|net\s+(?:gepubliceerd|vastgesteld))(?=$|[^\p{L}])/iu;
+/** "gelden op 1 januari 2025": the day the question asks the rules for (geldigOp). */
+const DSO_VALIDITY_RE = /(?:^|[^\p{L}])(?:gelden|geldt|golden|gold|geldig|van\s+kracht|in\s+werking)(?=$|[^\p{L}])/iu;
+
+/** The calendar days a question names: "1 januari 2025", "2025-01-01", "1-1-2025". */
+function explicitDays(text: string): string[] {
+  const days = new Set<string>();
+  const add = (y: number, m: number, d: number) => {
+    const date = new Date(Date.UTC(y, m - 1, d));
+    if (date.getUTCFullYear() === y && date.getUTCMonth() === m - 1 && date.getUTCDate() === d) days.add(date.toISOString().slice(0, 10));
+  };
+  for (const m of text.matchAll(/(?<![\d-])(\d{4})-(\d{2})-(\d{2})(?![\d-])/g)) add(Number(m[1]), Number(m[2]), Number(m[3]));
+  for (const m of text.matchAll(/(?<![\d/-])(\d{1,2})[-/](\d{1,2})[-/](\d{4})(?![\d/-])/g)) add(Number(m[3]), Number(m[2]), Number(m[1]));
+  for (const m of text.matchAll(/(?<!\d)(\d{1,2})\s+(\p{L}+)\.?\s+(\d{4})(?!\d)/gu)) {
+    const month = DUTCH_MONTHS[m[2].toLowerCase()];
+    if (month) add(Number(m[3]), month, Number(m[1]));
+  }
+  return [...days];
+}
+
+/** What nl_gov_ask passes to dso_omgevingsdocumenten_search; the field names are the search's own. */
+export type DsoIntent = Pick<DsoSearchArgs, "locatie" | "bevoegdGezag" | "typeBevoegdGezag" | "documentType" | "soort" | "alleenTerInzage" | "geldigOp"> & {
+  /** An area: the provincie's own documents and those of every gemeente in it (the search's `provincie`). */
+  provincie?: string;
+};
+
+/**
+ * A question about Omgevingswet documents, for the DSO. Precision first: a
+ * question another route answered before the DSO route keeps that route.
+ *  - It names a document (omgevingsplan, omgevingsvisie, omgevingsverordening,
+ *    waterschapsverordening, omgevingsprogramma, omgevingsdocument,
+ *    voorbereidingsbesluit, voorbeschermingsregels, projectbesluit,
+ *    ontwerpregeling, "regels op de kaart", NOVI) with a scope (address,
+ *    place, body, provincie area, the Rijk), or asks for a list or the
+ *    newest, or for ontwerpen;
+ *  - or it asks which rules apply at an address (a street with a street
+ *    ending and a house number, or a postcode), with nothing but rule,
+ *    permission and building words besides ("Welke regels gelden op
+ *    Brennerbaan 150, Utrecht?", "Mag ik een dakkapel plaatsen op ...");
+ *  - or it asks for the ontwerpen ter inzage of a named gemeente, provincie,
+ *    waterschap or place, and for nothing else.
+ * Never: a question longer than DSO_QUESTION_MAX_CHARS; a question about the
+ * law, a definition or how something works; one about money, procedures,
+ * participation, the council, Staten, parliament or government; one that
+ * names another source or another kind of document (dsoOtherRoute).
+ *
+ * Where: an address becomes `locatie` with the place or postcode written
+ * behind it (or "in Utrecht" elsewhere); "in de provincie X", or "in
+ * Noord-Holland", asking for ontwerpen, all documents or omgevingsplannen is
+ * the area `provincie`; a verordening "in <gemeente>" is the point there;
+ * otherwise the body or place the question names is `bevoegdGezag`. What:
+ * documentType when the question names one kind; "ontwerp" or "ter inzage"
+ * asks for ontwerpregelingen; a day the rules "gelden op" is geldigOp.
+ * `maxChars` is for tests that time the detector on long input.
+ */
+export function detectDsoIntent(question: string, maxChars = DSO_QUESTION_MAX_CHARS): DsoIntent | undefined {
+  const text = String(question ?? "");
+  if (text.length > maxChars) return undefined;
+  const raw = text.replace(/\s+/g, " ").trim();
+  if (!raw) return undefined;
+
+  // The address and the neutral qualifiers are read first and masked, so a
+  // street name ("Burgemeester Reigerstraat") is no council word below.
+  const neutral = raw.replace(DSO_NEUTRAL_PHRASE_RE, (m) => "§".repeat(m.length));
+  const address = dsoAddress(neutral);
+  let masked = dsoMask(neutral, address);
+  if (dsoOtherRoute(masked)) return undefined;
+
+  const documentWords = DSO_DOCUMENT_WORDS_RE.test(masked) || DSO_NOVI_RE.test(masked);
+  const terInzage = DSO_TER_INZAGE_RE.test(masked);
+  const ontwerp = terInzage || /(?:^|[^\p{L}])ontwerp/iu.test(masked);
+  const types = [...new Set(DSO_TYPE_WORDS.filter(([re]) => re.test(masked)).map(([, type]) => type))];
+  const documentType = types.length === 1 ? types[0] : undefined;
+  const plural = DSO_PLURAL_DOCUMENT_RE.test(masked);
+  const lowercase = !/\p{Lu}/u.test(raw.slice(1));
+
+  // Bodies and places, each masked once read.
+  const english = DSO_ENGLISH_BODY_RE.exec(masked);
+  const englishBody = english?.indices?.[2] ? dsoPlace(english[2], english.indices[2][0]) : undefined;
+  const lowerBody = lowercase ? DSO_LOWER_BODY_RE.exec(masked) : null;
+  const lowerBodyPlace = lowerBody ? dsoLowerPlaceIn(DSO_LOWER_BODY_RE, masked, 2) : undefined;
+  const body =
+    dsoPlaceIn(DSO_BODY_RE, masked) ??
+    (englishBody && english ? { ...englishBody, name: `${/^p/i.test(english[1]) ? "provincie" : "gemeente"} ${englishBody.name}` } : undefined) ??
+    (lowerBodyPlace && lowerBody ? { ...lowerBodyPlace, name: `${lowerBody[1]} ${lowerBodyPlace.name}` } : undefined);
+  const area = dsoPlaceIn(DSO_PROVINCE_AREA_RE, masked);
+  masked = dsoMask(dsoMask(masked, area), body);
+  const documentPlace = DSO_DOCUMENT_PLACE_RE.exec(masked);
+  const nextTo = documentPlace?.indices?.[2] ? dsoPlace(documentPlace[2], documentPlace.indices[2][0]) : undefined;
+  // "het omgevingsplan voor Utrecht" yields to "in": "een voorbereidingsbesluit voor Lunetten in Utrecht".
+  const forPlace = /^(?:[Vv]oor|for)$/.test(documentPlace?.[1] ?? "");
+  const inPlace = dsoPlaceIn(DSO_IN_PLACE_RE, masked);
+  const placeFirst = dsoPlaceIn(DSO_PLACE_DOCUMENT_RE, masked);
+  // Without a document word only "in <place>" counts: "gelden voor Airbnb" names no place.
+  const place = !documentWords
+    ? inPlace
+    : ((forPlace ? undefined : nextTo) ??
+      inPlace ??
+      nextTo ??
+      dsoPlaceIn(DSO_VERB_PLACE_RE, masked) ??
+      (placeFirst && !DSO_NOT_A_PLACE_START.has(placeFirst.name.split(" ")[0].toLowerCase()) && !/(?:se|sche)$/i.test(placeFirst.name) ? placeFirst : undefined) ??
+      dsoPlaceIn(DSO_OF_PLACE_RE, masked) ??
+      (lowercase ? dsoLowerPlaceIn(DSO_LOWER_PLACE_RE, masked, 1) : undefined));
+  const placeFromIn = Boolean(place && place === inPlace);
+  masked = dsoMask(masked, place);
+
+  // Which rules apply at an address, and nothing else.
+  const words = dsoWords(masked);
+  const ruleWord = words.some((w) => DSO_ADDRESS_RULE_WORDS.has(w));
+  const permission = words.some((w) => DSO_ADDRESS_PERMISSION_WORDS.has(w)) && words.some((w) => DSO_BUILDING_TOPICS.has(w));
+  const addressRules =
+    Boolean(address?.strict) &&
+    (ruleWord || permission) &&
+    dsoOnlyWords(masked, DSO_ADDRESS_QUESTION_WORDS, DSO_ADDRESS_RULE_WORDS, DSO_ADDRESS_PERMISSION_WORDS, DSO_BUILDING_TOPICS);
+  // The ontwerpen ter inzage of a body or place, and nothing else.
+  const ontwerpenTerInzage = DSO_ONTWERP_WORD_RE.test(masked) && terInzage && Boolean(body || area || place) && dsoOnlyWords(masked, DSO_ONTWERP_QUESTION_WORDS);
+  if (!documentWords && !addressRules && !ontwerpenTerInzage) return undefined;
+
+  // An address keeps its place; without one written behind it, the place the question names elsewhere.
+  const addressPlace = address && !address.hasPlace ? (body?.name.replace(/^gemeente\s+/i, "") ?? place?.name) : undefined;
+  const verordeningHere =
+    placeFromIn && !body && (documentType === "waterschapsverordening" || (documentType === "omgevingsverordening" && !DSO_PROVINCES.has(place!.name.toLowerCase())));
+  const locatie =
+    address && (address.strict || documentWords)
+      ? [address.locatie, addressPlace].filter(Boolean).join(", ")
+      : // A verordening "in Amersfoort" is the one that applies there, not the gemeente's own (none).
+        documentWords && verordeningHere
+        ? place!.name
+        : // "Welke omgevingsplannen gelden er op Schiphol?": the point.
+          documentWords && !body && !place && !area && DSO_APPLY_RE.test(masked)
+          ? dsoPlaceIn(DSO_AT_PLACE_RE, masked)?.name
+          : undefined;
+
+  // "in de provincie Utrecht" is an area when the question asks for ontwerpen,
+  // for documents of every kind or in the plural, or for omgevingsplannen,
+  // which only gemeenten adopt ("provincie Utrecht" + omgevingsplan is one
+  // too); so is a provincie's own name "in Noord-Holland". "de omgevingsvisie
+  // van de provincie Utrecht" is the provincie's own.
+  const areaWanted = ontwerp || !documentType || documentType === "omgevingsplan" || plural;
+  const provincieBody = body && /^provincie\s/i.test(body.name) ? body.name.replace(/^provincie\s+/i, "") : undefined;
+  const provinceNamed = place && !body && DSO_PROVINCES.has(place.name.toLowerCase()) ? place.name : undefined;
+  const provincie = locatie
+    ? undefined
+    : area && areaWanted
+      ? area.name
+      : provincieBody && documentType === "omgevingsplan"
+        ? provincieBody
+        : provinceNamed && (documentType === "omgevingsplan" || (placeFromIn && areaWanted))
+          ? provinceNamed
+          : undefined;
+  const bevoegdGezag = locatie || provincie ? undefined : (body?.name ?? place?.name ?? (area ? `provincie ${area.name}` : undefined));
+  const typeBevoegdGezag = locatie || bevoegdGezag || provincie
+    ? undefined
+    : /\b(?:gemeenten|gemeentes)\b/i.test(masked)
+      ? "gemeente"
+      : /\bprovincies\b/i.test(masked)
+        ? "provincie"
+        : /\bwaterschappen\b/i.test(masked)
+          ? "waterschap"
+          : DSO_RIJK_RE.test(masked) || DSO_NOVI_RE.test(masked)
+            ? "ministerie"
+            : undefined;
+  // Only a single day the rules "gelden op"; a year or a period stays today's list (the route says so).
+  const days = !ontwerp && DSO_VALIDITY_RE.test(masked) ? explicitDays(raw) : [];
+  const geldigOp = days.length === 1 ? days[0] : undefined;
+
+  if (!locatie && !bevoegdGezag && !provincie && !typeBevoegdGezag) {
+    // Nowhere: only a list, the newest documents or ontwerpen, and not when a
+    // capitalised word that may be a place went unread ("Omgevingsplan Artikel 22").
+    const list = (plural && DSO_LIST_RE.test(masked)) || DSO_RECENT_RE.test(masked) || ontwerp;
+    const unread = raw
+      .split(/[^\p{L}'’-]+/u)
+      .slice(1)
+      .some((w) => /^\p{Lu}/u.test(w) && !w.split("-").some((part) => DSO_NOT_A_PLACE_CAPITAL.test(part.replace(/['’]s$/, ""))));
+    if (!list || unread) return undefined;
+  }
+  return {
+    ...(locatie ? { locatie } : {}),
+    ...(bevoegdGezag ? { bevoegdGezag } : {}),
+    ...(provincie ? { provincie } : {}),
+    ...(typeBevoegdGezag ? { typeBevoegdGezag } : {}),
+    ...(documentType ? { documentType } : {}),
+    ...(ontwerp ? { soort: "ontwerpregelingen" as const } : {}),
+    ...(terInzage ? { alleenTerInzage: true } : {}),
+    ...(geldigOp ? { geldigOp } : {}),
+  };
+}
+
+/**
+ * A question about an address gets every bestuurslaag that has rules at that
+ * point (about 25 documents in a city); cut at `top`, the Rijk went missing.
+ * The search's own default for a locatie.
+ */
+const DSO_LOCATIE_ROWS = 50;
+
+/**
+ * How long nl_gov_ask waits for the DSO. A cold catalogue takes about 5 s; a
+ * hanging DSO retries for up to a minute, past the 60 s an MCP client waits.
+ */
+const DSO_ROUTE_DEADLINE_MS = 20_000;
+
+/** The rows nl_gov_ask asks the DSO for. */
+function dsoRows(intent: DsoIntent, top: number): number {
+  return intent.locatie ? Math.max(top, DSO_LOCATIE_ROWS) : top;
+}
+
+/** The bestuurslagen in the order the search sorts an address answer, with their TOOI code prefix. */
+const DSO_LAYERS: Array<{ layer: string; code: RegExp; label: string }> = [
+  { layer: "gemeente", code: /^gm\d/i, label: "gemeente" },
+  { layer: "waterschap", code: /^ws\d/i, label: "waterschap" },
+  { layer: "provincie", code: /^pv\d/i, label: "provincie" },
+  { layer: "ministerie", code: /^mnre\d/i, label: "Rijk" },
+];
+
+function dsoLayerOf(item: DsoSearchItem): string {
+  const laag = (item.bestuurslaag ?? "").toLowerCase();
+  return DSO_LAYERS.find((l) => l.code.test(item.bevoegdGezagCode ?? "") || laag.startsWith(l.layer))?.layer ?? "overig";
+}
+
+/**
+ * An address answer in bestuurslaag order (as the search sorts it) whose first
+ * page holds one document of every layer: cut at the page size, the Rijk and
+ * often the provincie fell off. The rest follows in order on the next pages.
+ */
+function dsoLayerFirstPage(items: DsoSearchItem[], pageSize: number): DsoSearchItem[] {
+  if (items.length <= pageSize) return items;
+  const page = new Set<DsoSearchItem>();
+  const layers = new Set<string>();
+  for (const item of items) {
+    if (page.size >= pageSize) break;
+    const layer = dsoLayerOf(item);
+    if (!layers.has(layer)) {
+      layers.add(layer);
+      page.add(item);
+    }
+  }
+  for (const item of items) {
+    if (page.size >= pageSize) break;
+    page.add(item);
+  }
+  return [...items.filter((x) => page.has(x)), ...items.filter((x) => !page.has(x))];
+}
+
+/** "Op dit punt: 26 documenten (gemeente 3, waterschap 2, provincie 6, Rijk 15)". */
+function dsoLayerNote(items: DsoSearchItem[], pageSize: number): string {
+  const counts = [...DSO_LAYERS, { layer: "overig", label: "overig" }]
+    .map(({ layer, label }) => [label, items.filter((x) => dsoLayerOf(x) === layer).length] as const)
+    .filter(([, n]) => n > 0)
+    .map(([label, n]) => `${label} ${n}`);
+  const more = items.length > pageSize ? `; de eerste ${pageSize} tonen elke bestuurslaag, de rest volgt met offset ${pageSize}` : "";
+  return `Op dit punt: ${items.length} ${items.length === 1 ? "document" : "documenten"} (${counts.join(", ")})${more}.`;
+}
+
+/** The DSO request nl_gov_ask plans for a question (dryRun). */
+function dsoPlannedRequests(intent: DsoIntent, question: string, top: number) {
+  const soort = intent.soort ?? "regelingen";
+  const zoek = Boolean(intent.locatie || intent.bevoegdGezag || intent.provincie);
+  const rows = dsoRows(intent, top);
+  return [
+    {
+      connector: "dso_omgevingsdocumenten",
+      method: zoek ? "POST" : "GET",
+      url: `${DSO_PRESENTEREN_BASE}/${soort}${zoek ? "/_zoek" : ""}`,
+      params: {
+        ...(intent.locatie ? { locatie: intent.locatie } : {}),
+        ...(intent.bevoegdGezag ? { bevoegdGezag: intent.bevoegdGezag } : {}),
+        ...(intent.provincie ? { provincie: intent.provincie } : {}),
+        ...(intent.typeBevoegdGezag ? { typeBevoegdGezag: intent.typeBevoegdGezag } : {}),
+        ...(intent.documentType ? { documentType: intent.documentType } : {}),
+        soort,
+        ...(intent.alleenTerInzage ? { alleen_ter_inzage: true } : {}),
+        ...(intent.geldigOp ? { geldigOp: intent.geldigOp } : {}),
+        question,
+        top,
+        ...(rows !== top ? { rows } : {}),
+      },
+    },
+  ];
+}
+
+/** Topic words after "over"/"voor" that the DSO search does not look at (it searches titles and metadata). */
+const DSO_TOPIC_RE = /(?:^|[^\p{L}])(?:over|voor|betreffende|inzake)\s+((?:\p{Ll}[\p{L}-]*)(?:\s+(?:en|of|\p{Ll}[\p{L}-]*))*)/u;
+const DSO_NOT_A_TOPIC = [
+  "regels", "regel", "regelgeving", "gelden", "geldt", "golden", "gold", "staat", "staan", "zegt", "over", "voor",
+  "omgevingswet", "documenten", "document", "adres", "locatie", "gemeente", "provincie", "waterschap", "mij", "mijn",
+  "huis", "woning", "perceel", "kavel", "plek", "plaats", "gebied", "nu", "er",
+  // Words the route already turned into parameters: the Rijk, the newest, ontwerpen ter inzage, a layer.
+  "nationale", "rijk", "nieuwste", "recentste", "recente", "laatste", "ontwerp", "ontwerpen", "ter", "inzage",
+  "gemeenten", "provincies", "waterschappen",
+];
+
+/** The topic words of a DSO question that no search parameter carries ("over dakkapellen"); `used` holds the parameter values. */
+function dsoTopicWords(question: string, used: string[]): string[] {
+  const tail = DSO_TOPIC_RE.exec(question)?.[1] ?? "";
+  const usedWords = used.flatMap(dsoWords);
+  return tail ? extractKeywords(tail, { exclude: [...DSO_NOT_A_TOPIC, ...usedWords] }).filter((w) => !DSO_DOCUMENT_WORDS_RE.test(w) && !usedWords.includes(w.toLowerCase())) : [];
+}
+
+/** A year the question asks a period for ("in 2025", "sinds 2024"), not one in a title ("Omgevingsvisie Amsterdam 2050"). */
+const DSO_PERIOD_YEAR_RE = /(?:^|[^\p{L}])(?:in|sinds|vanaf|tot|tussen|uit|per|tijdens|na)\s+(?:het\s+jaar\s+)?(?:19|20)\d\d(?!\d)/iu;
+
+/**
+ * The search's notes in nl_gov_ask's terms: nl_gov_ask has no `rows` (the
+ * paging note names `top`) and no `provincie` parameter ("in de provincie X").
+ */
+function dsoRouterNote(note: string | undefined, bevoegdGezagNaam?: string): string | undefined {
+  const provincie = bevoegdGezagNaam?.replace(/^provincie\s+/i, "");
+  return note
+    ?.replace(/Niet getoond \(rows (\d+)\)/g, "Niet getoond (nl_gov_ask haalt er $1 op)")
+    .replace(/; verhoog rows (?:naar \d+|\(max \d+\)) voor de volledige lijst\./g, ".")
+    .replace(/Voor de provincie met al haar gemeenten: provincie '(pv\d+)'\./g, (_, code: string) => `Voor de provincie met al haar gemeenten: vraag naar 'in de provincie ${provincie ?? code}'.`);
 }
 
 /**
@@ -1749,57 +2467,413 @@ export function registerTools(server: McpServer): void {
     }
   });
 
+  /** Both DSO tools without a key: the same answer, and how to get one. */
+  const dsoNotConfigured = () =>
+    toMcpToolPayload(
+      errorResponse({
+        error: "not_configured",
+        message: "DSO_API_KEY ontbreekt",
+        suggestion:
+          "Vraag een sleutel aan via https://developer.omgevingswet.overheid.nl/formulieren/api-key-aanvragen-0/ en zet DSO_API_KEY. Lees-only PDOK-tegeldata is geen alternatief; vector tiles bevatten geen documentmetadata.",
+      }),
+    );
+  /** A DSO_API_KEY that is missing or would be refused as a header: the payload to return, never the value. */
+  const dsoKeyProblem = (apiKey: string | undefined) => {
+    const problem = dsoApiKeyProblem(apiKey);
+    if (problem === "ontbreekt") return dsoNotConfigured();
+    if (!problem) return undefined;
+    // Never the value itself: it may be (part of) a real key.
+    return toMcpToolPayload(
+      errorResponse({
+        error: "not_configured",
+        message: "DSO_API_KEY bevat ongeldige tekens (spaties, regeleinden of andere tekens die een HTTP-header niet toestaat) en is niet verstuurd.",
+        suggestion: "Zet in DSO_API_KEY alleen de sleutel zelf, zonder aanhalingstekens of witruimte erin.",
+      }),
+    );
+  };
+  const dsoInputError = (e: DsoInputError) => toMcpToolPayload(errorResponse({ error: "unexpected", message: e.message, suggestion: e.suggestion, details: e.details }));
+  /**
+   * Any other failure of the DSO tools. The DSO refuses a malformed DSO_API_KEY with
+   * HTTP 400 and an unknown one with 401/403: a configuration error, not a missing
+   * document. A broken %-escape in a pasted URL is an input error; a Locatieserver
+   * failure is named as such. The key itself is never in a message.
+   */
+  const dsoSourceError = (e: unknown) => {
+    if (e instanceof URIError) {
+      return dsoInputError(new DsoInputError("Identificatie met een ongeldige %-codering.", "Geef identificatie ('/akn/nl/act/gm0344/2020/omgevingsplan'), uriIdentificatie of technischId uit dso_omgevingsdocumenten_search."));
+    }
+    if (e instanceof SourceRequestError && e.endpoint.startsWith(DSO_PRESENTEREN_BASE) && (e.status === 400 || e.status === 401 || e.status === 403)) {
+      return toMcpToolPayload(
+        errorResponse({
+          error: "not_configured",
+          message:
+            e.status === 400
+              ? "Het DSO weigerde het verzoek (HTTP 400): meestal een DSO_API_KEY met een ongeldig formaat, anders een parameter die het DSO niet accepteert."
+              : `Het DSO weigerde DSO_API_KEY (HTTP ${e.status}): de sleutel is onbekend, ingetrokken of niet geautoriseerd.`,
+          suggestion: "Controleer DSO_API_KEY (de volledige sleutel, zonder aanhalingstekens) of vraag een nieuwe aan via https://developer.omgevingswet.overheid.nl/formulieren/api-key-aanvragen-0/.",
+          details: { endpoint: e.endpoint, status: e.status },
+        }),
+      );
+    }
+    const locatieserver = e instanceof SourceRequestError && /^https:\/\/api\.pdok\.nl\//.test(e.endpoint);
+    return toMcpToolPayload(mapSourceError(e, locatieserver ? "PDOK Locatieserver (locatie voor het DSO)" : "DSO Omgevingsdocumenten", DSO_RODK_URL));
+  };
+
+  /**
+   * Longest wait for dso_omgevingsdocumenten_search: a name or area loads the
+   * national catalogue first, and a hanging DSO must give a clear error before
+   * the MCP client's own 60 s timeout.
+   */
+  const DSO_SEARCH_DEADLINE_MS = 45_000;
+
   server.registerTool(
     "dso_omgevingsdocumenten_search",
     {
       description:
-        "Discovery-only search for DSO Omgevingsdocumenten (omgevingsplannen, omgevingsvisies, programma's, omgevingsverordeningen) onder de Omgevingswet. Returns metadata only (id, titel, type, bevoegd gezag, geldigheidsdatums, viewer-link), geen juridische tekst. Requires DSO_API_KEY.",
+        "Search the omgevingsdocumenten of the Omgevingswet in the DSO (Digitaal Stelsel Omgevingswet), at document level: omgevingsplannen, omgevingsvisies, programma's, omgevingsverordeningen, waterschapsverordeningen, voorbereidingsbesluiten (voorbeschermingsregels), projectbesluiten and the Rijk's AMvB's, and with soort 'ontwerpregelingen' the drafts, with their inzagetermijn where the DSO has one. " +
+        "Use 'locatie' (an address, postcode or place) for the documents whose werkingsgebied covers that point, gemeente first, then waterschap, provincie and Rijk. This does not check which individual articles apply there: an artikel can have a smaller werkingsgebied (Regels op de kaart shows rules per location). " +
+        "Use 'bevoegdGezag' for the documents one body issued itself: a TOOI code (gm0344 = gemeente Utrecht, pv26 = provincie Utrecht, ws0636 = Hoogheemraadschap De Stichtse Rijnlanden, mnre1034 = ministerie van BZK) or a name. A provincie as bevoegdGezag gives only the provincie's own documents; use 'provincie' for the area: the provincie's documents plus those of all its gemeenten. " +
+        "Without locatie, bevoegdGezag or provincie, 'query' and 'documentType' search the complete national catalogue. " +
+        "Returns metadata, most recently changed first (by the start of each document's current consolidated version, so a new version of an old plan counts as recent): title, type, bevoegd gezag (the issuing body), versie with the beginGeldigheid/eindGeldigheid of that version (eindGeldigheid is exclusive: on that day the next version applies, so this one holds through versieGeldigTotEnMet, the day before; it is not when the regeling ends), a link to the readable text (canonical_url: lokaleregelgeving.overheid.nl for gemeente, provincie and waterschap, wetten.overheid.nl for Rijk laws where known, else Regels op de kaart; the publication for an ontwerp), and identificatie/uriIdentificatie (technischId for an ontwerp). " +
+        "Two Rijk records at every location are no rule document: the Omgevingswet is only a pointer in the DSO (alleenVerwijzing) and 'Aansluitdocument Rijk' a technical record (technisch); both carry an opmerking and say so in their title. " +
+        "access_note says what was searched and, per bestuurslaag, what was found and what rows left out. The rule text itself comes from dso_omgevingsdocument_tekst with that identificatie. Requires DSO_API_KEY.",
       inputSchema: {
-        query: z.string().optional().describe("Optionele vrije tekst (matched op titel, citeertitel, opschrift, bevoegd gezag). Bijv. 'omgevingsvisie Utrecht'."),
-        bevoegdGezag: z.string().optional().describe("TOOI-code van het bevoegd gezag, bijv. 'gm0344' (Utrecht), 'pv24' (Utrecht provincie). Zie identifier.overheid.nl/tooi."),
-        typeBevoegdGezag: z.enum(["gemeente", "provincie", "waterschap", "ministerie"]).optional().describe("Filter op bestuurslaag."),
-        documentType: z.enum(["omgevingsplan", "omgevingsvisie", "programma", "omgevingsverordening"]).optional().describe("Filter op documenttype (client-side filter op type.waarde)."),
-        rows: z.number().int().min(1).max(config.limits.maxRows).default(20),
+        query: z.string().max(200).optional().describe("Words that must all occur (whole words, case and accents ignored) in title, citeertitel, opschrift, bevoegd gezag or type, and for an ontwerp also its ontwerpbesluit's citeertitel (the project or street), e.g. 'omgevingsvisie Utrecht', 'geluid'. Without bevoegdGezag, provincie or locatie the whole catalogue is searched."),
+        locatie: z.string().max(200).optional().describe("Address, postcode (with or without house number) or place, e.g. 'Brennerbaan 150, Utrecht', '3524 BN 150' or 'Lunetten, Utrecht'. Resolved via the PDOK Locatieserver to one point, within the gemeente or woonplaats the input names ('Den Haag' and 's-Gravenhage both work, also next to a postcode), never in another place; an unknown address or a name that fits several places is an error naming them. A missing house number or another street than the one named is stated in access_note. Returns the documents whose werkingsgebied covers the point, all layers. A place name becomes its centre point: use bevoegdGezag or provincie for all documents of a gemeente or provincie."),
+        bevoegdGezag: z.string().max(200).optional().describe("The issuing body: only the documents it adopted itself, not those of other bodies in its area. TOOI code in any case (gm0344 = gemeente Utrecht, pv26 = provincie Utrecht, ws0636 = Hoogheemraadschap De Stichtse Rijnlanden) or a name ('Utrecht', 'gemeente Utrecht', 'provincie Utrecht', 'De Stichtse Rijnlanden', also 'Den Bosch', 'Friesland', 'HDSR', 'BZK'). A bare name is the gemeente, else the provincie ('Limburg'), else the waterschap; documentType omgevingsverordening picks the provincie and waterschapsverordening the waterschap ('Utrecht' + omgevingsverordening = pv26). access_note names the alternatives. Not together with provincie."),
+        provincie: z.string().max(200).optional().describe("An area: a provincie by name or code ('Utrecht', 'Fryslân', 'pv26'), giving the documents of the provincie itself plus those of all gemeenten in it (gemeenten from the PDOK Locatieserver). Waterschappen and the Rijk are not included. Works with soort, alleen_ter_inzage, documentType, typeBevoegdGezag and query; each record still names its issuing bevoegdGezag. Not together with bevoegdGezag or locatie."),
+        typeBevoegdGezag: z.enum(["gemeente", "provincie", "waterschap", "ministerie"]).optional().describe("Filter on the layer of the issuing body; also picks the layer for a name such as 'Utrecht'."),
+        documentType: z.enum(DSO_DOCUMENT_TYPES).optional().describe("Exact document type. 'voorbereidingsbesluit' = voorbeschermingsregels (also those of an omgevingsplan or omgevingsverordening); 'omgevingsplan' is the omgevingsplan only; 'projectbesluit' includes its omgevingsplanregels."),
+        soort: z.enum(["regelingen", "ontwerpregelingen"]).default("regelingen").describe("'regelingen' (default): documents in force. 'ontwerpregelingen': drafts, one record per ontwerpbesluit, with besluitTitel, bekendOp, beginInzagetermijn, eindeInzagetermijn and terInzage: true or false when the DSO has the inzagetermijn, null when it has none (inzagetermijnBekend false, about a third of recent drafts; the termijn is then only in the bekendmaking). mogelijkTerInzage marks such a draft announced in the last 56 days. bekendmakingId/bekendmakingUrl: the publication of the ontwerpbesluit (officiele_bekendmakingen_record_get takes the id), which is leading for the exact termijn and how to respond; onderwerp: the publication's title where the DSO title names no subject, null when unknown."),
+        alleen_ter_inzage: z.boolean().default(false).describe("Only drafts ter inzage today (implies soort 'ontwerpregelingen'): first those whose inzagetermijn in the DSO includes today, then those without an inzagetermijn in the DSO announced in the last 56 days, marked mogelijkTerInzage (check the bekendmaking); access_note gives both counts. With bevoegdGezag: only that body's own drafts; with provincie: those of the provincie and its gemeenten; with neither: every draft in the Netherlands, each with its bevoegd gezag."),
+        // The same calendar-day check as ori_search's dates.
+        geldigOp: oriDate.optional().describe("YYYY-MM-DD: the versions that were geldig and in werking on that day (sent as geldigOp and inWerkingOp) instead of today's; not for ontwerpregelingen."),
+        rows: z.number().int().min(1).max(config.limits.maxRows).optional().describe(`Maximum records (1-${config.limits.maxRows}). Default 50 with locatie, where one point usually has 20-40 documents and the Rijk's come last; else 20. access_note says per bestuurslaag what was left out.`),
       },
       annotations: TOOL_ANNOTATIONS,
     },
-    async ({ query, bevoegdGezag, typeBevoegdGezag, documentType, rows }) => {
+    async ({ query, locatie, bevoegdGezag, provincie, typeBevoegdGezag, documentType, soort, alleen_ter_inzage, geldigOp, rows }) => {
       const apiKey = process.env[ENV_KEYS.DSO_API_KEY];
-      if (!apiKey) {
-        return toMcpToolPayload(
-          errorResponse({
-            error: "not_configured",
-            message: "DSO_API_KEY ontbreekt",
-            suggestion:
-              "Vraag een sleutel aan via https://developer.omgevingswet.overheid.nl/formulieren/api-key-aanvragen-0/ en zet DSO_API_KEY. Lees-only PDOK-tegeldata is geen alternatief; vector tiles bevatten geen documentmetadata.",
-          }),
-        );
-      }
+      const keyProblem = dsoKeyProblem(apiKey);
+      if (keyProblem) return keyProblem;
+      let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
       try {
-        const { DsoOmgevingsdocumentenSource } = await import("./sources/dso-omgevingsdocumenten.js");
-        const src = new DsoOmgevingsdocumentenSource(config, apiKey);
-        const out = await src.search({ query, bevoegdGezag, typeBevoegdGezag, documentType, rows });
-        const records = out.items.map((x) =>
-          record(
-            "dso_omgevingsdocumenten",
-            x.title,
-            x.viewerUrl,
-            { ...x, raw: undefined },
-            x.documentType,
-            x.beginGeldigheid ?? x.beginInwerking,
-          ),
-        );
+        const src = new DsoOmgevingsdocumentenSource(config, (apiKey as string).trim());
+        const search = src.search({ query, locatie, bevoegdGezag, provincie, typeBevoegdGezag, documentType, soort, alleenTerInzage: alleen_ter_inzage, geldigOp, rows });
+        const deadline = new Promise<"deadline">((resolve) => {
+          deadlineTimer = setTimeout(() => resolve("deadline"), DSO_SEARCH_DEADLINE_MS);
+        });
+        const out = await Promise.race([search, deadline]);
+        if (out === "deadline") {
+          // The search runs on in the background and fills the catalogue cache for the next call.
+          search.catch(() => undefined);
+          const seconds = Math.round(DSO_SEARCH_DEADLINE_MS / 1000);
+          return toMcpToolPayload(
+            errorResponse({
+              error: "timeout",
+              message: `DSO Omgevingsdocumenten gaf binnen ${seconds} s geen antwoord.`,
+              suggestion: "Probeer het zo opnieuw: wat intussen binnenkomt wordt bewaard. Of zoek gerichter: bevoegdGezag als TOOI-code (gm0344) in plaats van een naam, of een locatie.",
+              details: { endpoint: DSO_PRESENTEREN_BASE, timeout_s: seconds },
+            }),
+          );
+        }
+        const records = out.items.map(dsoRecord);
+        const scope = out.locatie
+          ? ` — ${out.locatie.weergavenaam}`
+          : out.bevoegdGezag
+            ? ` — ${out.bevoegdGezag.naam ? `${out.bevoegdGezag.naam} (${out.bevoegdGezag.code})` : out.bevoegdGezag.code}`
+            : out.provincie
+              ? ` — ${out.provincie.naam ?? out.provincie.code} (${out.provincie.code}) en haar ${out.provincie.gemeenten} gemeenten`
+              : "";
+        // Of everything found, not only the records shown: per bestuurslaag at a location, and
+        // for ontwerpen those ter inzage by their DSO termijn apart from those possibly so.
+        const layers = out.perBestuurslaag?.map((l) => `${l.laag} ${l.aantal}`).join(", ");
+        const inzage = out.terInzageAantal;
+        const terInzage =
+          inzage && (alleen_ter_inzage || inzage.bevestigd || inzage.mogelijk)
+            ? `${alleen_ter_inzage ? "" : "waarvan "}${inzage.bevestigd} ter inzage${inzage.mogelijk ? `, ${inzage.mogelijk} mogelijk ter inzage` : ""}`
+            : undefined;
+        const breakdown = [layers, terInzage].filter(Boolean).join("; ");
+        const of = out.total > records.length ? `van ${out.total}` : "";
+        const counts = of && breakdown ? ` (${of}: ${breakdown})` : of || breakdown ? ` (${of || breakdown})` : "";
         return toMcpToolPayload(
           successResponse({
-            summary: `${records.length} DSO omgevingsdocumenten`,
+            summary: `${records.length} DSO ${soort === "ontwerpregelingen" || alleen_ter_inzage ? "ontwerp-omgevingsdocumenten" : "omgevingsdocumenten"}${scope}${counts}`,
             records,
             provenance: prov("dso_omgevingsdocumenten_search", out.endpoint, out.query, records.length, out.total),
-            access_note:
-              "Bron: DSO Omgevingsdocumenten Presenteren API v8 (read-only). Filters op documentType worden client-side toegepast op de eerste pagina; verfijn met bevoegdGezag of typeBevoegdGezag voor scherpere resultaten.",
+            access_note: out.access_note,
           }),
         );
       } catch (e) {
-        return toMcpToolPayload(mapSourceError(e, "DSO Omgevingsdocumenten", "https://omgevingswet.overheid.nl/regels-op-de-kaart/viewer"));
+        if (e instanceof DsoInputError) return dsoInputError(e);
+        return dsoSourceError(e);
+      } finally {
+        clearTimeout(deadlineTimer);
+      }
+    },
+  );
+
+  server.registerTool(
+    "dso_omgevingsdocument_tekst",
+    {
+      description:
+        "Read the rule text (regeltekst) of one DSO omgevingsdocument as plain text (the whole document; it does not tell which artikelen apply at a particular location): hoofdstukken, afdelingen, paragrafen and artikelen with number and title, numbered leden and lists, begrippen as 'term: definitie', tables as rows. " +
+        "Pass the identificatie from dso_omgevingsdocumenten_search ('/akn/nl/act/gm0344/2020/omgevingsplan'; uriIdentificatie, an identifier.overheid.nl URL or an ontwerp's technischId also work). The Rijk's AMvB's are readable here article by article too (Bbl = '/akn/nl/act/mnre1034/2018/BWBR0041297'; dso_omgevingsdocumenten_search with typeBevoegdGezag 'ministerie' lists them). " +
+        "'zoekterm' returns only the artikelen, begrippen and toelichting parts holding every word, each with its heading path, the regels before bijlagen and toelichting; every hit gets at least its heading and the passage with the term, and a hit too long for max_tekens comes with only its passages (ingekort: true, eId for the rest). It finds the word only: a rule that applies through a general term or an afwijking ('In afwijking van artikel 9.3') may not repeat it, so also read the afdeling of the main hit. " +
+        "'onderdeel' returns one part by eId/wId or label ('Artikel 4.24', 'artikel 4.1 lid 2', 'artikel 4.1, tweede lid', 'Hoofdstuk 4', 'Bijlage II'). " +
+        "A part from the toelichting is titled 'Toelichting bij …' and has toelichting: true: it explains a rule and is not binding; the rule is the artikel itself. " +
+        "An omgevingsplan's voorbeschermingsregels (voorbereidingsbesluiten) are a tijdelijk deel of it and take precedence where they deviate: access_note lists them, and a zoekterm searches them too ('Voorbeschermingsregels: <titel> — Artikel …', tijdelijkDeel: true). " +
+        "An ontwerp reads as the regeling would after the change: added text in, deleted text out; with weergave 'wijzigingen' only what it changes, [+added+] and [-deleted-] text marked, parts only renumbered listed as such. " +
+        "Without zoekterm or onderdeel, a document longer than max_tekens comes back as its beginning plus a table of contents whose eIds a follow-up call can pass as onderdeel. Large documents (an omgevingsplan is several MB) are fetched once and kept for 15 minutes. " +
+        "For the Omgevingswet the DSO holds only a pointer, not the law: access_note then links the text on wetten.overheid.nl; the Aansluitdocument Rijk is a technical record without rules. Requires DSO_API_KEY.",
+      inputSchema: {
+        identificatie: z.string().min(1).max(500).describe("identificatie, uriIdentificatie or (ontwerp) technischId from dso_omgevingsdocumenten_search, e.g. '/akn/nl/act/gm0344/2020/omgevingsplan'."),
+        zoekterm: z.string().max(200).optional().describe("Words that must all occur in a part, case and accents ignored, e.g. 'dakkapel' or 'dakkapel achterkant'. Plain text matching: a word also matches inside longer words ('dakkapel' finds 'dakkapellen'), and a plural of 7+ letters ending in -en or -s also matches its stem ('dakkapellen' finds 'dakkapel', 'windturbines' finds 'windturbine'). A plural that changes its vowel does not: 'zonnepanelen' misses 'zonnepaneel', so search 'zonnepan'. No synonyms."),
+        onderdeel: z.string().optional().describe("One part: an eId or wId (from the table of contents or a zoekterm result), or a label such as 'Artikel 4.24', 'artikel 4.1 lid 2', 'Hoofdstuk 4', 'Afdeling 4.2', 'Bijlage II'."),
+        weergave: z.enum(["nieuw", "wijzigingen"]).default("nieuw").describe("For an ontwerp: 'nieuw' (default) is the regeling as the ontwerp would make it; 'wijzigingen' only what the ontwerp changes, with [+added+] and [-deleted-] text, [nieuw]/[vervalt] before whole parts and renumbered parts listed as 'alleen vernummerd' (use it for 'wat verandert er'). Combine with onderdeel or zoekterm to narrow it."),
+        geldigOp: oriDate.optional().describe("YYYY-MM-DD: the version geldig and in werking on that day instead of today (sent as geldigOp and inWerkingOp; not for ontwerpregelingen)."),
+        max_tekens: z.number().int().min(500).max(DSO_TEXT_MAX_CHARS).default(DSO_TEXT_DEFAULT_CHARS).describe(`Maximum characters of text returned (default ${DSO_TEXT_DEFAULT_CHARS}, max ${DSO_TEXT_MAX_CHARS}).`),
+      },
+      annotations: TOOL_ANNOTATIONS,
+    },
+    async ({ identificatie, zoekterm, onderdeel, weergave, geldigOp, max_tekens }) => {
+      const apiKey = process.env[ENV_KEYS.DSO_API_KEY];
+      const keyProblem = dsoKeyProblem(apiKey);
+      if (keyProblem) return keyProblem;
+      // An eId or label is short; a long onderdeel is not one (and must not reach the label matching).
+      if (onderdeel && onderdeel.length > 300) {
+        return dsoInputError(new DsoInputError(`Onderdeel van ${onderdeel.length} tekens: te lang voor een eId of label.`, "Geef een eId uit de inhoudsopgave of een label zoals 'Artikel 4.24' of 'artikel 4.1 lid 2'."));
+      }
+      const onlyOntwerp = () =>
+        dsoInputError(
+          new DsoInputError(
+            "weergave 'wijzigingen' is er alleen voor een ontwerp: een regeling zelf heeft geen renvooi.",
+            "Geef de technischId van een ontwerp uit dso_omgevingsdocumenten_search met soort 'ontwerpregelingen', of laat weergave weg.",
+          ),
+        );
+      // An ontwerp is named by its technischId ("…_akn_nl_bill_…"), its ontwerpbesluit ("/akn/nl/bill/…") or an ontwerpregelingen URL.
+      if (weergave === "wijzigingen" && !/akn[/_]nl[/_]bill[/_]|\/ontwerpregelingen\//i.test(identificatie)) return onlyOntwerp();
+      try {
+        const src = new DsoOmgevingsdocumentenSource(config, (apiKey as string).trim());
+        // As selectDsoText reads them: weergave wijzigingen first, then onderdeel, then zoekterm.
+        const searching = zoektermWords(zoekterm ?? "").length > 0 && !onderdeel?.trim() && weergave !== "wijzigingen";
+        const out = await src.documentText({ identificatie, geldigOp, weergave, tijdelijkeDelen: searching ? "tekst" : "lijst" });
+        if (weergave === "wijzigingen" && out.kind !== "ontwerpregeling") return onlyOntwerp();
+        // An ontwerp of a new regeling (or one that changes no text) has no renvooi: its text is the change.
+        const wijzigingen = weergave === "wijzigingen" && Boolean(out.doc.renvooi);
+        const delen = out.tijdelijkeDelen ?? [];
+        const searched = delen.filter((t) => t.doc);
+        const sel = selectDsoText(out.doc, {
+          zoekterm,
+          onderdeel,
+          maxChars: max_tekens,
+          weergave: wijzigingen ? "wijzigingen" : "nieuw",
+          tijdelijkeDelen: searching ? searched.map((t) => t.doc as NonNullable<typeof t.doc>) : undefined,
+        });
+        const item = out.item;
+        const docTitle = item?.title ?? identificatie;
+        const placeholder = out.placeholder;
+        if (sel.notFound) {
+          return dsoInputError(
+            placeholder
+              ? new DsoInputError(`Onderdeel '${onderdeel}' staat niet in het DSO: van ${docTitle} bevat het DSO alleen een verwijzing, niet de wettekst.`, `Lees de wet op ${placeholder.url}.`)
+              : new DsoInputError(
+                  `Onderdeel '${onderdeel}' niet gevonden in ${docTitle}${sel.notFound.reason ? `: ${sel.notFound.reason}` : "."}`,
+                  `${sel.notFound.suggestions.length ? `Bestaande onderdelen: ${sel.notFound.suggestions.join(", ")}. ` : ""}Roep de tool zonder onderdeel en zoekterm aan voor de inhoudsopgave met eIds, of zoek met zoekterm.`,
+                ),
+          );
+        }
+        const url = item?.documentUrl ?? DSO_RODK_URL;
+        const date = item ? (item.soort === "ontwerpregeling" ? item.bekendOp : (item.beginGeldigheid ?? item.beginInwerking)) : undefined;
+        const documentFields = {
+          document: docTitle,
+          identificatie: item?.identificatie,
+          ...(out.kind === "ontwerpregeling" ? { technischId: out.pathId } : { uriIdentificatie: out.pathId }),
+          bevoegdGezag: item?.bevoegdGezag,
+          bevoegdGezagCode: item?.bevoegdGezagCode,
+          documentType: item?.documentType,
+          ...(geldigOp && out.kind === "regeling" ? { geldigOp } : {}),
+        };
+        // A tijdelijk deel by what it is: "Voorbeschermingsregels: Voorbereidingsbesluit dakkapellen …".
+        const deelLabel = (t: (typeof delen)[number]) => (/^voorbeschermingsregels/i.test(t.item?.documentType ?? "") ? "Voorbeschermingsregels" : "Tijdelijk deel");
+        const deelTitle = (t: (typeof delen)[number]) => t.item?.title ?? t.uriIdentificatie;
+        const partFields = (part: DsoTextPart) => ({
+          onderdeel: part.title,
+          ...(part.pad ? { pad: part.pad } : {}),
+          ...(part.eId ? { eId: part.eId, wId: part.wId } : {}),
+          onderdeelType: part.type,
+          ...(part.toelichting ? { toelichting: true } : {}),
+          ...(part.wijziging ? { wijziging: part.wijziging } : {}),
+          ...(part.tekensVolledig ? { ingekort: true, tekensOnderdeel: part.tekensVolledig } : {}),
+          tekst: part.tekst,
+        });
+        const wholeDocument = sel.mode === "volledig" || sel.mode === "begin_met_inhoudsopgave";
+        let first = true;
+        const records = sel.parts.map((part) => {
+          const deel = part.tijdelijkDeel !== undefined ? searched[part.tijdelijkDeel] : undefined;
+          if (deel) {
+            return record(
+              "dso_omgevingsdocumenten",
+              `${deelLabel(deel)}: ${deelTitle(deel)} — ${part.title}`,
+              deel.item?.documentUrl ?? DSO_RODK_URL,
+              {
+                document: deelTitle(deel),
+                identificatie: deel.item?.identificatie,
+                uriIdentificatie: deel.uriIdentificatie,
+                bevoegdGezag: deel.item?.bevoegdGezag,
+                bevoegdGezagCode: deel.item?.bevoegdGezagCode,
+                documentType: deel.item?.documentType,
+                tijdelijkDeel: true,
+                tijdelijkDeelVan: item?.identificatie ?? identificatie,
+                ...partFields(part),
+              },
+              part.tekst.slice(0, 300),
+              deel.item?.beginGeldigheid,
+            );
+          }
+          const own = record(
+            "dso_omgevingsdocumenten",
+            wholeDocument ? docTitle : `${part.title} — ${docTitle}`,
+            url,
+            {
+              ...documentFields,
+              ...partFields(part),
+              ...(first && sel.inhoudsopgave ? { inhoudsopgave: sel.inhoudsopgave } : {}),
+              ...(first ? { tekensDocument: sel.totalChars, afgekapt: sel.truncated } : {}),
+            },
+            part.tekst.slice(0, 300),
+            date,
+          );
+          first = false;
+          return own;
+        });
+        const shown = records.length;
+        const deelMatches = sel.matchesTijdelijk ?? 0;
+        const ownMatches = (sel.matches ?? 0) - deelMatches;
+        const counts = sel.wijzigingen;
+        const summary =
+          placeholder && (sel.mode === "volledig" || !sel.matches)
+            ? `Alleen een verwijzing in het DSO: de tekst van ${docTitle} staat op ${placeholder.url}`
+            : out.technisch && sel.mode === "volledig"
+              ? `Technisch aansluitdocument zonder regels: ${docTitle}`
+              : sel.mode === "volledig"
+                ? `Regeltekst ${docTitle} (${sel.totalChars} tekens)`
+                : sel.mode === "begin_met_inhoudsopgave"
+                  ? `Begin van ${docTitle} met inhoudsopgave (${sel.totalChars} tekens in totaal)`
+                  : sel.mode === "wijzigingen" && counts
+                    ? `${sel.matches ?? 0} ${sel.matches === 1 ? "wijziging" : "wijzigingen"} in ontwerp ${docTitle}${onderdeel ? ` (${onderdeel})` : ""}${zoekterm ? ` met '${zoekterm}'` : ""}: ${counts.gewijzigd} gewijzigd, ${counts.nieuw} nieuw, ${counts.vervalt} vervallen, ${counts.vernummerd} alleen vernummerd${shown < (sel.onderdelen ?? 0) ? ` (${shown} van ${sel.onderdelen} onderdelen getoond)` : ""}`
+                    : sel.mode === "zoekterm"
+                      ? `${ownMatches} ${ownMatches === 1 ? "onderdeel" : "onderdelen"} met '${zoekterm}' in ${docTitle}${deelMatches ? ` en ${deelMatches} in ${searched.length === 1 ? "het tijdelijke deel" : "de tijdelijke delen"}${searched.every((t) => deelLabel(t) === "Voorbeschermingsregels") ? " (voorbeschermingsregels)" : ""}` : ""}${shown < (sel.matches ?? 0) ? ` (${shown} getoond)` : ""}`
+                      : `${sel.parts[0]?.title ?? onderdeel} — ${docTitle}`;
+        // A part by name, a tijdelijk deel's with its own title in front.
+        const named = (p: { title: string; eId: string; tijdelijkDeel?: number }) => {
+          const deel = p.tijdelijkDeel !== undefined ? searched[p.tijdelijkDeel] : undefined;
+          return `${deel ? `${deelLabel(deel)}: ${deelTitle(deel)} — ` : ""}${p.title}${p.eId ? ` [${p.eId}]` : ""}`;
+        };
+        const omitted = sel.omitted?.length ? sel.omitted.map(named).join("; ") : undefined;
+        // At most ten named; a broad zoekterm shortens dozens.
+        const shortList = sel.shortened ?? [];
+        const shortened = shortList.length
+          ? `${shortList.slice(0, 10).map((s) => `${named(s)} (${s.chars} tekens)`).join("; ")}${shortList.length > 10 ? ` en ${shortList.length - 10} meer` : ""}`
+          : undefined;
+        const fromDeel = [...(sel.omitted ?? []), ...shortList].some((p) => p.tijdelijkDeel !== undefined);
+        const listed = (sel.onderdelen ?? sel.matches ?? 0) - shown > (sel.omitted?.length ?? 0) ? " …" : "";
+        const modeNote =
+          sel.mode === "begin_met_inhoudsopgave"
+            ? `Het document is ${sel.totalChars} tekens; getoond: het begin en de inhoudsopgave (tot en met ${sel.inhoudsopgaveNiveau}). Vraag een deel op met onderdeel (een eId uit de inhoudsopgave, of bijv. 'Artikel 1.1') of zoek met zoekterm.`
+            : sel.mode === "zoekterm" || sel.mode === "wijzigingen"
+              ? sel.matches
+                ? [
+                    shortened
+                      ? `Ingekort wegens max_tekens (${max_tekens}): ${shortened}; tekst geeft daarvan de kop en ${sel.mode === "zoekterm" ? "de passages met de zoekterm, met wat ze inleidt" : "het begin"} (ingekort: true). Vraag de volledige tekst op met onderdeel (het eId${fromDeel ? "; bij een tijdelijk deel met diens identificatie" : ""}).`
+                      : undefined,
+                    omitted
+                      ? `Niet getoond wegens max_tekens (${max_tekens}): ${omitted}${listed}. ${
+                          sel.mode === "wijzigingen"
+                            ? "Vraag ze op met weergave 'wijzigingen' en onderdeel (een eId, of een deel als 'Hoofdstuk 5'), of beperk ze met zoekterm"
+                            : "Vraag ze op met onderdeel"
+                        }; of verhoog max_tekens (max ${DSO_TEXT_MAX_CHARS}).`
+                      : undefined,
+                  ].filter(Boolean).join(" ") || undefined
+                : placeholder
+                  ? undefined
+                  : sel.mode === "wijzigingen"
+                    ? `Geen wijzigingen${onderdeel ? ` in '${onderdeel}'` : ""}${zoekterm ? ` met alle woorden van '${zoekterm}'` : ""} in dit ontwerp.`
+                    : `Geen onderdelen met alle woorden van '${zoekterm}'. Probeer een kortere of andere zoekterm, of vraag de inhoudsopgave op (zonder zoekterm).`
+              : [
+                  sel.truncated ? `Onderdeel afgekapt op ${max_tekens} tekens; vraag een kleiner onderdeel op (zie de koppen) of verhoog max_tekens (max ${DSO_TEXT_MAX_CHARS}).` : undefined,
+                  omitted ? `Ook gevonden onder dezelfde naam: ${omitted}.` : undefined,
+                ].filter(Boolean).join(" ") || undefined;
+        const wijzigingenNote = wijzigingen
+          ? "Weergave 'wijzigingen': alleen wat dit ontwerp verandert, uit de renvooi in het DSO. [+tekst+] = toegevoegd, [-tekst-] = geschrapt; [nieuw] en [vervalt] staan voor een heel onderdeel dat erbij komt of vervalt; 'alleen vernummerd' = alleen het nummer verandert, de tekst niet; […] = ongewijzigde tekst weggelaten. Een begrip in een bijlage met 'nieuwe versie van /join/id/regdata/…' verwijst naar een nieuwe versie van dat informatieobject (de kaart verandert)."
+          : weergave === "wijzigingen"
+            ? "Dit ontwerp heeft geen renvooi in het DSO (een nieuwe regeling, of een ontwerp dat geen tekst wijzigt): getoond is de tekst zelf."
+            : undefined;
+        // The tijdelijke delen (voorbeschermingsregels) that are part of this regeling, or the regeling a tijdelijk deel is part of.
+        const soortDocument = /omgevingsplan/i.test(item?.documentType ?? "") ? "dit omgevingsplan" : "deze regeling";
+        const deelList = (list: typeof delen) =>
+          list
+            .map((t) => `${deelTitle(t)} (${[t.item?.documentType, t.item?.bevoegdGezag, t.item?.beginGeldigheid ? `sinds ${t.item.beginGeldigheid}` : undefined, `identificatie ${t.item?.identificatie ?? t.uriIdentificatie}`].filter(Boolean).join(", ")})`)
+            .join("; ");
+        const readable = delen.filter((t) => !t.error);
+        const failed = delen.filter((t) => t.error);
+        const extra = (out.tijdelijkeDelenTotaal ?? 0) - delen.length;
+        const voorrang = (n: number) => (n === 1 ? "het gaat voor waar zijn voorrangsregel dat bepaalt" : "ze gaan voor waar hun voorrangsregel dat bepaalt");
+        const deelNote =
+          [
+            searching && searched.length
+              ? `Ook doorzocht: ${searched.length === 1 ? "het tijdelijke deel" : `de ${searched.length} tijdelijke delen`} van ${soortDocument} (${voorrang(searched.length)}): ${deelList(searched)}. ${deelMatches ? "Treffers daarin heten '<soort>: <titel> — <onderdeel>' (tijdelijkDeel: true); lees verder met hun identificatie." : "Daarin geen treffers."}`
+              : undefined,
+            !searching && readable.length
+              ? `Bij ${soortDocument} ${delen.length === 1 ? "hoort 1 tijdelijk deel dat niet in deze tekst staat" : `horen ${delen.length} tijdelijke delen die niet in deze tekst staan`}; ${voorrang(delen.length)}: ${deelList(readable)}. Lees ${delen.length === 1 ? "het" : "ze"} met deze tool (identificatie); met zoekterm ${delen.length === 1 ? "wordt het" : "worden ze"} meegezocht.`
+              : undefined,
+            failed.length ? `${failed.length === 1 ? "Tijdelijk deel" : "Tijdelijke delen"} van ${soortDocument} niet te lezen: ${failed.map((t) => `${t.uriIdentificatie} (${t.error})`).join("; ")}.` : undefined,
+            extra > 0 ? `Plus ${extra} ${extra === 1 ? "tijdelijk deel" : "tijdelijke delen"}, niet getoond.` : undefined,
+          ]
+            .filter(Boolean)
+            .join(" ") || undefined;
+        const parent = out.tijdelijkDeelVan;
+        const parentNote = parent
+          ? `Dit is een tijdelijk deel van ${parent.item ? `${parent.item.title} (${parent.item.identificatie ?? parent.uriIdentificatie})` : parent.uriIdentificatie}: deze regels horen bij die regeling en gaan daarop voor waar hun voorrangsregel dat bepaalt.`
+          : undefined;
+        const stemNote = sel.stems?.length ? `Meervoud ook gezocht als stam: ${sel.stems.map((s) => `'${s.word}' als '${s.stem}'`).join(", ")}.` : undefined;
+        const toelichtingNote = sel.parts.some((p) => p.toelichting)
+          ? "Onderdelen met 'Toelichting bij …' (toelichting: true) komen uit de toelichting: uitleg, geen regels; de bindende tekst is het artikel zelf."
+          : undefined;
+        return toMcpToolPayload(
+          successResponse({
+            summary,
+            records,
+            provenance: prov(
+              "dso_omgevingsdocument_tekst",
+              out.endpoint,
+              {
+                identificatie,
+                ...(zoekterm ? { zoekterm } : {}),
+                ...(onderdeel ? { onderdeel } : {}),
+                ...(weergave === "wijzigingen" ? { weergave } : {}),
+                ...(geldigOp ? { geldigOp } : {}),
+                max_tekens: String(max_tekens),
+              },
+              shown,
+              sel.mode === "wijzigingen" ? (sel.onderdelen ?? 0) : sel.mode === "zoekterm" ? (sel.matches ?? 0) : shown,
+            ),
+            access_note: mergeAccessNotes(
+              out.access_note,
+              parentNote,
+              deelNote,
+              wijzigingenNote,
+              modeNote,
+              stemNote,
+              toelichtingNote,
+              // Without records there is no canonical_url to point at: name the link itself.
+              `Tekst uit de documentstructuur van het DSO (STOP-XML omgezet naar platte tekst); de officiële weergave staat op ${records.length ? "canonical_url" : url}.`,
+            ),
+          }),
+        );
+      } catch (e) {
+        if (e instanceof DsoInputError) return dsoInputError(e);
+        return dsoSourceError(e);
       }
     },
   );
@@ -1957,7 +3031,7 @@ export function registerTools(server: McpServer): void {
     }
   });
 
-  server.registerTool("nl_gov_ask", { inputSchema: { question: z.string(), top: z.number().int().min(1).max(config.limits.maxRows).default(10), reference_now: z.string().optional(), timezone: z.string().optional(), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) }, description: "Smart router that interprets a natural-language question about Dutch government data and queries the most relevant source(s). Supports temporal expressions in Dutch and English (e.g. 'vorige week', 'since 2020'). Organisation and policy questions ('Wat doet de Belastingdienst met de BTW?', 'GGZ-beleid gemeente Utrecht') are searched in documents: the municipality's council records (Open Raadsinformatie), official publications, Tweede Kamer and Rijksoverheid. Case-law, API-register and budget questions keep their own routes. Questions no route answers fall back to the data.overheid.nl dataset catalogue; access_note then names the routes that were tried and whether they found nothing or failed. The search terms derived from the question are reported in access_note. Use this when the best source is unclear.", annotations: TOOL_ANNOTATIONS }, async ({ question, top, reference_now, timezone, offset, limit, outputFormat, verbose, dryRun }) => {
+  server.registerTool("nl_gov_ask", { inputSchema: { question: z.string(), top: z.number().int().min(1).max(config.limits.maxRows).default(10), reference_now: z.string().optional(), timezone: z.string().optional(), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) }, description: "Smart router that interprets a natural-language question about Dutch government data and queries the most relevant source(s). Supports temporal expressions in Dutch and English (e.g. 'vorige week', 'since 2020'). Organisation and policy questions ('Wat doet de Belastingdienst met de BTW?', 'GGZ-beleid gemeente Utrecht') are searched in documents: the municipality's council records (Open Raadsinformatie), official publications, Tweede Kamer and Rijksoverheid. Case-law, API-register and budget questions keep their own routes. With DSO_API_KEY set, Omgevingswet document questions go to the DSO first: a question naming an omgevingsplan, omgevingsvisie, omgevingsverordening, waterschapsverordening, omgevingsprogramma, voorbereidingsbesluit, projectbesluit, ontwerpregeling or omgevingsdocument together with an address, a place, a gemeente, provincie or waterschap, or asking for a list, the newest or ontwerpen; 'welke regels gelden op <straat huisnummer, plaats>' or '<postcode>' (also 'mag ik een dakkapel plaatsen op ...'); and ontwerpen ter inzage of a named gemeente, provincie, waterschap or place. An address gives the documents of every bestuurslaag at that point, 'in de provincie X' (or 'in Noord-Holland') the provincie's and its gemeenten's, a named gemeente, provincie or waterschap its own; 'gelden op <dag>' asks for that day. Questions about the law itself, definitions, procedures, costs, participation, the council, Staten, parliament or ministers, and questions naming publications, case law, enforcement, permits, tenders, budgets, statistics or news keep their own route, as do questions longer than 500 characters. For a place, an address or ontwerpen the DSO's answer stands even when it is empty; when the DSO fails, gives no answer within 20 s or does not know the place, the other routes answer and access_note says why. Questions no route answers fall back to the data.overheid.nl dataset catalogue; access_note then names the routes that were tried and whether they found nothing or failed. The search terms derived from the question are reported in access_note. Use this when the best source is unclear.", annotations: TOOL_ANNOTATIONS }, async ({ question, top, reference_now, timezone, offset, limit, outputFormat, verbose, dryRun }) => {
     const decodedQuestion = (() => {
       try { return decodeURIComponent(question.replace(/\+/g, " ")); } catch { return question; }
     })();
@@ -2157,6 +3231,9 @@ export function registerTools(server: McpServer): void {
     // failed route is also reported in `failures` of whatever answers next.
     const triedRoutes: string[] = [];
     const routeFailures: AskFailures = [];
+    // Set when the DSO route ran without answering: whichever route answers
+    // says that the DSO was tried and why it did not answer.
+    let dsoNote: string | undefined;
     const routeEmpty = (label: string, step: string) => {
       fallbackSteps.push(step);
       triedRoutes.push(`${label} (0 resultaten)`);
@@ -2262,7 +3339,7 @@ export function registerTools(server: McpServer): void {
             offset,
             limit: effectiveLimit,
             total: held,
-            access_note: mergeAccessNotes(args.access_note, pagingNote),
+            access_note: mergeAccessNotes(dsoNote, args.access_note, pagingNote),
             failures: failures.length ? failures : undefined,
           }),
           verbose: buildVerbose(),
@@ -2335,6 +3412,12 @@ export function registerTools(server: McpServer): void {
       const multiIntentSignal = explicitMulti || implicitMulti || uniquePlannerCandidates.length >= 2;
       // EU legislation goes first: "Verordening (EU) 2016/679" would otherwise hit obTerms.
       const euIntent = detectEuIntent(decodedQuestion);
+      // Omgevingswet documents (an omgevingsplan, -visie or -verordening, the
+      // rules at an address, ontwerpen ter inzage) are in the DSO; see
+      // detectDsoIntent. Only with a DSO key: without one such a question takes
+      // the routes it took before.
+      const dsoKey = process.env[ENV_KEYS.DSO_API_KEY]?.trim();
+      const dsoIntent = dsoKey && !euIntent ? detectDsoIntent(decodedQuestion) : undefined;
       // EUR-Lex looks up a document number ("2016/679") itself, which the
       // keyword extractor would split into "2016 679": a bare number goes
       // through as is, and other slashed tokens stay whole.
@@ -2414,13 +3497,15 @@ export function registerTools(server: McpServer): void {
             ? uniquePlannerCandidates.some((c) => c === "cbs" || c === "tk" || c === "ob")
             : uniquePlannerCandidates.length > 0;
         const plannedPolicy = !euIntent && !multiPlanned && !routedEarlier && policySources.length > 0;
-        const estimatedSources: string[] = euIntent
-          ? ["eu_cellar"]
-          : plannedPolicy
-            ? policySources
-            : uniquePlannerCandidates.length
-              ? uniquePlannerCandidates
-              : ["data_overheid"];
+        const estimatedSources: string[] = dsoIntent
+          ? ["dso_omgevingsdocumenten"]
+          : euIntent
+            ? ["eu_cellar"]
+            : plannedPolicy
+              ? policySources
+              : uniquePlannerCandidates.length
+                ? uniquePlannerCandidates
+                : ["data_overheid"];
 
         const policyQueryFor = (candidate: string): string =>
           candidate === "ori"
@@ -2456,7 +3541,7 @@ export function registerTools(server: McpServer): void {
           }
         };
 
-        const plannedRequests = estimatedSources.map((candidate) => ({
+        const plannedRequests = estimatedSources.flatMap<{ connector: string; method: string; url: string; params: Record<string, unknown> }>((candidate) => candidate === "dso_omgevingsdocumenten" && dsoIntent ? dsoPlannedRequests(dsoIntent, decodedQuestion, top) : [{
           connector: candidate,
           method: "GET",
           url: endpointByCandidate[candidate] ?? config.endpoints.dataOverheid,
@@ -2470,7 +3555,7 @@ export function registerTools(server: McpServer): void {
             top,
             ...(temporal ? { date_from: temporal.from, date_to: temporal.to } : {}),
           },
-        }));
+        }]);
 
         const cacheStatus = estimatedSources.map((candidate) => ({
           connector: candidate,
@@ -2526,6 +3611,115 @@ export function registerTools(server: McpServer): void {
         routeEmpty("EUR-Lex", `eu_cellar:${euIntent.kind}:no_results`);
       } catch (e) {
         routeFailed("EUR-Lex", "eu_cellar", e, `eu_cellar:${euIntent.kind}:failed`);
+      }
+
+      if (dsoIntent && dsoKey) {
+        const dsoLabel = "DSO Omgevingsdocumenten";
+        const derived = Object.entries(dsoPlannedRequests(dsoIntent, decodedQuestion, top)[0].params)
+          .filter(([key]) => !["question", "top", "rows", "soort"].includes(key))
+          .map(([key, value]) => `${key} '${String(value)}'`)
+          .join(", ");
+        // The DSO did not answer: the other routes get the question, and their
+        // answer says that the DSO was tried and why it did not answer.
+        const dsoNotAnswered = (step: string, why: string, failure?: AskFailures[number]) => {
+          fallbackSteps.push(step);
+          if (failure) routeFailures.push(failure);
+          dsoNote = `${dsoLabel} eerst geprobeerd${derived ? ` (${derived})` : ""}: ${why}. Dit antwoord komt van de andere routes van nl_gov_ask.`;
+        };
+        let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const source = new DsoOmgevingsdocumentenSource(config, dsoKey);
+          const search = timed("dso_omgevingsdocumenten", () => source.search({ ...dsoIntent, rows: dsoRows(dsoIntent, top) }));
+          const deadline = new Promise<"deadline">((resolve) => {
+            deadlineTimer = setTimeout(() => resolve("deadline"), DSO_ROUTE_DEADLINE_MS);
+          });
+          const out = await Promise.race([search, deadline]);
+          if (out === "deadline") {
+            // The search runs on in the background and fills the catalogue cache for the next question.
+            search.catch(() => undefined);
+            const seconds = Math.round(DSO_ROUTE_DEADLINE_MS / 1000);
+            dsoNotAnswered("dso_omgevingsdocumenten:timeout", `geen antwoord binnen ${seconds} s, niet op gewacht`, {
+              connector: "dso_omgevingsdocumenten",
+              error_type: "timeout",
+              message: `${dsoLabel} gaf binnen ${seconds} s geen antwoord; niet op gewacht.`,
+            });
+          } else {
+            const ordered = out.locatie ? dsoLayerFirstPage(out.items, effectiveLimit) : out.items;
+            const records = ordered.map(dsoRecord);
+            // A question that named its scope or asked for ontwerpen gets the
+            // DSO's answer, also when that is nothing; only a bare document
+            // type over the whole country falls through to the other routes.
+            const specific = Boolean(out.locatie || out.bevoegdGezag || dsoIntent.provincie || dsoIntent.soort === "ontwerpregelingen" || dsoIntent.alleenTerInzage);
+            if (records.length || specific) {
+              const ontwerp = dsoIntent.soort === "ontwerpregelingen" || Boolean(dsoIntent.alleenTerInzage);
+              const typePlural: Record<string, string> = { gemeente: "gemeenten", provincie: "provincies", waterschap: "waterschappen", ministerie: "ministeries" };
+              const scope = out.locatie
+                ? out.locatie.weergavenaam
+                : dsoIntent.provincie
+                  ? `gebied provincie ${dsoIntent.provincie} (provincie en gemeenten)`
+                  : out.bevoegdGezag
+                    ? (out.bevoegdGezag.naam ?? out.bevoegdGezag.code)
+                    : dsoIntent.typeBevoegdGezag
+                      ? `alle ${typePlural[dsoIntent.typeBevoegdGezag] ?? dsoIntent.typeBevoegdGezag}`
+                      : "heel Nederland";
+              // An ontwerp without an inzagetermijn in the DSO is only possibly ter inzage: counted apart.
+              const confirmed = out.items.filter((x) => x.terInzage === true).length;
+              const possibly = dsoIntent.alleenTerInzage ? out.items.filter((x) => x.terInzage !== true && x.mogelijkTerInzage).length : 0;
+              const counted = possibly
+                ? `${confirmed} ${confirmed === 1 ? "ontwerp" : "ontwerpen"} ter inzage, ${possibly} mogelijk ter inzage`
+                : ontwerp
+                  ? `${records.length} ${records.length === 1 ? "ontwerp" : "ontwerpen"}${dsoIntent.alleenTerInzage ? " ter inzage" : ""}`
+                  : `${records.length} ${records.length === 1 ? "document" : "documenten"}`;
+              const emptyNote = records.length
+                ? undefined
+                : dsoIntent.alleenTerInzage
+                  ? "Geen ontwerp waarvan de in het DSO geregistreerde inzagetermijn vandaag loopt. Niet elk ontwerp heeft zijn inzagetermijn in het DSO: de kennisgeving staat in het Gemeenteblad, Provinciaal blad of Waterschapsblad (officiele_bekendmakingen_search), net als ontwerpbesluiten buiten het DSO, zoals die voor een omgevingsvergunning. De recentste ontwerpen: dso_omgevingsdocumenten_search met soort 'ontwerpregelingen', zonder alleen_ter_inzage."
+                  : `Het DSO heeft voor deze zoekvraag geen ${ontwerp ? "ontwerpen" : "documenten"}. Besluiten van vóór de Omgevingswet en documenten buiten het DSO staan in de officiële bekendmakingen (officiele_bekendmakingen_search).`;
+              const layerNote = out.locatie && out.items.length ? dsoLayerNote(out.items, effectiveLimit) : undefined;
+              const used = [dsoIntent.locatie, dsoIntent.bevoegdGezag, dsoIntent.provincie, out.bevoegdGezag?.naam].filter((x): x is string => Boolean(x));
+              const topics = records.length ? dsoTopicWords(decodedQuestion, used) : [];
+              const topicNote = topics.length
+                ? `Onderwerp '${topics.join(" ")}' is niet in de documenten doorzocht: het DSO zoekt op titel en metadata. Zoek in de regeltekst met dso_omgevingsdocument_tekst (identificatie, zoekterm '${topics[0]}'; een kortere stam vindt ook samenstellingen).`
+                : undefined;
+              // A year that is part of a title ("Omgevingsvisie Amsterdam 2050") asks for no period.
+              const periodAsked = temporal && (temporal.matchedPattern !== "bare_year" || DSO_PERIOD_YEAR_RE.test(decodedQuestion));
+              const periodNote = periodAsked && !dsoIntent.geldigOp
+                ? `De periode uit de vraag (${temporal.from} t/m ${temporal.to}) is niet toegepast: dit zijn de ${ontwerp ? "ontwerpen die nu bekend zijn" : "documenten die vandaag gelden"}.${ontwerp ? "" : " Voor een andere dag: noem die dag ('gelden op 1 januari 2025') of gebruik dso_omgevingsdocumenten_search met geldigOp (JJJJ-MM-DD)."}`
+                : undefined;
+              return askSuccess({
+                summary: `Router: DSO Omgevingsdocumenten — ${scope} (${counted})`,
+                records,
+                provenance: prov("nl_gov_ask", out.endpoint, out.query, records.length, out.total),
+                access_note: mergeAccessNotes(
+                  `Vraag over omgevingsdocumenten onder de Omgevingswet: gezocht in het DSO${derived ? ` (${derived})` : ""}.`,
+                  emptyNote,
+                  layerNote,
+                  topicNote,
+                  periodNote,
+                  dsoRouterNote(out.access_note, out.bevoegdGezag?.naam),
+                ),
+                total: out.total,
+              });
+            }
+            dsoNotAnswered("dso_omgevingsdocumenten:no_results", "0 documenten");
+          }
+        } catch (e) {
+          if (e instanceof DsoInputError) {
+            // A name or address the DSO does not know: the other routes still get the question.
+            dsoNotAnswered("dso_omgevingsdocumenten:input_not_resolved", `${e.message} ${e.suggestion}`.trim().replace(/\.$/, ""));
+          } else {
+            // A failure of the PDOK Locatieserver, which finds the address, is PDOK's, not the DSO's.
+            const locatieserver = e instanceof SourceRequestError && /^https:\/\/api\.pdok\.nl\//.test(e.endpoint);
+            const mapped = mapSourceError(e, locatieserver ? "PDOK Locatieserver (locatie voor het DSO)" : dsoLabel);
+            dsoNotAnswered("dso_omgevingsdocumenten:search_failed", `mislukt (${mapped.error}: ${mapped.message.replace(/\.$/, "")})`, {
+              connector: "dso_omgevingsdocumenten",
+              error_type: mapped.error,
+              message: mapped.message,
+            });
+          }
+        } finally {
+          clearTimeout(deadlineTimer);
+        }
       }
 
       if (multiIntentSignal && uniquePlannerCandidates.length >= 2) {
@@ -3587,7 +4781,7 @@ export function registerTools(server: McpServer): void {
       const records = out.items.map((d) => record("data.overheid.nl", String(d.title ?? d.id), `https://data.overheid.nl/dataset/${d.id}`, d as unknown as Record<string, unknown>, d.notes, d.metadata_modified));
       // Name the routes that ran: "no source recognised" is only true when
       // none did, and a failed source must not read as an empty one.
-      const recognised = triedRoutes.length > 0 || policyNote !== undefined;
+      const recognised = triedRoutes.length > 0 || policyNote !== undefined || dsoNote !== undefined;
       const triedNote = triedRoutes.length ? `Eerst geprobeerd, zonder resultaat: ${[...new Set(triedRoutes)].join(", ")}.` : undefined;
       const catalogNote = records.length
         ? recognised

@@ -49,6 +49,10 @@ const CONNECTOR_CATEGORY: Record<string, ConnectorCategory> = {
   bag_linked_data: "discovery",
   rce_linked_data: "discovery",
   dso_omgevingsdocumenten: "discovery",
+  // The DSO search's own PDOK and bekendmakingen lookups, apart from the BAG and
+  // bekendmakingen tools' circuits; as fresh as those tools' data.
+  dso_locatieserver: "semi_live",
+  dso_bekendmakingen: "semi_live",
   ruimtelijke_plannen: "discovery",
   data_politie: "static",
   cbs_iv3: "static",

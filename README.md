@@ -21,6 +21,7 @@ Examples:
 - *"Wat is de luchtkwaliteit in Utrecht?"* → live Luchtmeetnet measurements from that city’s own stations
 - *"Geef me de rijksbegroting voor onderwijs"* → Rijksbegroting search + chapter navigation
 - *"Hoe is Richtlijn (EU) 2016/680 omgezet in Nederland?"* → EUR-Lex/CELLAR: the Dutch transposition measures with their Staatsblad reference
+- *"Welke regels gelden op Brennerbaan 150 in Utrecht?"* → DSO: the omgevingsdocumenten of gemeente, waterschap, provincie and Rijk at that address (with `DSO_API_KEY`)
 
 ## How is this different from data.overheid.nl?
 
@@ -28,7 +29,7 @@ Examples:
 
 `NL-GOV-MCP` actively retrieves and normalizes data across many sources, can combine cross-source results, and returns a consistent MCP response contract ready for assistants and automations.
 
-## Sources (47 connectors, 76 tools)
+## Sources (47 connectors, 77 tools)
 
 | Source | What it covers |
 |---|---|
@@ -55,7 +56,7 @@ Examples:
 | RCE (Linked Data) | SPARQL access to cultural heritage linked data |
 | Eurostat | EU statistics search + preview |
 | data.europa.eu | EU open data catalog |
-| DSO Omgevingsdocumenten | Discovery van omgevingsplannen, omgevingsvisies, programma's en omgevingsverordeningen onder de Omgevingswet (read-only metadata, vereist `DSO_API_KEY`) |
+| DSO Omgevingsdocumenten | Omgevingsplannen, -visies, programma's, omgevingsverordeningen, waterschapsverordeningen, voorbereidingsbesluiten en projectbesluiten onder de Omgevingswet: per adres (alle bestuurslagen), per bevoegd gezag (code of naam), per provincie met haar gemeenten of in de hele catalogus, ook op een eerdere datum, en ontwerpen met inzagetermijn en bekendmaking; met links naar de leesbare tekst en de regeltekst zelf als platte tekst (zoekterm, ook in de voorbeschermingsregels; artikel; inhoudsopgave; wat een ontwerp wijzigt). Vereist `DSO_API_KEY` |
 | data.politie.nl | Registered crime & nuisance figures per municipality/district/neighbourhood (CBS dataderden OData) |
 | CBS Iv3 | Municipal & provincial finances — budgets, annual accounts, task fields (dataderden OData) |
 | PDOK Bestuurlijke Gebieden | Official municipality/province boundaries and codes (OGC API Features) |
@@ -178,7 +179,7 @@ npm run test:live    # integration test suite (live API calls)
 
 ### Transport modes
 
-Three transport modes are supported. All expose the same 76 tools.
+Three transport modes are supported. All expose the same 77 tools.
 
 #### stdio (Claude Desktop, Claude Code)
 
@@ -275,7 +276,7 @@ Restart Claude Desktop after saving.
 | `KNMI_API_KEY` | — | Required for KNMI weather tools ([get a free token](https://developer.dataplatform.knmi.nl/open-data-api#token)) |
 | `OVERHEID_API_KEY` | — | Required for API register tool ([request a key](https://apis.developer.overheid.nl/apis/key-aanvragen)) |
 | `BAG_API_KEY` | — | Required for authoritative per-address detail via `bag_address_detail` (Kadaster Individuele Bevragingen REST). Without it the tool returns Locatieserver-only (`data_kwaliteit: "lookup_only"`). ([request access](https://www.kadaster.nl/zakelijk/producten/adressen-en-gebouwen/bag-api-individuele-bevragingen)) |
-| `DSO_API_KEY` | — | Required for `dso_omgevingsdocumenten_search` (DSO Omgevingsdocumenten Presenteren API v8). Without it the tool returns `not_configured`. ([request access](https://developer.omgevingswet.overheid.nl/formulieren/api-key-aanvragen-0/)) |
+| `DSO_API_KEY` | — | Required for `dso_omgevingsdocumenten_search` and `dso_omgevingsdocument_tekst` (DSO Omgevingsdocumenten Presenteren API v8), and for the DSO route of `nl_gov_ask`. Without it, or with characters an HTTP header cannot hold (the key is then not sent), the tools return `not_configured` and `nl_gov_ask` routes Omgevingswet questions as before. ([request access](https://developer.omgevingswet.overheid.nl/formulieren/api-key-aanvragen-0/)) |
 | `NED_API_KEY` | — | Required for `ned_energie_search` (Nationaal Energie Dashboard). Without it the tool returns `not_configured`. ([request a free key](https://ned.nl/nl/api)) |
 | `EP_ONLINE_API_KEY` | — | Required for `ep_online_energielabel` (RVO EP-Online energielabels). Without it the tool returns `not_configured`. ([request access](https://www.ep-online.nl/)) |
 | `NS_API_KEY` | — | Required for `ns_reisinformatie` (NS Reisinformatie API). Subscribe to the **"Ns-App"** product (free external tier ~300 req/5 min) — NOT the deprecated "Public-Travel-Information" product. Without it the tool returns `not_configured`. ([get a free key](https://apiportal.ns.nl/)) |
@@ -333,6 +334,15 @@ Responses include facet-driven context in `access_note` when filters are applied
 ### TenderNed details
 
 `tenderned_aanbestedingen_search` sends only parameters that are verified to filter server-side (`search`, `typeOpdracht`, `procedure`, `publicatieDatumVanaf`, `publicatieDatumTot`, `aanbestedendeDienstId`, `sort`, `page`, `size`). The upstream silently ignores unknown parameters, so an unsupported filter would look applied while returning everything — hence the deliberately small parameter surface. `opdrachtgever` is resolved to `aanbestedendeDienstId` through TenderNed's register of contracting authorities; `sort` is `relevance` or `date_newest`. `offset`/`page` are translated to upstream pages of at most 100, up to the 10,000-result cap. `tenderned_aanbesteding_get` adds the winners, award values and contract dates of award notices.
+
+### DSO Omgevingsdocumenten details
+
+Both DSO tools use the DSO Omgevingsdocumenten Presenteren API v8 and need `DSO_API_KEY`; see `docs/TOOLS.md` for every parameter and `docs/SOURCES.md` for the requests.
+
+- `dso_omgevingsdocumenten_search` works at document level: it finds which documents apply at a point, not which articles (an article can have a smaller werkingsgebied). `locatie` is geocoded with the PDOK Locatieserver to one RD point, within the place the input names; an unknown or ambiguous address is an error, and a fallback to the centre of a street or place, or to another street than the one named, is stated in `access_note`. `summary` counts the documents at that point per bestuurslaag. `bevoegdGezag` is the body that adopted a document (code or name, "Utrecht" is the gemeente, "Limburg" the provincie); `provincie` is an area, the provincie and all its gemeenten. `geldigOp` sends `geldigOp` and `inWerkingOp`, so a past date gives the versions in force that day. `eindGeldigheid` is exclusive: a version holds through `versieGeldigTotEnMet`, the day before. Two Rijk records at every location are no rule document (the Omgevingswet is only a pointer, the Aansluitdocument Rijk a technical record) and are marked so. With `documentType: "omgevingsplan"`, `access_note` names the voorbeschermingsregels that are temporarily part of the plan. A search that takes longer than 45 s returns a `timeout` error.
+- `soort: "ontwerpregelingen"` and `alleen_ter_inzage` return drafts with their inzagetermijn and the publication of the ontwerpbesluit (`bekendmakingId`, `bekendmakingUrl`), which is leading for the exact termijn and how to respond. About a third of recent drafts have no inzagetermijn in the DSO: their `terInzage` is `null`, `eindeInzagetermijnSchatting` estimates the end, and those announced in the last 56 days are marked `mogelijkTerInzage`. A draft omgevingsplan whose title names no subject gets the publication's title as `onderwerp`.
+- `dso_omgevingsdocument_tekst` returns the rule text of one document as plain text, by `zoekterm`, by `onderdeel` (article, lid, chapter, eId) or as the beginning with a table of contents. A `zoekterm` also searches the voorbeschermingsregels that are a tijdelijk deel of an omgevingsplan, and every hit gets at least its heading and the passage with the term. A draft reads as the regeling would after the change; `weergave: "wijzigingen"` shows only what it changes, with added and deleted text marked. Parts from the toelichting are labelled as such. For the Omgevingswet the DSO holds only a pointer; the tool links wetten.overheid.nl instead.
+- `nl_gov_ask` sends Omgevingswet questions ("Welke regels gelden op <adres>?", "Mag ik een dakkapel plaatsen op <adres>?", "Welke ontwerpen liggen ter inzage in de provincie Utrecht?", "omgevingsplan Utrecht") to the DSO first and waits at most 20 s. Detection is precision-first: questions about permits, procedures, money, the council, parliament, publications, case law, the law itself or the other sources keep their other routes.
 
 ### DUO per-school data
 

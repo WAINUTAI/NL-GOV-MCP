@@ -61,10 +61,17 @@ Captured from operator guidance on 2026-03-02.
 
 ## Priority B (open but mixed/conditional)
 
-- **DSO / Omgevingswet APIs** (partially delivered)
-  - Adapter delivered: `dso_omgevingsdocumenten_search` — discovery-only metadata (titel, type, bevoegd gezag, geldigheidsdatums, viewer-link) via DSO Omgevingsdocumenten Presenteren API v8 (`https://service.omgevingswet.overheid.nl/publiek/omgevingsdocumenten/api/presenteren/v8`). Vereist `DSO_API_KEY` (header `x-api-key`).
+- **DSO / Omgevingswet APIs** (largely delivered)
+  - Adapter delivered: `dso_omgevingsdocumenten_search` via DSO Omgevingsdocumenten Presenteren API v8 (`https://service.omgevingswet.overheid.nl/publiek/omgevingsdocumenten/api/presenteren/v8`). Vereist `DSO_API_KEY` (header `x-api-key`).
+  - ✅ Locatie: `locatie` (adres/postcode/plaats → PDOK Locatieserver → RD-punt → `_zoek` met `geometrie` en `Content-Crs`), alle bestuurslagen op dat punt, geteld per bestuurslaag; geocodering binnen de genoemde plaats, met melding van een andere straat, het middelpunt van een straat of plaats en een andere woonplaats.
+  - ✅ Bevoegd gezag op naam (uit de DSO-catalogus, met afkortingen en `documentType`-voorkeur), volledige-catalogus-zoeken voor `query`/`documentType`, exacte `documentType`, `geldigOp`-tijdreis (met `inWerkingOp` op dezelfde dag), leesbare documentlinks per bestuurslaag, `eindGeldigheid` exclusief met `versieGeldigTotEnMet`.
+  - ✅ Provincie als gebied: `provincie` (de provincie en al haar gemeenten in één `_zoek`).
+  - ✅ Ontwerpregelingen: `soort: "ontwerpregelingen"` met inzagetermijn, `terInzage` (`null` zonder inzagetermijn in het DSO), `mogelijkTerInzage`, `eindeInzagetermijnSchatting` en `besluitTitel`; de bekendmaking van het ontwerpbesluit (`bekendmakingId`, en `onderwerp` als de DSO-titel geen onderwerp noemt); `alleen_ter_inzage`.
+  - ✅ Geen-regeldocumenten gemarkeerd (Omgevingswet als verwijzing, Aansluitdocument Rijk); voorbeschermingsregels bij `documentType: "omgevingsplan"` in `access_note`.
+  - ✅ Regeltekst: `dso_omgevingsdocument_tekst` (documentstructuur → platte tekst, ook van ontwerpen met verwerkte renvooi; `zoekterm` ook in de tijdelijke delen (voorbeschermingsregels), `onderdeel`, inhoudsopgave; `weergave: "wijzigingen"` voor alleen de wijzigingen van een ontwerp).
+  - ✅ `nl_gov_ask` routeert Omgevingswet-documentvragen naar het DSO (met `DSO_API_KEY`), precisie eerst: vragen die een andere route beantwoordde, houden die route.
   - PDOK Omgevingswet geometrieën (`api.pdok.nl/kadaster/omgevingswet-geometrieen/ogc/v2`) is vector-tiles only — geen OGC API Features `/items` — en daarom niet bruikbaar als open fallback voor documentmetadata.
-  - Geometrie-filtering via `_zoek` (Point/Polygon in EPSG:28992) en aanvullende velden (status, regelteksten, annotaties) zijn nog niet opgenomen; volgende iteratie kan `geometrie` body-filter en `geldigOp`/`inWerkingOp` tijdreis-parameters toevoegen.
+  - Nog open: annotaties (activiteiten, gebiedsaanwijzingen, omgevingsnormen via `regeltekstannotaties`/`onderwerpen/_zoek`), regels per locatie op artikelniveau, een `inWerkingOp` los van `geldigOp`, omgevingsvergunningen (`/omgevingsvergunningen`) en polygoon-zoeken.
   - Beheer-/aanbieden-API's (CPA aanbieden, Omgevingsdocument aanbieden, Behandeldienstconfiguratie beheren) blijven uit scope (PKIoverheid-cert vereist).
 
 - **Ruimtelijkeplannen.nl (Wro/Bro plans)** ✅
