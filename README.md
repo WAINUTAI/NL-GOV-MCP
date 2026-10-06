@@ -29,12 +29,12 @@ Examples:
 
 `NL-GOV-MCP` actively retrieves and normalizes data across many sources, can combine cross-source results, and returns a consistent MCP response contract ready for assistants and automations.
 
-## Sources (47 connectors, 77 tools)
+## Sources (47 connectors, 78 tools)
 
 | Source | What it covers |
 |---|---|
 | CBS | Statistics Netherlands (demographics, economy, housing, labour; v4/v3 + fallback) |
-| Tweede Kamer | Parliamentary documents (AND keyword search on title and subject), OData search on every entity, votes linked to their decision and zaak, member info; single-document retrieval can resolve resource URLs and extract text from PDF and Word files |
+| Tweede Kamer | Parliamentary documents (AND keyword search on title and subject), OData search on every entity, votes linked to their decision and zaak, member info, and what was said in plenary and committee debates (the verslagen: speaker, fractie, time and text per spreekbeurt); single-document retrieval can resolve resource URLs and extract text from PDF and Word files |
 | Officiële Bekendmakingen | Official publications (SRU/XML): search by topic, publisher, journal (publicatieblad) and date, sorted by relevance or date; lookup with PDF/HTML/XML links and optional text |
 | Rijksoverheid | National government news/document search via the Rijksoverheid.nl RSS platform (server-side keyword and date filter) + school holidays |
 | Rijksbegroting | National budget data + chapter helper |
@@ -179,7 +179,7 @@ npm run test:live    # integration test suite (live API calls)
 
 ### Transport modes
 
-Three transport modes are supported. All expose the same 77 tools.
+Three transport modes are supported. All expose the same 78 tools.
 
 #### stdio (Claude Desktop, Claude Code)
 
@@ -308,6 +308,7 @@ Node ≥ 22 prints an "experimental" warning for this flag; it works. Symptom to
   - extract the text layer of PDF resources (`include_text: true`), reported as `text_preview_source: "pdf_text_layer"` with `resource_pages`
 - `nl_gov_ask` may automatically deepen the top Tweede Kamer match when the user explicitly asks for content/summary rather than only discovery.
 - Keyword search in `tweede_kamer_documents`, `tweede_kamer_search` and `tweede_kamer_votes` requires every keyword (AND) and looks in titles and subjects, not the full text. Keywords of up to three characters and "quoted phrases" match as whole words; longer keywords also match inside longer words. `tweede_kamer_documents` reports the real number of matches in `pagination.total`.
+- `tweede_kamer_debatten` searches what was said in debates: the verslagen in the Gegevensmagazijn, one record per spreekbeurt or interruptie. The API has no full-text search, so a call reads the verslagen of at most 20 vergaderingen in the period (default the last 7 days), newest first; `vergadering_offset` continues and `access_note` says how many there are. A verslag appears the same day, uncorrected; the official record is the Handelingen. `nl_gov_ask` sends questions about what was said in a debate ("Wat zei de VVD in het debat over stikstof?") to it first, and to its other routes when it finds nothing.
 
 ### Rechtspraak details
 

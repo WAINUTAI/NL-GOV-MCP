@@ -40,6 +40,13 @@
   - één rij per fractie (of per Kamerlid bij een hoofdelijke stemming), gekoppeld aan het besluit (`uitslag`, bv. 'Aangenomen.') en aan de zaak waarover gestemd is (nummer, titel, onderwerp, tweedekamer.nl-link)
   - filters: `query` (titel/onderwerp van de zaak, zelfde woordregels), `zaak_nummer`, `zaak_id`, `besluit_id`, `date` of `date_from`/`date_to` (datum van de stemming); nieuwste stemmingen eerst
 - `tweede_kamer_members`
+- `tweede_kamer_debatten`
+  - wat er in debatten is gezegd, plenair en in commissies: één record per spreekbeurt of interruptie met spreker, fractie of functie, begin- en eindtijd, debat en tekst (uit de verslagen in het Gegevensmagazijn)
+  - filters: `query` (woorden in de tekst, alle verplicht, zelfde woordregels als `tweede_kamer_documents`, accentongevoelig), `spreker` (naam of functie: 'Klaver', 'minister', 'voorzitter'), `fractie` (de voorzitter telt nooit voor een fractie), `debat` (woorden in het onderwerp van het debat), `soort` (`plenair`/`commissie`), `date` of `date_from`/`date_to` (standaard de afgelopen 7 dagen)
+  - geen volledige-tekstindex: per aanroep worden de verslagen van hoogstens 20 vergaderingen gelezen (nieuwste eerst); `vergadering_offset` gaat verder, `access_note` zegt hoeveel er zijn; `vergadering_id` leest één vergadering (een plenaire dag met al zijn debatten of één commissiedebat)
+  - `max_chars` (standaard 1500) begrenst `data.tekst` per fragment; `snippet` is de passage rond de treffer
+  - links: een commissiedebat naar zijn pagina op tweedekamer.nl, een plenaire dag naar zijn verslag daar, anders naar het verslag in het Gegevensmagazijn
+  - een verslag verschijnt dezelfde dag, ongecorrigeerd; het gecorrigeerde volgt later en het officiële verslag zijn de Handelingen (`officiele_bekendmakingen_search`, type Handelingen)
 
 ## Officiële Bekendmakingen
 - `officiele_bekendmakingen_search`
@@ -259,6 +266,9 @@
     - a question that named an address, place, body or area, or asked for ontwerpen, gets the DSO's answer even when it is empty, with an `access_note` that explains (for ontwerpen: not every inzagetermijn is in the DSO; the kennisgeving is in `officiele_bekendmakingen_search`). Only a question without such a scope (a document type or a layer over the whole country) that finds nothing falls through
     - when the DSO fails, gives no answer within 20 s, or does not know the name or address, the other routes answer and `access_note` says "DSO Omgevingsdocumenten eerst geprobeerd (<parameters>): <reason>" (a failure of the PDOK Locatieserver is named as such); a failure or timeout is also listed in `failures`
     - topic words ("over dakkapellen") are not searched in the DSO, which searches titles and metadata: `access_note` points to `dso_omgevingsdocument_tekst` with `zoekterm`
+  - what was said in a Tweede Kamer debate goes to `tweede_kamer_debatten` (see `detectDebatIntent`): a question that names a debate and asks what was said ("Wat zei de VVD in het debat over stikstof?", "Wat werd er gezegd in het stikstofdebat?"), or asks what someone said in the Kamer, with a topic ("over …"), a debate, a fractie or a speaker; the period of the question applies, else the last 7 days
+    - never for another body (gemeenteraad, Staten, Eerste Kamer), the agenda ("wanneer"), votes, moties or amendementen
+    - when the verslagen give nothing or the search fails, the other routes answer and `access_note` says that the debates were searched first
   - EU legislation runs before everything else: a CELEX number or EU citation (detected on the raw question, since the query rewriter strips `/`) goes to `eurlex_document` (or `eurlex_nl_omzetting` for a directive plus "omzetting"/"omgezet"); explicit terms like "EU-richtlijn", "europese verordening", "EUR-Lex" go to `eurlex_search`. A bare "verordening 2024/12" without an EU/EG marker is not treated as EU
   - extracts a place name from the question ("in Tilburg", "gemeente Land van Cuijk") to drive gemeente-scoped sources; falls back with an explanatory `access_note` when the name does not resolve
   - education questions prefer real per-school records (`duo_schools` / `duo_exam_results`) and fall back to the DUO dataset catalogue only when those return nothing

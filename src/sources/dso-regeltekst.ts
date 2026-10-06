@@ -14,7 +14,7 @@
  * "renvooi" view marks the changes instead ([+added+], [-deleted-]).
  */
 
-interface XmlElement {
+export interface XmlElement {
   name: string;
   attrs: Record<string, string>;
   children: XmlNode[];
@@ -22,7 +22,7 @@ interface XmlElement {
   mark?: "+" | "-";
 }
 
-type XmlNode = XmlElement | string;
+export type XmlNode = XmlElement | string;
 
 // Start and end tag at a position. A tag holds no "<" (nor does an XML attribute value): a broken
 // tag stops at the next "<" instead of scanning on, so a run of them stays linear.
@@ -93,7 +93,7 @@ function finder(xml: string): (needle: string, from: number) => number {
  * text too. Every scan is bounded by its terminator or the next "<", and a
  * terminator that is not there is not searched for twice: linear on any input.
  */
-function parseFragment(xml: string, view: RenvooiView = "nieuw"): XmlElement {
+function parseFragment(xml: string, view: RenvooiView | "geen" = "nieuw"): XmlElement {
   const root: XmlElement = { name: "#root", attrs: {}, children: [] };
   const stack: XmlElement[] = [root];
   const find = finder(xml);
@@ -172,7 +172,7 @@ function parseFragment(xml: string, view: RenvooiView = "nieuw"): XmlElement {
         const attrs: Record<string, string> = {};
         for (const a of m[2].matchAll(XML_ATTRIBUTE)) attrs[localName(a[1])] = decodeReferences(a[2] ?? a[3] ?? "");
         const name = localName(m[1]);
-        const action = renvooi(name, attrs, view);
+        const action = view === "geen" ? undefined : renvooi(name, attrs, view);
         // Dropped: parsed into a detached element. Unwrapped: its children go straight to the parent.
         const element: XmlElement = { name, attrs, children: action === "unwrap" ? top.children : [] };
         // Marked once: text inside an added element is not marked again.
@@ -190,6 +190,15 @@ function parseFragment(xml: string, view: RenvooiView = "nieuw"): XmlElement {
     }
   }
   return root;
+}
+
+/**
+ * The element tree of any XML document, read with the same linear tokenizer and
+ * without renvooi: for other sources whose XML has mixed content (the verslagen
+ * of the Tweede Kamer).
+ */
+export function parseXmlTree(xml: string): XmlElement {
+  return parseFragment(xml, "geen");
 }
 
 /** Text-level elements: their text runs on in the sentence around them. Renvooi's only stay in the renvooi view. */

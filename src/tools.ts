@@ -3,7 +3,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { loadConfig, ENV_KEYS } from "./config.js";
 import { DataOverheidSource } from "./sources/data-overheid.js";
 import { CbsSource } from "./sources/cbs.js";
-import { TweedeKamerSource, mapTweedeKamerError, tkRecordView, tkSubjectTitle } from "./sources/tweede-kamer.js";
+import { TweedeKamerSource, mapTweedeKamerError, parseTkQuery, tkRecordView, tkSubjectTitle } from "./sources/tweede-kamer.js";
+import { DEBAT_DEFAULT_CHARS, DEBAT_DEFAULT_DAYS, DEBAT_MAX_CHARS, DEBAT_MAX_VERSLAGEN, TweedeKamerDebattenSource, type DebatFragment, type DebatHit, type DebatSearchResult } from "./sources/tweede-kamer-debatten.js";
 import { BekendmakingenSource, AUTHORITY_TYPES, MAX_TEXT_CHARS, SRU_MAX_START_RECORD, bekendmakingSnippet, normalizeBekendmakingIdentifier, rewriteKeepingSyntax } from "./sources/bekendmakingen.js";
 import { RijksoverheidSource } from "./sources/rijksoverheid.js";
 import { RijksbegrotingSource } from "./sources/rijksbegroting.js";
@@ -65,6 +66,7 @@ const TOOL_ANNOTATIONS = { readOnlyHint: true, openWorldHint: true } as const;
 const dataOverheid = new DataOverheidSource(config);
 const cbs = new CbsSource(config);
 const tk = new TweedeKamerSource(config);
+const debatten = new TweedeKamerDebattenSource(config);
 const bekend = new BekendmakingenSource(config);
 const rijksoverheid = new RijksoverheidSource(config);
 const rijksbegroting = new RijksbegrotingSource(config);
@@ -106,6 +108,90 @@ const algoritmeregister = new AlgoritmeregisterSource(config);
 
 function record(source: string, title: string, canonical_url: string, data: Record<string, unknown>, snippet?: string, date?: string): MCPRecord {
   return { source_name: source, title, canonical_url, data, snippet, date };
+}
+
+/** "Annelotte Lammers (Groep Markuszower)", "David van Weel (minister van Justitie en Veiligheid)", "Thom van Campen (voorzitter)". */
+function debatSprekerLabel(f: DebatFragment): string {
+  const role = f.voorzitter ? "voorzitter" : f.fractie || (f.functie && !/^lid tweede kamer$/i.test(f.functie) ? f.functie : "");
+  return role ? `${f.spreker} (${role})` : f.spreker;
+}
+
+/**
+ * Records for debate fragments. A commissiedebat links to its page on
+ * tweedekamer.nl (looked up once per vergadering on the page), a plenaire dag
+ * to its verslag there; otherwise the verslag in the Gegevensmagazijn.
+ */
+async function debatRecords(hits: DebatHit[], maxChars: number): Promise<MCPRecord[]> {
+  const lookups = new Map<string, Promise<string | undefined>>();
+  for (const { vergadering: v } of hits) {
+    if (v.soort === "Commissie" && !lookups.has(v.vergadering_id) && lookups.size < 10) lookups.set(v.vergadering_id, debatten.commissieUrl(v));
+  }
+  const pages = new Map<string, string | undefined>();
+  for (const [id, url] of lookups) pages.set(id, await url);
+  return hits.map(({ fragment: f, vergadering: v, snippet }) => {
+    const verslagUrl = debatten.verslagUrl(v.verslag_id);
+    const url = TweedeKamerDebattenSource.plenairUrl(v) ?? pages.get(v.vergadering_id) ?? verslagUrl;
+    const tekst = maxChars > 0 ? (f.tekst.length > maxChars ? `${f.tekst.slice(0, maxChars).replace(/\s+\S*$/, "")} …` : f.tekst) : undefined;
+    return record("tweedekamer", `${debatSprekerLabel(f)}: ${f.debat}`, url, {
+      vergadering_id: v.vergadering_id,
+      verslag_id: v.verslag_id,
+      vergadering: v.titel,
+      vergadering_soort: v.soort,
+      datum: v.datum ?? null,
+      zaal: v.zaal ?? null,
+      debat: f.debat,
+      debat_soort: f.debat_soort ?? null,
+      volgnummer: f.volgnummer,
+      rol: f.rol,
+      voorzitter: f.voorzitter,
+      spreker: f.spreker,
+      fractie: f.fractie ?? null,
+      functie: f.functie ?? null,
+      begin: f.begin ?? null,
+      eind: f.eind ?? null,
+      tekst,
+      tekst_lengte: f.tekst.length,
+      tekst_ingekort: tekst !== undefined && f.tekst.length > maxChars ? true : undefined,
+      verslag_status: v.verslag_status ?? null,
+      verslag_url: verslagUrl,
+    }, snippet, f.begin ?? v.datum);
+  });
+}
+
+/** "12 fragmenten in 3 debatten (20 vergaderingen doorzocht); meest aan het woord: …" */
+function debatSummary(out: DebatSearchResult): string {
+  const n = out.hits.length;
+  const searched = `${out.searched.length} vergadering${out.searched.length === 1 ? "" : "en"} doorzocht`;
+  if (!n) return `Geen debatfragmenten gevonden (${searched})`;
+  const debatCount = new Set(out.hits.map((h) => `${h.vergadering.vergadering_id}|${h.fragment.debat}`)).size;
+  const bySpreker = new Map<string, number>();
+  for (const h of out.hits) {
+    if (h.fragment.voorzitter) continue;
+    const label = debatSprekerLabel(h.fragment);
+    bySpreker.set(label, (bySpreker.get(label) ?? 0) + 1);
+  }
+  const top = [...bySpreker].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([label, count]) => `${label} ${count}`);
+  return `${n} fragment${n === 1 ? "" : "en"} in ${debatCount} debat${debatCount === 1 ? "" : "ten"} (${searched})${top.length ? `; meest aan het woord: ${top.join(", ")}` : ""}`;
+}
+
+function debatNotes(out: DebatSearchResult, single: boolean): string | undefined {
+  const searchedTo = out.vergaderingOffset + out.searched.length;
+  const more = !single && out.totalVergaderingen !== null && out.totalVergaderingen > searchedTo;
+  const oldest = out.searched.at(-1)?.datum;
+  const uncorrected = out.searched.some((v) => v.verslag_status === "Ongecorrigeerd");
+  return mergeAccessNotes(
+    "Eén record per spreekbeurt of interruptie uit de verslagen van de Tweede Kamer (Gegevensmagazijn); de link gaat naar het debat op tweedekamer.nl of naar het verslag zelf.",
+    out.period.defaulted && out.period.from && out.period.to ? `Geen datum opgegeven: de vergaderingen van ${out.period.from} t/m ${out.period.to} zijn doorzocht.` : undefined,
+    more
+      ? `Doorzocht: vergadering ${out.vergaderingOffset + 1} t/m ${searchedTo} van ${out.totalVergaderingen} in deze periode (nieuwste eerst${oldest ? `, de oudste van ${oldest}` : ""}). Zoek verder met vergadering_offset=${searchedTo}.`
+      : undefined,
+    out.failed.length ? `Het verslag van ${out.failed.map((v) => `'${v.titel}' (${v.datum ?? "?"})`).join(", ")} kon niet worden gelezen; die fragmenten ontbreken. Probeer het opnieuw.` : undefined,
+    uncorrected ? "Ongecorrigeerde verslagen zijn de voorlopige tekst; het officiële verslag zijn de Handelingen." : undefined,
+    out.terms.length ? `Gezocht op: ${out.terms.map((t) => (t.mode === "word" ? `"${t.text}"` : t.text)).join(" EN ")}.` : undefined,
+    out.hits.length === 0 && !single
+      ? "Debatten van vóór deze periode: verruim date_from, of zoek in de Handelingen met officiele_bekendmakingen_search (type 'Handelingen')."
+      : undefined,
+  );
 }
 
 /**
@@ -706,6 +792,87 @@ export function detectPolicyIntent(question: string): PolicyIntent | undefined {
  * before the DSO route: real questions are far shorter, and the detector's
  * work stays bounded whatever nl_gov_ask is sent.
  */
+const DEBAT_QUESTION_MAX_CHARS = 300;
+
+export type DebatIntent = {
+  /** Words in what was said: the topic after "over". */
+  query?: string;
+  /** Words in the debate subject: "stikstof" of "het stikstofdebat". */
+  debat?: string;
+  fractie?: string;
+  spreker?: string;
+};
+
+/** Fracties as a question writes them, to the name in the verslagen. Upper case only where the name is a common word ("PRO", "SP"). */
+const DEBAT_FRACTIES: Array<[RegExp, string]> = [
+  [/\bVVD\b/, "VVD"], [/\bCDA\b/, "CDA"], [/\bPVV\b/, "PVV"], [/\bD66\b/i, "D66"], [/\bSP\b/, "SP"], [/\bPRO\b/, "PRO"],
+  [/\bJA21\b/i, "JA21"], [/\bSGP\b/, "SGP"], [/\bDENK\b/, "DENK"], [/\bBBB\b/, "BBB"], [/\bFvD\b/, "FvD"], [/\bChristenUnie\b/i, "ChristenUnie"],
+  [/\bGL-PvdA\b|\bGroenLinks-PvdA\b/i, "GroenLinks-PvdA"], [/\bPvdD\b|\bPartij voor de Dieren\b/i, "PvdD"], [/\bVolt\b/, "Volt"],
+  [/\b50PLUS\b/i, "50PLUS"], [/\bNSC\b/, "NSC"], [/\bGroep Markuszower\b/i, "Groep Markuszower"],
+];
+
+/** Speaking, in the past or present: what someone said, argued or answered. */
+const DEBAT_SPEECH = /\b(?:zei|zeiden|zegt|zeggen|gezegd|sprak|spraken|gesproken|uitspraak|uitspraken|inbreng|betoog|betoogde|beweerde|antwoordde|citaat|citaten)\b/;
+/** "in het debat", "tijdens het commissiedebat", "in debatten". */
+const DEBAT_IN = /\b(?:in|tijdens|uit|bij)\s+(?:het\s+|de\s+|een\s+)?\p{L}*debat(?:ten)?\b/u;
+/** A debate word, alone or in a compound ("stikstofdebat", "commissiedebat"). */
+const DEBAT_WORD = /(?<![\p{L}\p{N}])(\p{L}*?)debat(?:ten)?(?![\p{L}\p{N}])/u;
+const DEBAT_KIND_PREFIXES = new Set(["", "kamer", "commissie", "plenair", "plenaire", "tweeminuten", "dertigleden", "begrotings", "wetgevings", "nota", "spoed", "interpellatie", "het"]);
+/** Another body than the Tweede Kamer, or a question about the agenda, votes or moties: other routes. */
+const DEBAT_OTHER = /\b(?:gemeenteraad|raadsvergadering|raadsleden|raadslid|provinciale staten|statenvergadering|statenleden|eerste kamer|senaat|europees parlement|waterschap|wanneer|agenda|gepland|stem(?:de|den|ming|mingen)|motie|moties|amendement|amendementen|aangenomen|verworpen)\b/;
+const DEBAT_SPREKER_FUNCTIES: Array<[RegExp, string]> = [
+  [/\b(?:premier|minister-president)\b/, "minister-president"],
+  [/\bstaatssecretaris(?:sen)?\b/, "staatssecretaris"],
+  [/\bminister(?:s)?\b/, "minister"],
+  [/\b(?:kamer)?voorzitter\b/, "voorzitter"],
+];
+
+/**
+ * A question about what was said in a Tweede Kamer debate, for
+ * tweede_kamer_debatten. Precision first: it names a debate and asks what was
+ * said ("Wat zei de VVD in het debat over stikstof?"), or asks what someone
+ * said in the Kamer ("Wat heeft de minister in de Tweede Kamer gezegd over
+ * Pallas?"), and gives a topic ("over …"), a debate ("het stikstofdebat"), a
+ * fractie or a speaker. Never: a question about another body, the agenda, votes,
+ * moties or amendementen, or one longer than DEBAT_QUESTION_MAX_CHARS.
+ */
+export function detectDebatIntent(question: string): DebatIntent | undefined {
+  const text = String(question ?? "").trim();
+  if (!text || text.length > DEBAT_QUESTION_MAX_CHARS) return undefined;
+  const q = text.toLowerCase();
+  if (DEBAT_OTHER.test(q)) return undefined;
+  const debatWord = DEBAT_WORD.exec(q);
+  const speech = DEBAT_SPEECH.test(q);
+  const inKamer = /\b(?:in de (?:tweede )?kamer|in het parlement|kamerlid|kamerleden)\b/.test(q);
+  if (!(debatWord && (speech || DEBAT_IN.test(q))) && !(speech && inKamer)) return undefined;
+
+  const intent: DebatIntent = {};
+  const fracties = DEBAT_FRACTIES.filter(([re]) => re.test(text)).map(([, name]) => name);
+  if (fracties.length === 1) intent.fractie = fracties[0];
+  const functie = DEBAT_SPREKER_FUNCTIES.find(([re]) => re.test(q));
+  if (functie) intent.spreker = functie[1];
+  if (!intent.spreker) {
+    // "Wat zei Klaver …", "Wat heeft Van Campen gezegd …": a capitalised name after the verb.
+    const name = /\b(?:zei|zegt|sprak|heeft|hebben|had)\s+((?:(?:van|de|der|den|ten|ter)\s+)*[A-Z][\p{L}'-]+(?:\s+(?:(?:van|de|der|den|ten|ter)\s+)*[A-Z][\p{L}'-]+)?)/u.exec(text);
+    const candidate = name?.[1];
+    if (candidate && !DEBAT_FRACTIES.some(([re]) => re.test(candidate)) && !/^(?:De|Het|Een|Er|Ik|Je|U|Wij|We|Zij|Ze|Tweede|Kamer)\b/.test(candidate)) {
+      intent.spreker = candidate;
+    }
+  }
+  const prefix = debatWord?.[1] ?? "";
+  if (prefix.length >= 4 && !DEBAT_KIND_PREFIXES.has(prefix)) intent.debat = prefix;
+
+  // The topic: what follows "over", up to where the question goes on about the debate, the Kamer or the time.
+  const over = /\bover\s+(.+?)(?=\s+(?:in|tijdens|bij|gezegd|gesproken|vorige|afgelopen|deze|dit|vandaag|gisteren|eergisteren)\b|[?.!]|$)/u.exec(text);
+  if (over) {
+    const topic = parseTkQuery(over[1].replace(/\b(?:het|de|een)\s+\p{L}*debat(?:ten)?\b/giu, " ")).terms
+      .map((t) => (t.mode === "word" && /\s/.test(t.text) ? `"${t.text}"` : t.text))
+      .join(" ");
+    if (topic) intent.query = topic;
+  }
+  return intent.query || intent.debat || intent.fractie || intent.spreker ? intent : undefined;
+}
+
 const DSO_QUESTION_MAX_CHARS = 500;
 
 /** The Omgevingswet documents the DSO holds, as a question names them. */
@@ -1872,6 +2039,21 @@ export function registerTools(server: McpServer): void {
 
   server.registerTool("tweede_kamer_members", { description: "List current or former Tweede Kamer members. Optionally filter by parliamentary group (fractie).", inputSchema: { fractie: z.string().optional(), active: z.boolean().default(true), top: z.number().int().min(1).max(config.limits.maxRows).default(50) }, annotations: TOOL_ANNOTATIONS }, async ({ fractie, active, top }) => {
     try { const out = await tk.getMembers({ fractie, active, top }); const records = out.items.map((x)=>record("tweedekamer", String(x.name ?? x.id ?? "Kamerlid"), String(x.persoon_url ?? "https://www.tweedekamer.nl"), x, String(x.fractie ?? ""), String(x.start_date ?? ""))); return toMcpToolPayload(successResponse({ summary: `${records.length} Kamerleden`, records, provenance: prov("tweede_kamer_members", out.endpoint, out.params, records.length, null) })); } catch(e){ return toMcpToolPayload(mapSourceError(e, "Tweede Kamer", "https://www.tweedekamer.nl")); }
+  });
+
+  server.registerTool("tweede_kamer_debatten", { description: `Search what was said in Tweede Kamer debates, plenary and committee: the verslagen (stenograms) in the Gegevensmagazijn, one record per spreekbeurt or interruptie with speaker, fractie or function, time and text. Filter by words in the text (query; all required, same word rules as tweede_kamer_documents, accents ignored), spreker (name or function: 'Klaver', 'van Weel', 'minister', 'voorzitter'), fractie ('VVD', 'PRO'), debat (words in the debate subject), soort (plenair or commissie) and date or date_from/date_to (YYYY-MM-DD; default the last ${DEBAT_DEFAULT_DAYS} days). There is no full-text index: each call reads the verslagen of at most ${DEBAT_MAX_VERSLAGEN} vergaderingen in the period, newest first, and vergadering_offset continues with the next ones; the access_note says how many there are. vergadering_id (from an earlier result) reads one vergadering: a plenary day with all its debates, or one committee debate. A debate's verslag appears the same day, uncorrected; the corrected one follows weeks later and the official record is the Handelingen (officiele_bekendmakingen_search, type Handelingen, also for debates long ago). Not live.`, inputSchema: { query: z.string().optional().describe("Words in what was said, all required. Examples: 'stikstof', 'medische isotopen', '\"gehoord de beraadslaging\"'. Do NOT pass full questions."), spreker: z.string().optional().describe("Speaker name or function, e.g. 'Klaver', 'Van Campen', 'minister', 'staatssecretaris'."), fractie: z.string().optional().describe("Fractie of the speaker, e.g. 'VVD', 'CDA', 'PRO'. The chair never counts for a fractie."), debat: z.string().optional().describe("Words in the debate subject, e.g. 'Pallas', 'Oekraïne', 'begroting'."), soort: z.enum(["plenair", "commissie"]).optional().describe("Only plenary days or only committee debates."), vergadering_id: z.string().optional().describe("Vergadering GUID from an earlier result: read that one vergadering (no date needed)."), date: z.string().optional().describe("YYYY-MM-DD: vergaderingen on this day."), date_from: z.string().optional().describe("YYYY-MM-DD: vergaderingen on or after this day."), date_to: z.string().optional().describe("YYYY-MM-DD: vergaderingen on or before this day."), vergadering_offset: z.number().int().min(0).default(0).describe(`Skip this many vergaderingen (newest first): the next ${DEBAT_MAX_VERSLAGEN} when the period holds more.`), max_chars: z.number().int().min(0).max(DEBAT_MAX_CHARS).default(DEBAT_DEFAULT_CHARS).describe("Characters of text per fragment in data.tekst (0: only the snippet)."), top: z.number().int().min(1).max(config.limits.maxRows).default(25), offset: z.number().int().min(0).default(0) }, annotations: TOOL_ANNOTATIONS }, async ({ query, spreker, fractie, debat, soort, vergadering_id, date, date_from, date_to, vergadering_offset, max_chars, top, offset }) => {
+    try {
+      const out = await debatten.search({ query, spreker, fractie, debat, soort, vergadering_id, date, date_from, date_to, vergadering_offset });
+      const page = out.hits.slice(offset, offset + top);
+      const records = await debatRecords(page, max_chars);
+      return toMcpToolPayload(successResponse({
+        summary: debatSummary(out),
+        records,
+        provenance: prov("tweede_kamer_debatten", out.endpoint, out.params, records.length, out.hits.length),
+        access_note: debatNotes(out, Boolean(vergadering_id)),
+        pagination: { offset, limit: top, total: out.hits.length, has_more: offset + records.length < out.hits.length },
+      }));
+    } catch(e){ return toMcpToolPayload(mapTweedeKamerError(e)); }
   });
 
   server.registerTool("officiele_bekendmakingen_search", {
@@ -3234,6 +3416,7 @@ export function registerTools(server: McpServer): void {
     // Set when the DSO route ran without answering: whichever route answers
     // says that the DSO was tried and why it did not answer.
     let dsoNote: string | undefined;
+    let debatNote: string | undefined;
     const routeEmpty = (label: string, step: string) => {
       fallbackSteps.push(step);
       triedRoutes.push(`${label} (0 resultaten)`);
@@ -3339,7 +3522,7 @@ export function registerTools(server: McpServer): void {
             offset,
             limit: effectiveLimit,
             total: held,
-            access_note: mergeAccessNotes(dsoNote, args.access_note, pagingNote),
+            access_note: mergeAccessNotes(dsoNote, debatNote, args.access_note, pagingNote),
             failures: failures.length ? failures : undefined,
           }),
           verbose: buildVerbose(),
@@ -3418,6 +3601,9 @@ export function registerTools(server: McpServer): void {
       // the routes it took before.
       const dsoKey = process.env[ENV_KEYS.DSO_API_KEY]?.trim();
       const dsoIntent = dsoKey && !euIntent ? detectDsoIntent(decodedQuestion) : undefined;
+      // What was said in a Tweede Kamer debate is in the verslagen; see detectDebatIntent.
+      const debatIntent = !euIntent && !dsoIntent ? detectDebatIntent(decodedQuestion) : undefined;
+      const debatArgs = debatIntent ? { ...debatIntent, date_from: temporal?.from, date_to: temporal?.to } : undefined;
       // EUR-Lex looks up a document number ("2016/679") itself, which the
       // keyword extractor would split into "2016 679": a bare number goes
       // through as is, and other slashed tokens stay whole.
@@ -3499,6 +3685,8 @@ export function registerTools(server: McpServer): void {
         const plannedPolicy = !euIntent && !multiPlanned && !routedEarlier && policySources.length > 0;
         const estimatedSources: string[] = dsoIntent
           ? ["dso_omgevingsdocumenten"]
+          : debatArgs
+            ? ["tweede_kamer_debatten"]
           : euIntent
             ? ["eu_cellar"]
             : plannedPolicy
@@ -3541,7 +3729,12 @@ export function registerTools(server: McpServer): void {
           }
         };
 
-        const plannedRequests = estimatedSources.flatMap<{ connector: string; method: string; url: string; params: Record<string, unknown> }>((candidate) => candidate === "dso_omgevingsdocumenten" && dsoIntent ? dsoPlannedRequests(dsoIntent, decodedQuestion, top) : [{
+        const plannedRequests = estimatedSources.flatMap<{ connector: string; method: string; url: string; params: Record<string, unknown> }>((candidate) => candidate === "dso_omgevingsdocumenten" && dsoIntent ? dsoPlannedRequests(dsoIntent, decodedQuestion, top) : candidate === "tweede_kamer_debatten" && debatArgs ? [{
+          connector: "tweede_kamer",
+          method: "GET",
+          url: `${config.endpoints.tweedeKamer}/Vergadering`,
+          params: { ...Object.fromEntries(Object.entries(debatArgs).filter(([, v]) => v !== undefined)), question: decodedQuestion, top },
+        }] : [{
           connector: candidate,
           method: "GET",
           url: endpointByCandidate[candidate] ?? config.endpoints.dataOverheid,
@@ -3719,6 +3912,36 @@ export function registerTools(server: McpServer): void {
           }
         } finally {
           clearTimeout(deadlineTimer);
+        }
+      }
+
+      if (debatArgs) {
+        const described = Object.entries(debatArgs)
+          .filter(([, v]) => v !== undefined)
+          .map(([key, value]) => `${key} '${String(value)}'`)
+          .join(", ");
+        try {
+          const out = await timed("tweede_kamer", () => debatten.search(debatArgs));
+          if (out.hits.length) {
+            const records = await debatRecords(out.hits.slice(0, top), DEBAT_DEFAULT_CHARS);
+            return askSuccess({
+              summary: `Router: Tweede Kamer-debatten — ${debatSummary(out)}`,
+              records,
+              provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.hits.length),
+              access_note: mergeAccessNotes(
+                `Vraag over wat er in een Kamerdebat is gezegd: gezocht in de verslagen van de Tweede Kamer (${described}). Meer of andere fragmenten: tweede_kamer_debatten.`,
+                debatNotes(out, false),
+              ),
+              total: out.hits.length,
+            });
+          }
+          fallbackSteps.push("tweede_kamer_debatten:no_results");
+          debatNote = `Eerst gezocht in de verslagen van Kamerdebatten (${described}, ${out.searched.length} vergaderingen): niets gevonden. Dit antwoord komt van de andere routes van nl_gov_ask.`;
+        } catch (e) {
+          const mapped = mapTweedeKamerError(e);
+          fallbackSteps.push("tweede_kamer_debatten:search_failed");
+          routeFailures.push({ connector: "tweede_kamer", error_type: mapped.error, message: mapped.message });
+          debatNote = `Eerst gezocht in de verslagen van Kamerdebatten (${described}): mislukt. Dit antwoord komt van de andere routes van nl_gov_ask.`;
         }
       }
 
@@ -4781,7 +5004,7 @@ export function registerTools(server: McpServer): void {
       const records = out.items.map((d) => record("data.overheid.nl", String(d.title ?? d.id), `https://data.overheid.nl/dataset/${d.id}`, d as unknown as Record<string, unknown>, d.notes, d.metadata_modified));
       // Name the routes that ran: "no source recognised" is only true when
       // none did, and a failed source must not read as an empty one.
-      const recognised = triedRoutes.length > 0 || policyNote !== undefined || dsoNote !== undefined;
+      const recognised = triedRoutes.length > 0 || policyNote !== undefined || dsoNote !== undefined || debatNote !== undefined;
       const triedNote = triedRoutes.length ? `Eerst geprobeerd, zonder resultaat: ${[...new Set(triedRoutes)].join(", ")}.` : undefined;
       const catalogNote = records.length
         ? recognised

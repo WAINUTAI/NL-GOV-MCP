@@ -14,6 +14,7 @@
 - entities used: `Document`, `Zaak`, `Besluit`, `Stemming`, `Persoon`, `FractieZetelPersoon`; `tweede_kamer_search` accepts every entity set of the service
 - keyword search is an AND of `contains()` filters on title and subject; a search is sent once with a 40 s timeout and retried only after a 5xx or a dropped connection
 - document files via `Document({id})/Resource`; text is extracted from PDF text layers and Word (.docx) files
+- debates (`tweede_kamer_debatten`): `Vergadering` with its `Verslag` records (newest first, at most 20 per call, `$skip` for the next ones); the verslag itself (VLOS XML) via `Verslag({id})/resource`, the most corrected version (Gerectificeerd, Gecorrigeerd, Ongecorrigeerd; never a Casco voorpublicatie). There is no full-text search in the API: the XML is parsed and matched in the server. A commissiedebat links to its activiteit page, found by `Activiteit` with the same `Aanvangstijd`; a plenaire dag to `tweedekamer.nl/kamerstukken/plenaire_verslagen/detail/{vergaderjaar}/{nummer}`
 
 ## Officiële Bekendmakingen
 - SRU endpoint `https://repository.overheid.nl/sru`
