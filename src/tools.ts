@@ -110,6 +110,13 @@ function record(source: string, title: string, canonical_url: string, data: Reco
   return { source_name: source, title, canonical_url, data, snippet, date };
 }
 
+/** An Algoritmeregister item as algoritmeregister_search and nl_gov_ask show it. */
+function algoritmeRecord(x: Awaited<ReturnType<AlgoritmeregisterSource["search"]>>["items"][number]): MCPRecord {
+  const meta = [x.organisation, x.status, x.publication_category].filter(Boolean).join(" · ");
+  const desc = x.description_short.length > 240 ? `${x.description_short.slice(0, 239)}…` : x.description_short;
+  return record("algoritmeregister", x.title, x.url, x as unknown as Record<string, unknown>, [meta, desc].filter(Boolean).join(" — "), x.published_at?.slice(0, 10));
+}
+
 /** "Annelotte Lammers (Groep Markuszower)", "David van Weel (minister van Justitie en Veiligheid)", "Thom van Campen (voorzitter)". */
 function debatSprekerLabel(f: DebatFragment): string {
   const role = f.voorzitter ? "voorzitter" : f.fractie || (f.functie && !/^lid tweede kamer$/i.test(f.functie) ? f.functie : "");
@@ -871,6 +878,52 @@ export function detectDebatIntent(question: string): DebatIntent | undefined {
     if (topic) intent.query = topic;
   }
   return intent.query || intent.debat || intent.fractie || intent.spreker ? intent : undefined;
+}
+
+const ALGORITME_QUESTION_MAX_CHARS = 300;
+
+export type AlgoritmeIntent = {
+  organisatie?: string;
+  query?: string;
+  publicatiecategorie?: "Hoog-risico AI-systeem";
+};
+
+const ALGORITME_WORD = /\b(?:algoritmes?|algoritmen|algoritmeregister|ai-systemen|ai-systeem)\b/;
+/** Documents about algorithms (council papers, Kamerstukken, reports, rulings) are other routes. */
+const ALGORITME_OTHER = /\b(?:raad|gemeenteraad|raadsvoorstel\w*|raadsvragen|raadsinformatiebrief\w*|motie\w*|amendement\w*|kamervra\w*|kamerbrie\w*|kamerstuk\w*|\w*debat\w*|rekenkamer\w*|rapport\w*|onderzoek\w*|wetsvoorstel\w*|nieuws|uitspra\w*|rechter\w*|vonnis\w*|toezicht\w*|wet|wetten|wetgeving|regels|eisen|verordening|ai act)\b/;
+const ALGORITME_BODIES = /\b(?:gemeente|provincie|waterschap|hoogheemraadschap)\s+((?:'s-)?[A-Z][\p{L}'.-]*(?:[\s-]+(?:aan|den|de|op|van|[A-Z][\p{L}'.-]*))*)/u;
+const ALGORITME_MINISTERIE = /\b[Mm]inisterie\s+van\s+([A-Z][\p{L}'.-]*(?:\s+(?:en|van|[A-Z][\p{L}'.-]*))*)/u;
+const ALGORITME_AGENCIES = /\b(UWV|DUO|SVB|CJIB|RDW|IND|CBS|RIVM|Belastingdienst|Dienst Toeslagen|Rijkswaterstaat|Kadaster|Politie|Nationale Politie|Rechtspraak|Kamer van Koophandel)\b/;
+
+/**
+ * A question about the algorithms a government body uses or has registered,
+ * for the Algoritmeregister ("Welke algoritmes gebruikt de gemeente
+ * Amsterdam?", "Welke hoog-risico AI-systemen gebruikt het UWV?"). Precision
+ * first: it names algorithms or AI systems and an organisation, a topic ("voor
+ * fraudedetectie") or high-risk AI. Never: a question about documents on
+ * algorithms (council papers, Kamerstukken, reports, rulings) or about the law
+ * on them, which other routes answer.
+ */
+export function detectAlgoritmeIntent(question: string): AlgoritmeIntent | undefined {
+  const text = String(question ?? "").trim();
+  if (!text || text.length > ALGORITME_QUESTION_MAX_CHARS) return undefined;
+  const q = text.toLowerCase();
+  if (!ALGORITME_WORD.test(q) || ALGORITME_OTHER.test(q)) return undefined;
+  const intent: AlgoritmeIntent = {};
+  const body = ALGORITME_BODIES.exec(text);
+  const ministerie = ALGORITME_MINISTERIE.exec(text);
+  const agency = ALGORITME_AGENCIES.exec(text);
+  if (body) intent.organisatie = `${body[0].split(/\s+/)[0].toLowerCase()} ${body[1].replace(/\s+(?:aan|den|de|op|van)$/, "")}`;
+  else if (ministerie) intent.organisatie = `Ministerie van ${ministerie[1].replace(/\s+(?:en|van)$/, "")}`;
+  else if (agency) intent.organisatie = agency[1];
+  if (/\bhoog[- ]?risico\b/.test(q)) intent.publicatiecategorie = "Hoog-risico AI-systeem";
+  const topic = /\b(?:voor|bij het|bij de|om)\s+(.+?)[?.!]*$/u.exec(text);
+  if (topic && !(intent.organisatie && topic[1].includes(intent.organisatie.split(" ").pop() ?? ""))) {
+    // "voor vergunningverlening in Utrecht": the place is no topic word.
+    const words = parseTkQuery(topic[1].replace(/\s+in\s+(?:'s-)?[A-Z][\p{L}'.-]*.*$/u, "")).terms.map((t) => t.text).join(" ");
+    if (words) intent.query = words;
+  }
+  return intent.organisatie || intent.query || intent.publicatiecategorie ? intent : undefined;
 }
 
 const DSO_QUESTION_MAX_CHARS = 500;
@@ -3417,6 +3470,7 @@ export function registerTools(server: McpServer): void {
     // says that the DSO was tried and why it did not answer.
     let dsoNote: string | undefined;
     let debatNote: string | undefined;
+    let algoritmeNote: string | undefined;
     const routeEmpty = (label: string, step: string) => {
       fallbackSteps.push(step);
       triedRoutes.push(`${label} (0 resultaten)`);
@@ -3522,7 +3576,7 @@ export function registerTools(server: McpServer): void {
             offset,
             limit: effectiveLimit,
             total: held,
-            access_note: mergeAccessNotes(dsoNote, debatNote, args.access_note, pagingNote),
+            access_note: mergeAccessNotes(dsoNote, debatNote, algoritmeNote, args.access_note, pagingNote),
             failures: failures.length ? failures : undefined,
           }),
           verbose: buildVerbose(),
@@ -3604,6 +3658,8 @@ export function registerTools(server: McpServer): void {
       // What was said in a Tweede Kamer debate is in the verslagen; see detectDebatIntent.
       const debatIntent = !euIntent && !dsoIntent ? detectDebatIntent(decodedQuestion) : undefined;
       const debatArgs = debatIntent ? { ...debatIntent, date_from: temporal?.from, date_to: temporal?.to } : undefined;
+      // The algorithms a government body uses are in the Algoritmeregister; see detectAlgoritmeIntent.
+      const algoritmeIntent = !euIntent && !dsoIntent && !debatArgs ? detectAlgoritmeIntent(decodedQuestion) : undefined;
       // EUR-Lex looks up a document number ("2016/679") itself, which the
       // keyword extractor would split into "2016 679": a bare number goes
       // through as is, and other slashed tokens stay whole.
@@ -3687,6 +3743,8 @@ export function registerTools(server: McpServer): void {
           ? ["dso_omgevingsdocumenten"]
           : debatArgs
             ? ["tweede_kamer_debatten"]
+            : algoritmeIntent
+              ? ["algoritmeregister"]
           : euIntent
             ? ["eu_cellar"]
             : plannedPolicy
@@ -3734,6 +3792,11 @@ export function registerTools(server: McpServer): void {
           method: "GET",
           url: `${config.endpoints.tweedeKamer}/Vergadering`,
           params: { ...Object.fromEntries(Object.entries(debatArgs).filter(([, v]) => v !== undefined)), question: decodedQuestion, top },
+        }] : candidate === "algoritmeregister" && algoritmeIntent ? [{
+          connector: "algoritmeregister",
+          method: "POST",
+          url: ALGORITMEREGISTER_SEARCH_ENDPOINT,
+          params: { ...algoritmeIntent, question: decodedQuestion, limit: top },
         }] : [{
           connector: candidate,
           method: "GET",
@@ -3942,6 +4005,35 @@ export function registerTools(server: McpServer): void {
           fallbackSteps.push("tweede_kamer_debatten:search_failed");
           routeFailures.push({ connector: "tweede_kamer", error_type: mapped.error, message: mapped.message });
           debatNote = `Eerst gezocht in de verslagen van Kamerdebatten (${described}): mislukt. Dit antwoord komt van de andere routes van nl_gov_ask.`;
+        }
+      }
+
+      if (algoritmeIntent) {
+        const described = Object.entries(algoritmeIntent)
+          .map(([key, value]) => `${key} '${String(value)}'`)
+          .join(", ");
+        try {
+          const out = await timed("algoritmeregister", () => algoritmeregister.search({ ...algoritmeIntent, limit: clampAlgoritmeRows(top) }));
+          if (out.items.length) {
+            const records = out.items.map(algoritmeRecord);
+            return askSuccess({
+              summary: `Router: Algoritmeregister — ${summarizeAlgoritmeSearch(out)}`,
+              records,
+              provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total),
+              access_note: mergeAccessNotes(
+                `Vraag over algoritmes van de overheid: gezocht in het Algoritmeregister (${described}). Meer of filteren op status of categorie: algoritmeregister_search.`,
+                out.access_note,
+              ),
+              total: out.total,
+            });
+          }
+          fallbackSteps.push("algoritmeregister:no_results");
+          algoritmeNote = `Eerst gezocht in het Algoritmeregister (${described}): niets gevonden. Dit antwoord komt van de andere routes van nl_gov_ask.`;
+        } catch (e) {
+          const mapped = mapSourceError(e, "Algoritmeregister", "https://algoritmes.overheid.nl");
+          fallbackSteps.push("algoritmeregister:search_failed");
+          routeFailures.push({ connector: "algoritmeregister", error_type: mapped.error, message: mapped.message });
+          algoritmeNote = `Eerst gezocht in het Algoritmeregister (${described}): mislukt. Dit antwoord komt van de andere routes van nl_gov_ask.`;
         }
       }
 
@@ -5004,7 +5096,7 @@ export function registerTools(server: McpServer): void {
       const records = out.items.map((d) => record("data.overheid.nl", String(d.title ?? d.id), `https://data.overheid.nl/dataset/${d.id}`, d as unknown as Record<string, unknown>, d.notes, d.metadata_modified));
       // Name the routes that ran: "no source recognised" is only true when
       // none did, and a failed source must not read as an empty one.
-      const recognised = triedRoutes.length > 0 || policyNote !== undefined || dsoNote !== undefined || debatNote !== undefined;
+      const recognised = triedRoutes.length > 0 || policyNote !== undefined || dsoNote !== undefined || debatNote !== undefined || algoritmeNote !== undefined;
       const triedNote = triedRoutes.length ? `Eerst geprobeerd, zonder resultaat: ${[...new Set(triedRoutes)].join(", ")}.` : undefined;
       const catalogNote = records.length
         ? recognised
@@ -6258,11 +6350,7 @@ server.registerTool(
       const started = Date.now();
       const out = await algoritmeregister.search(args);
       const responseTimeMs = Date.now() - started;
-      const records = out.items.map((x) => {
-        const meta = [x.organisation, x.status, x.publication_category].filter(Boolean).join(" · ");
-        const desc = x.description_short.length > 240 ? `${x.description_short.slice(0, 239)}…` : x.description_short;
-        return record("algoritmeregister", x.title, x.url, x as unknown as Record<string, unknown>, [meta, desc].filter(Boolean).join(" — "), x.published_at?.slice(0, 10));
-      });
+      const records = out.items.map(algoritmeRecord);
       const formatted = applyOutputFormat({ records, outputFormat });
       return toMcpToolPayload(successResponse({
         summary: summarizeAlgoritmeSearch(out),
