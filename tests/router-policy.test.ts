@@ -895,9 +895,10 @@ describe("nl_gov_ask dry run: the query each route sends", () => {
 
   it("plans the moderate rewrite for CBS", async () => {
     mockUpstreams({});
-    const res = await ask({ question: "Hoeveel inwoners heeft Nederland?", dryRun: true });
+    // Not a population question: "Hoeveel inwoners heeft Nederland?" reads the population table.
+    const res = await ask({ question: "Hoeveel woningen heeft Nederland?", dryRun: true });
     expect(res.estimated_sources).toEqual(["cbs"]);
-    expect(res.planned_requests[0].params.query).toBe("hoeveel inwoners heeft nederland");
+    expect(res.planned_requests[0].params.query).toBe("hoeveel woningen heeft nederland");
   });
 
   it("plans the Tweede Kamer topic and document type that the route sends", async () => {

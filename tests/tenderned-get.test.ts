@@ -362,7 +362,8 @@ describe("TenderNedSource.get", () => {
   it("shows TenderNed's text when the looptijd has no closing date", async () => {
     vi.stubGlobal("fetch", routed({ detail: () => jsonResponse({ ...detail, looptijdCode: { code: "OBP", omschrijving: "Onbepaald" } }) }));
     const { item } = await new TenderNedSource(testConfig).get({ publicatieId: "450123" });
-    expect(item.sluitingsDatumOpmerking).toBe("Onbepaald");
+    // This market consultation's notice names no deadline, which is added after TenderNed's text.
+    expect(item.sluitingsDatumOpmerking).toMatch(/^Onbepaald\. De aankondiging zelf noemt geen termijn/);
   });
 
   it("restores characters the notice PDF draws as '#' from the description", async () => {

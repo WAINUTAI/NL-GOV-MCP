@@ -220,6 +220,7 @@ Vijf nieuwe connectors + twee dwarsdoorsnijdende capabilities (39 → 44 connect
   - De KOOP SRU-collectie `plooi` bestaat niet meer: een `scan` op `c.product-area` (`operation=scan&scanClause=c.product-area=a`) geeft exact zeven product areas — `datacollecties` (66k), `lokalebekendmakingen` (6k), `officielepublicaties` (6,6M), `samenwerkendecatalogi` (55k), `sgd` (455k), `tuchtrecht` (48k), `vd` (23k). `plooi`, `woo` en varianten geven 0 records.
   - De enige machine-leesbare route is de API achter de zoekportaal-SPA (`https://open.overheid.nl/overheid/openbaarmakingen/api/v0/zoeken`, gevonden in de front-end bundle). Die geeft **HTTP 401** op elke aanroep — met en zonder browser-UA, met Referer/Origin, met sessie-cookie, en zowel GET als POST. De front-end bundle bevat geen sleutel, dus het is een IP-/omgevingsgebonden blokkade, geen ontbrekende credential.
   - Conclusie: pas oppakken als KOOP een gedocumenteerde publieke API of een SRU-product-area voor Woo-openbaarmakingen levert. Een connector bouwen op een endpoint dat we niet kunnen aanroepen zou een tool opleveren die alleen `http_error` teruggeeft.
+  - **Correctie (11 okt 2026)**: deze conclusie berustte op het verkeerde pad. `/overheid/openbaarmakingen/api/v0/zoeken` geeft inderdaad 401, maar `/overheid/openbaarmakingen/api/v0/zoek?zoektekst=…` geeft zonder sleutel 200 met JSON. De bron is daarmee technisch bereikbaar, maar blijft een grensgeval; zie "Bronnenonderzoek oktober 2026" hieronder.
 - **Uitslagen per stembureau / voorkeurstemmen** — de Kiesraad-databank gaat tot gemeenteniveau; stembureau-EML's staan als bestanden op data.overheid.nl (geen query-API).
 - **Recentere VO-examencijfers per vestiging** — de CKAN-portal van DUO bevat exact één per-vestiging examendataset (`03_voex-v1`, t/m schooljaar 2017); nieuwere examencijfers publiceert DUO alleen als losse CSV-downloads op duo.nl zonder stabiele, ontdekbare URL's.
 
@@ -235,3 +236,51 @@ Vijf nieuwe connectors + twee dwarsdoorsnijdende capabilities (39 → 44 connect
 3. AHN / BGT / BRT via PDOK (staat sinds priority A in deze backlog, nog niet afgerond)
 4. TED (EU-aanbestedingen) als Europese tegenhanger van TenderNed
 5. Entity-resolutielaag: gemeentecode ↔ TOOI ↔ BAG ↔ kadastrale gemeente ↔ politie-regiocode
+6. Meer sites op het Rijksoverheid-RSS-platform: government.nl, ilent.nl, nvwa.nl (zie "Bronnenonderzoek oktober 2026")
+7. Woo-openbaarmakingen en Internetconsultatie, als de beheerder de grensgevallen goedkeurt of KOOP open data levert
+
+
+## Delivered in v0.4 (oktober 2026)
+
+Drie nieuwe connectors en vier verdiepende tools op bestaande bronnen (47 → 50 connectors; 78 → 85 tools). Alles keyless; elke bron is vóór het bouwen live geverifieerd.
+
+**Nieuwe connectors:**
+- `wodc_search` + `wodc_document_get` — onderzoeksrapporten van het WODC (DSpace REST-API van repository.wodc.nl; zoeken in metadata én volledige tekst, per rapport bestanden en tekst, de PDF als de repositorytekst tekortschiet)
+- `rekenkamer_publicaties_search` — publicaties van de Algemene Rekenkamer (RSS-platform van Rijksoverheid.nl, op rekenkamer.nl)
+- `scp_publicaties_search` — publicaties van het SCP (hetzelfde platform, op scp.nl)
+
+**Verdieping op bestaande bronnen:**
+- `wetten_bwb_tekst` — de tekst van een artikel, de artikelen met een zoekterm of de inhoudsopgave van een wet of regeling, zoals geldig op een peildatum, met status per artikel en de wijzigende publicatie
+- `wetten_bwb_search` — nu één versie per regeling (die van vandaag, of van `peildatum`), met `geldig_vanaf`/`geldig_tot`, `versie_url`, `xml_url` en `metadata_gewijzigd`; een ingetrokken regeling met precies de gezochte titel wordt genoemd
+- `rechtspraak_uitspraak_get` — één uitspraak of AG-conclusie op ECLI uit de open data van Rechtspraak: metadata, relaties, beslissing, overwegingen, secties, zoekterm
+- `ori_document_get` — de tekst van één raadsdocument uit ORI, per pagina of alleen de pagina's met een term
+
+**Overig:**
+- De server stuurt MCP-`instructions` mee bij `initialize`, en `nl_gov_ask` heeft `_meta: { "anthropic/alwaysLoad": true }`, zodat clients met een tool search (Claude Code) het startpunt altijd laden.
+- De oude router (`src/nlGovMcp.ts`) en de ongebruikte legacy-bronnen `cbsStatline`, `pdokBag`, `officieleBekendmakingen` en `dataOverheidCatalog` zijn verwijderd; `nl_gov_ask` is de enige router.
+
+### Bronnenonderzoek oktober 2026 (live geverifieerd 11 okt 2026)
+
+Beoordeeld met de vaste regel: alleen officiële, open bronnen. Een bron die een (gratis) account vraagt of geautomatiseerd zoeken uitsluit is een grensgeval: die wordt aan de beheerder voorgelegd, niet gebouwd.
+
+**Gebouwd:** WODC, Algemene Rekenkamer en SCP (zie hierboven).
+
+**Grensgevallen (wachten op een besluit van de beheerder, niet gebouwd):**
+- **Woo-openbaarmakingen / open.overheid.nl** — de conclusie van v0.3 berustte op het verkeerde pad: `/overheid/openbaarmakingen/api/v0/zoeken` geeft 401, maar `https://open.overheid.nl/overheid/openbaarmakingen/api/v0/zoek?zoektekst=…` geeft zonder sleutel 200 met JSON (totaal ~718.000 documenten; de parameter `q` wordt genegeerd, `zoektekst` werkt). Daartegenover: het is de ongedocumenteerde backend van de zoek-SPA, `robots.txt` zegt `User-agent: * Disallow: /`, en de toekomst van het centrale portaal is onderwerp van beleidsdiscussie. Dit is ook de enige gevonden route naar de documentbestanden van Rijksoverheid-publicaties: `rijksoverheid_search` levert alleen vindbaarheid (titel en teaser).
+- **Internetconsultatie** — een RSS-feed (`/rss/feed`, 45 items, alleen titel en link) plus gestructureerde detailpagina's; geen API, en `robots.txt` zegt `Disallow: /`. Route: KOOP vragen om open data.
+
+**Later (nu geen bruikbare open zoekroute):**
+- **PUC Uitvoeringscontent** — geen API (ASP.NET WebForms-postbacks), wel een sitemap; `Crawl-delay: 120`, en geen product-area in de KOOP SRU. Route: KOOP vragen (puc-od@koop.overheid.nl).
+- **CPB** — RSS-feeds bestaan (`publicaties.xml`, 10 items), maar zonder server-side zoeken: queryparameters geven 404 en `cpbsearch` is in `robots.txt` uitgesloten.
+- **Nationale ombudsman** — alleen een HTML-weergave (Drupal, `/publicaties?term=…`), geen feed; `robots.txt` blokkeert GPTBot.
+
+**Goedkope kandidaten op hetzelfde RSS-platform:** www.government.nl, www.ilent.nl en www.nvwa.nl beantwoorden dezelfde `/api/rss`-zoekvraag als rijksoverheid.nl, rekenkamer.nl en scp.nl (live geverifieerd). Een site toevoegen is één regel in `RSS_SITES` plus een tool, met dezelfde limieten (20 items, titel en teaser).
+
+### Open vervolgpunten (oktober 2026, niet gebouwd)
+
+- **Geheugen per HTTP-sessie**: `createServer()` bouwt per HTTP-sessie een eigen `McpServer` met alle tools (ongeveer 14 MB per sessie). Overwegen om de tooldefinities tussen sessies te delen.
+- **Jaartal in eigennamen**: een jaartal dat deel is van een naam ('omgevingsvisie 2040') kan `nl_gov_ask` als datumfilter lezen in plaats van als deel van de naam.
+- **ECLI zonder prefix**: een ECLI zonder 'ECLI:' ('NL:HR:2019:2006') wordt niet als ECLI herkend.
+- **`tweede_kamer_document_get`**: een onbekend document (HTTP 404) komt terug als `http_error`, niet als leeg resultaat met uitleg zoals bij de andere get-tools.
+- **`isError`**: fouten op toolniveau (`error`-vorm) komen terug zonder `isError: true`; de MCP-spec suggereert dat wel. Voorlopig bewust zo gelaten.
+- **LiDO-route in `nl_gov_ask`**: 'uitspraken die verwijzen naar <ECLI>' leest nu de uitspraak zelf en verwijst naar `lido_verwijzingen_lijst`; een eigen route die de verwijzingen direct ophaalt ontbreekt.

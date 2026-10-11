@@ -91,3 +91,48 @@ describe("KnmiSource.latestFiles version resolution", () => {
     expect(firstUrl(fetchMock)).toContain("/versions/3/files");
   });
 });
+
+describe("KnmiSource: the newest files, and failures as failures", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    clearHttpCache();
+  });
+
+  it("asks for the newest files first", async () => {
+    const fetchMock = mockJsonOnce({ files: [] });
+    await new KnmiSource(config, "test-key").latestFiles("Actuele10mindataKNMIstations", "2", 5);
+
+    const url = new URL(firstUrl(fetchMock));
+    expect(url.searchParams.get("orderBy")).toBe("created");
+    expect(url.searchParams.get("sorting")).toBe("desc");
+    expect(url.searchParams.get("maxKeys")).toBe("5");
+  });
+
+  it("reads the observations from the dataset that still gets new files", async () => {
+    const fetchMock = mockJsonOnce({ files: [] });
+    await new KnmiSource(config, "test-key").latestObservations(5);
+
+    expect(new URL(firstUrl(fetchMock)).pathname).toBe("/open-data/v1/datasets/10-minute-in-situ-meteorological-observations/versions/1.0/files");
+  });
+
+  it("throws a rate limit at once instead of trying the next dataset and answering 0 files", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ error: "Rate Limit Exceeded" }), { status: 429, headers: { "content-type": "application/json", "retry-after": "0" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(new KnmiSource(config, "test-key").earthquakes(5)).rejects.toMatchObject({ code: "rate_limited" });
+    const paths = fetchMock.mock.calls.map((c) => new URL(String((c as unknown as [string])[0])).pathname);
+    expect(paths.every((p) => p.includes("/datasets/aardbevingen_nederland/versions/2/"))).toBe(true);
+  });
+
+  it("tries the next dataset on a 404 only, and throws when none exists", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ error: "not found" }), { status: 404, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(new KnmiSource(config, "test-key").earthquakes(5)).rejects.toMatchObject({ status: 404 });
+    const datasets = fetchMock.mock.calls.map((c) => new URL(String((c as unknown as [string])[0])).pathname.split("/")[4]);
+    expect(new Set(datasets)).toEqual(new Set(["aardbevingen_nederland", "aardbevingen_catalogus"]));
+    // The catalogue's aardbevingen_nederland@2 is the first candidate already: asked once.
+    expect(datasets.filter((d) => d === "aardbevingen_nederland")).toHaveLength(1);
+  });
+});

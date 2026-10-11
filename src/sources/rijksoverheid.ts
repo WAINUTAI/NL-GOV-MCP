@@ -1,13 +1,32 @@
 import type { AppConfig } from "../types.js";
-import { getJson, getText } from "../utils/http.js";
+import { getJson, getText, SourceRequestError } from "../utils/http.js";
 import { parseXml } from "../utils/xml-parser.js";
 
 /**
  * Nieuw keyless zoek-/nieuws-endpoint van het Rijksoverheid.nl-platform (RSS 2.0).
  * De oude opendata.rijksoverheid.nl `/documents`-API is per 2 juni 2026 opgeheven (404);
  * alleen `/infotypes/schoolholidays` leeft daar nog (zie schoolholidays()).
+ *
+ * The Algemene Rekenkamer and the SCP run on the same CMS and answer the same
+ * `/api/rss` query on their own host (verified live); rijksoverheid.nl does not
+ * index those sites. Each site has its own connector, so a failing site cannot
+ * open the circuit of another.
  */
-const RIJKSOVERHEID_RSS_BASE = "https://www.rijksoverheid.nl/api/rss";
+export const RSS_SITES = {
+  rijksoverheid: { origin: "https://www.rijksoverheid.nl", connector: "rijksoverheid", label: "de Rijksoverheid" },
+  rekenkamer: { origin: "https://www.rekenkamer.nl", connector: "rekenkamer", label: "de Algemene Rekenkamer" },
+  scp: { origin: "https://www.scp.nl", connector: "scp", label: "het Sociaal en Cultureel Planbureau" },
+} as const;
+
+export type RssSite = keyof typeof RSS_SITES;
+
+/**
+ * news = news items only; all = every page kind; publications = the document pages
+ * (content type pro:downloadDocument: reports, letters, studies), the publications
+ * of the Rekenkamer and SCP. Without that filter those sites mix in vacancies,
+ * error pages and the homepage.
+ */
+type RssSearchType = "news" | "all" | "publications";
 
 /** Normaliseer een fast-xml-parser waarde naar een array (één item wordt geen array). */
 function asArray(data: unknown): Array<Record<string, unknown>> {
@@ -29,6 +48,20 @@ function toIsoDate(raw: string): string {
  * means "there may be more"; a shorter one is the complete match set.
  */
 const RSS_MAX_ITEMS = 20;
+/** The RSS platform answers HTTP 500 for a search term past 128 characters (verified live, Oct 2026). */
+const RSS_MAX_TERM_CHARS = 128;
+
+/** The search term as sent: a longer one is cut at the last whole word that fits, and the call says so. */
+export function rssSearchTerm(query: string): { term: string; cut: boolean } {
+  if (query.length <= RSS_MAX_TERM_CHARS) return { term: query, cut: false };
+  const head = query.slice(0, RSS_MAX_TERM_CHARS + 1);
+  const space = head.lastIndexOf(" ");
+  return { term: (space > 0 ? head.slice(0, space) : head.slice(0, RSS_MAX_TERM_CHARS)).trim(), cut: true };
+}
+
+function cutNote(term: string): string {
+  return `De zoekvraag is ingekort tot de eerste ${RSS_MAX_TERM_CHARS} tekens (het RSS-platform weigert langere zoektermen); gezocht op: "${term}". Gebruik minder trefwoorden.`;
+}
 
 const AMSTERDAM = "Europe/Amsterdam";
 
@@ -117,9 +150,10 @@ function urlPathDate(url: string): string | undefined {
   } catch {
     return undefined;
   }
-  const m = /\/documenten\/(?:[a-z-]+\/)?(\d{4})\/(\d{2})\/(\d{2})\//.exec(path);
+  // Old pages may drop the leading zero (/documenten/1999/12/2/… on rekenkamer.nl).
+  const m = /\/documenten\/(?:[a-z-]+\/)?(\d{4})\/(\d{1,2})\/(\d{1,2})\//.exec(path);
   if (!m) return undefined;
-  const date = `${m[1]}-${m[2]}-${m[3]}`;
+  const date = `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}`;
   return isCalendarDate(date) ? date : undefined;
 }
 
@@ -144,6 +178,36 @@ function urlPathType(url: string): string {
   return "webpage";
 }
 
+/**
+ * Pages that are no publication even though the feed returned them: error pages,
+ * the homepage and vacancies (seen live without the content type filter; dropped
+ * defensively with it too).
+ */
+function isNoisePage(url: string, title: string): boolean {
+  let path: string;
+  try {
+    path = new URL(url).pathname;
+  } catch {
+    return false;
+  }
+  if (path === "/" || path === "") return true;
+  if (/^\/(?:error|404)(?:\/|$)/i.test(path)) return true;
+  if (/^\/werken-bij(?:\/|$)/i.test(path)) return true;
+  return /^(?:pagina niet gevonden|page not found|404\b)/i.test(title.trim());
+}
+
+/** Kind of a publication, from the URL path: a file under /binaries/ or a .pdf, else the page kind. */
+function publicationType(url: string): string {
+  let path: string;
+  try {
+    path = new URL(url).pathname;
+  } catch {
+    return "webpage";
+  }
+  if (/\/binaries\//.test(path) || /\.pdf$/i.test(path)) return "file";
+  return urlPathType(url);
+}
+
 /** Haal de tekst uit een RSS-veld dat een string óf een { "#text", ...attrs }-object kan zijn. */
 function nodeText(value: unknown): string {
   if (value === undefined || value === null) return "";
@@ -164,12 +228,14 @@ export class RijksoverheidSource {
    * sent). Filtering server-side matters because the feed is capped at 20 items:
    * filtering those 20 afterwards dropped nearly every match in the period.
    */
-  private planSearch(args: { query: string; type?: "news" | "all"; date_from?: string; date_to?: string }) {
+  private planSearch(args: { site?: RssSite; query: string; type?: RssSearchType; date_from?: string; date_to?: string }) {
     const type = args.type ?? "news";
+    const site = RSS_SITES[args.site ?? "rijksoverheid"];
+    // The type "all" key of a content_type filter is required (HTTP 400 without).
     const filters: Array<Record<string, unknown>> =
       type === "all"
         ? []
-        : [{ field: "content_type", values: ["pro:newsDocument"], type: "all" }];
+        : [{ field: "content_type", values: [type === "publications" ? "pro:downloadDocument" : "pro:newsDocument"], type: "all" }];
 
     const invalid: string[] = [];
     const widened: string[] = [];
@@ -195,36 +261,30 @@ export class RijksoverheidSource {
       filters.push({ field: "sort_date", values: [range], type: "all" });
     }
 
+    const { term, cut } = rssSearchTerm(args.query);
     const queryObj = {
       filters,
-      resultSearchTerm: args.query,
-      pageTitle: type === "all" ? "Zoeken" : "Nieuws",
+      resultSearchTerm: term,
+      pageTitle: type === "news" ? "Nieuws" : "Zoeken",
     };
-    const url = `${RIJKSOVERHEID_RSS_BASE}?query=${encodeURIComponent(JSON.stringify(queryObj))}`;
-    return { url, type, fromDay, toDay, invalid, widened };
+    const url = `${site.origin}/api/rss?query=${encodeURIComponent(JSON.stringify(queryObj))}`;
+    return { url, type, site, fromDay, toDay, invalid, widened, term, cut };
   }
 
-  /** The exact URL search() would request, for dry runs. */
-  requestUrl(args: { query: string; type?: "news" | "all"; date_from?: string; date_to?: string }): string {
-    return this.planSearch(args).url;
-  }
-
-  async search(args: {
-    query: string;
-    top: number;
-    type?: "news" | "all";
-    date_from?: string;
-    date_to?: string;
-  }) {
-    const { url, type, fromDay, toDay, invalid, widened } = this.planSearch(args);
-
-    const { data, meta } = await getText(url, { connector: "rijksoverheid" });
+  /** Fetch a planned feed and map its items; `kind` reads the page kind from the URL. */
+  private async fetchFeed(url: string, connector: string, kind: (url: string) => string) {
+    const { data, meta } = await getText(url, { connector });
     const parsed = parseXml(data) as Record<string, unknown> | undefined;
     const rss = (parsed?.rss ?? {}) as Record<string, unknown>;
-    const channel = (rss.channel ?? {}) as Record<string, unknown>;
+    // An empty result is still <rss><channel> (verified live); anything else (an HTML
+    // page served with 200) is a failure, not "no results".
+    if (!rss.channel || typeof rss.channel !== "object") {
+      throw new SourceRequestError({ message: "Het RSS-zoekplatform gaf geen RSS-feed terug.", endpoint: meta.url, code: "malformed_response" });
+    }
+    const channel = rss.channel as Record<string, unknown>;
     const rawItems = asArray(channel.item);
 
-    let items = rawItems.map((item) => {
+    const items = rawItems.map((item) => {
       const link = nodeText(item.link);
       const guid = nodeText(item.guid);
       const pubDate = nodeText(item.pubDate);
@@ -242,25 +302,60 @@ export class RijksoverheidSource {
         date: pubDate ? (Number.isNaN(pubTs) ? pubDate : amsterdamDate(pubTs)) : (pathDate ?? ""),
         date_source: pubDate ? "issued" : pathDate ? "url_path" : "",
         issued: pubDate ? toIsoDate(pubDate) : "",
-        type: urlPathType(link),
+        type: kind(link),
       };
       // Documents only: the day the page was created, which for a revised document
       // dates its first version (see urlPathDate).
       if (pathDate) out.url_date = pathDate;
       return out;
     });
+    return { rawItems, items, meta };
+  }
 
-    // Safety net behind the server-side filter, on the item's own date (the Amsterdam
-    // day of issued, the field the server filters on): whatever the platform does, no
-    // item whose shown date lies outside the requested period is returned. An item
-    // without a readable date is kept, as the server let it through.
-    if (fromDay || toDay) {
-      items = items.filter((item) => {
-        const day = String(item.date);
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return true;
-        return (!fromDay || day >= fromDay) && (!toDay || day <= toDay);
-      });
+  /**
+   * Safety net behind the server-side filter, on the item's own date (the Amsterdam
+   * day of issued, the field the server filters on): whatever the platform does, no
+   * item whose shown date lies outside the requested period is returned. An item
+   * without a readable date is kept, as the server let it through.
+   */
+  private inPeriod(items: Array<Record<string, unknown>>, fromDay?: string, toDay?: string) {
+    if (!fromDay && !toDay) return items;
+    return items.filter((item) => {
+      const day = String(item.date);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return true;
+      return (!fromDay || day >= fromDay) && (!toDay || day <= toDay);
+    });
+  }
+
+  /** Warnings about the date arguments; they go first: an ignored filter changes what the results mean. */
+  private dateNotes(invalid: string[], widened: string[]): string[] {
+    const notes: string[] = [];
+    if (invalid.length) {
+      notes.push(
+        `Let op: ${invalid.join(" en ")} is geen geldige datum (JJJJ-MM-DD, JJJJ-MM of JJJJ) en is genegeerd; de resultaten zijn daar niet op gefilterd.`,
+      );
     }
+    if (widened.length) notes.push(`Gelezen: ${widened.join(", ")}.`);
+    return notes;
+  }
+
+  /** The exact URL search() would request, for dry runs. */
+  requestUrl(args: { query: string; type?: "news" | "all"; date_from?: string; date_to?: string }): string {
+    return this.planSearch(args).url;
+  }
+
+  async search(args: {
+    query: string;
+    top: number;
+    type?: "news" | "all";
+    date_from?: string;
+    date_to?: string;
+  }) {
+    const { url, type, fromDay, toDay, invalid, widened, term, cut } = this.planSearch(args);
+
+    const feed = await this.fetchFeed(url, "rijksoverheid", urlPathType);
+    const { rawItems, meta } = feed;
+    const items = this.inPeriod(feed.items, fromDay, toDay);
 
     // A full feed is a truncated one: the real number of matches is unknown, so it
     // is not reported as a total.
@@ -271,21 +366,15 @@ export class RijksoverheidSource {
     // The provenance shows the period actually applied: a widened year or month as
     // its day bound, and an ignored (invalid) value not at all.
     const params: Record<string, string> = {
-      query: args.query,
+      query: term,
       type,
       top: String(args.top),
     };
     if (fromDay) params.date_from = fromDay;
     if (toDay) params.date_to = toDay;
 
-    const notes: string[] = [];
-    // Date warnings first: an ignored filter changes what the results mean.
-    if (invalid.length) {
-      notes.push(
-        `Let op: ${invalid.join(" en ")} is geen geldige datum (JJJJ-MM-DD, JJJJ-MM of JJJJ) en is genegeerd; de resultaten zijn daar niet op gefilterd.`,
-      );
-    }
-    if (widened.length) notes.push(`Gelezen: ${widened.join(", ")}.`);
+    const notes = this.dateNotes(invalid, widened);
+    if (cut) notes.push(cutNote(term));
     if (items.length === 0) {
       notes.push(
         `Geen resultaten via het Rijksoverheid RSS-zoekplatform voor "${args.query}" (type=${type}${fromDay ? `, vanaf ${fromDay}` : ""}${toDay ? `, t/m ${toDay}` : ""}). Probeer bredere trefwoorden${type === "news" ? " of type=all (nieuws + documenten + overige pagina's)" : ""}.`,
@@ -315,6 +404,80 @@ export class RijksoverheidSource {
       total,
       // Items the feed actually returned (after the date check), before slicing to
       // `top`: with total unknown this is what tells a caller whether a later page has data.
+      available: items.length,
+      endpoint: meta.url,
+      params,
+      access_note: notes.join(" "),
+    };
+  }
+
+  /** The exact URL searchPublications() would request, for dry runs. */
+  publicationsRequestUrl(args: { site: RssSite; query?: string; date_from?: string; date_to?: string }): string {
+    return this.planSearch({ ...args, query: args.query?.trim() ?? "", type: "publications" }).url;
+  }
+
+  /**
+   * Publications (document pages) of a site on the Rijksoverheid CMS: the
+   * Rekenkamer's and SCP's reports, letters and studies. Same platform limits as
+   * search(): at most 20 items, no paging, title + teaser only. An empty query
+   * lists the newest publications first (verified live), which with a period
+   * answers "what did they publish recently".
+   */
+  async searchPublications(args: { site: RssSite; query?: string; top: number; date_from?: string; date_to?: string }) {
+    const query = args.query?.trim() ?? "";
+    const { url, site, fromDay, toDay, invalid, widened, term, cut } = this.planSearch({ ...args, query, type: "publications" });
+    const host = new URL(site.origin).host;
+
+    const feed = await this.fetchFeed(url, site.connector, publicationType);
+    const { rawItems, meta } = feed;
+    const kept = feed.items.filter((item) => !isNoisePage(String(item.url), String(item.title)));
+    const dropped = feed.items.length - kept.length;
+    const items = this.inPeriod(kept, fromDay, toDay);
+
+    // As in search(): a full feed is a truncated one, so its size is no total.
+    const capped = rawItems.length >= RSS_MAX_ITEMS;
+    const total = capped ? null : items.length;
+    const sliced = items.slice(0, args.top);
+
+    const params: Record<string, string> = { site: host, query: term, top: String(args.top) };
+    if (fromDay) params.date_from = fromDay;
+    if (toDay) params.date_to = toDay;
+
+    const period = `${fromDay ? `, vanaf ${fromDay}` : ""}${toDay ? `, t/m ${toDay}` : ""}`;
+    const notes = this.dateNotes(invalid, widened);
+    if (cut) notes.push(cutNote(term));
+    if (items.length === 0) {
+      notes.push(
+        `Geen publicaties van ${site.label} gevonden via het RSS-zoekplatform van ${host} (${query ? `zoekterm "${query}"` : "zonder zoekterm"}${period}). Probeer bredere trefwoorden of een ruimere periode.`,
+      );
+      if (fromDay && toDay && fromDay > toDay) notes.push("date_from ligt na date_to.");
+    } else {
+      notes.push(
+        query
+          ? `Server-side zoeken in de publicaties (documentpagina's) van ${host} via het RSS-platform van de site: max 20 resultaten per zoekopdracht, gerangschikt op relevantie, zonder paginering; een 'top' of offset voorbij 20 levert niets extra op.`
+          : `Zonder zoekterm: de nieuwste publicaties (documentpagina's) van ${host}, nieuwste eerst, max 20, zonder paginering; gebruik date_from/date_to om een eerdere periode te zien.`,
+      );
+      notes.push(
+        capped
+          ? "De feed zat vol (20 items): het werkelijke aantal treffers is onbekend en waarschijnlijk hoger, daarom is total leeg. Verfijn met specifiekere trefwoorden of date_from/date_to."
+          : `Dit zijn alle ${items.length} treffers.`,
+      );
+      notes.push(
+        `Per publicatie alleen titel, datum en teaser (snippet); de volledige publicatie (meestal een PDF) staat op de documentpagina (url). date is de datum die ${host} zelf toont (issued, als Amsterdamse kalenderdag); url_date is de datum uit het URL-pad, de dag dat de pagina werd aangemaakt. data.type komt uit het URL-pad (document, video, file): de feed levert geen fijner documenttype (rapport, brief).`,
+      );
+    }
+    if (dropped > 0) {
+      notes.push(`${dropped} item(s) die geen publicatie zijn (foutpagina, homepage of vacature) weggelaten.`);
+    }
+    if (fromDay || toDay) {
+      notes.push(
+        "date_from/date_to filteren server-side op date (Amsterdamse kalenderdagen, grenzen inbegrepen), vóór de limiet van 20; url_date kan buiten de periode liggen.",
+      );
+    }
+
+    return {
+      items: sliced as Array<Record<string, unknown>>,
+      total,
       available: items.length,
       endpoint: meta.url,
       params,

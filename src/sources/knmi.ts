@@ -7,14 +7,14 @@ function normalize(value: unknown): string {
 
 const KNMI_KNOWN_DATASETS: Array<Record<string, unknown>> = [
   {
-    datasetName: "Actuele10mindataKNMIstations",
-    version: "2",
+    datasetName: "10-minute-in-situ-meteorological-observations",
+    version: "1.0",
     description: "10-minute in-situ meteorological observations (stations)",
   },
   {
-    datasetName: "10-minute-in-situ-meteorological-observations",
-    version: "1.0",
-    description: "10-minute in-situ meteorological observations (legacy naming)",
+    datasetName: "Actuele10mindataKNMIstations",
+    version: "2",
+    description: "10-minute in-situ meteorological observations (old dataset, no new files since 2025-10-02)",
   },
   {
     datasetName: "daggegevens_stations",
@@ -107,7 +107,8 @@ export class KnmiSource {
   async latestFiles(datasetName: string, datasetVersion: string | undefined, top: number) {
     const version = datasetVersion || resolveDatasetVersion(datasetName);
     const endpoint = `${this.config.endpoints.knmi}/datasets/${datasetName}/versions/${version}/files`;
-    const params = { maxKeys: String(top) };
+    // Newest first: without orderBy/sorting the API lists by filename ascending, i.e. the oldest files.
+    const params = { maxKeys: String(top), orderBy: "created", sorting: "desc" };
     const { data, meta } = await getJson<Record<string, unknown>>(endpoint, {
       query: params,
       headers: this.headers(),
@@ -135,7 +136,8 @@ export class KnmiSource {
   }
 
   async latestObservations(top = 20) {
-    return this.latestFiles("Actuele10mindataKNMIstations", "2", top);
+    // Actuele10mindataKNMIstations (v2) has had no new files since 2025-10-02; this dataset has them.
+    return this.latestFiles("10-minute-in-situ-meteorological-observations", "1.0", top);
   }
 
   private async discoverByTerms(terms: string[]): Promise<Array<{ datasetName: string; version: string }>> {
@@ -151,39 +153,26 @@ export class KnmiSource {
     return found.map(({ datasetName, version }) => ({ datasetName, version }));
   }
 
+  /**
+   * The newest files of the first candidate dataset that exists. Only a 404 (no such dataset or
+   * version) moves on to the next candidate; any other failure (a rate limit is on the key, not the
+   * dataset) is thrown at once, and so is the last 404 when no candidate exists: never "0 files".
+   */
   private async firstWorkingDataset(
     candidates: Array<{ datasetName: string; version: string }>,
     top: number,
   ) {
+    const unique = candidates.filter((c, i) => candidates.findIndex((d) => d.datasetName === c.datasetName && d.version === c.version) === i);
     let lastError: unknown;
-    const attempted: string[] = [];
-
-    for (const c of candidates) {
-      attempted.push(`${c.datasetName}@${c.version}`);
+    for (const c of unique) {
       try {
-        const out = await this.latestFiles(c.datasetName, c.version, top);
-        return {
-          ...out,
-          access_note: undefined,
-          attempted,
-        };
+        return await this.latestFiles(c.datasetName, c.version, top);
       } catch (error) {
+        if (!(error instanceof SourceRequestError && error.status === 404)) throw error;
         lastError = error;
-        if (error instanceof SourceRequestError && error.status === 404) {
-          continue;
-        }
       }
     }
-
-    return {
-      items: [],
-      endpoint:
-        "https://developer.dataplatform.knmi.nl/open-data-api (no matching warning/earthquake dataset found)",
-      params: { attempted: attempted.join(","), top: String(top) },
-      access_note:
-        "KNMI dataset voor deze categorie lijkt momenteel niet publiek vindbaar via bekende datasetnamen. Gebruik knmi_datasets/knmi_search_datasets om actuele namen te verifiëren.",
-      lastError,
-    };
+    throw lastError;
   }
 
   async warnings(top = 20) {

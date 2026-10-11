@@ -153,6 +153,8 @@ server.registerTool("my_source_search", {
 });
 ```
 
+Keep the `description` within 2,048 characters: Claude Code cuts tool descriptions (and the server instructions) there, and `tests/server-metadata.test.ts` fails on a longer one. Say what the tool covers and when to use it first, since that part always survives. Only `nl_gov_ask` carries `_meta: { "anthropic/alwaysLoad": true }`; leave it off new tools.
+
 ### 4. Add tests
 
 Create `tests/my-source.test.ts` with mocked HTTP responses. See existing tests for patterns (e.g. `tests/response.test.ts`, `tests/output-format.test.ts`).

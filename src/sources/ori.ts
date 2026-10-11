@@ -71,6 +71,14 @@ interface ElasticResponse {
   >;
 }
 
+/** GET /<index>/_doc/<id>. */
+interface ElasticDoc {
+  _id?: string;
+  _index?: string;
+  found?: boolean;
+  _source?: Record<string, unknown>;
+}
+
 type AliasesResponse = Record<string, { aliases?: Record<string, unknown> } | undefined>;
 
 const ORI_BASE = "https://api.openraadsinformatie.nl/v1/elastic";
@@ -1041,6 +1049,175 @@ export function dedupeOriItems(items: OriItem[]): { items: OriItem[]; merged: nu
 }
 
 /* ------------------------------------------------------------------ */
+/*  Document text                                                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * An index name as ORI's records carry it: an alias (`ori_delft`) or a
+ * concrete index (`ori_heemskerk_20250506181303`). Slugs hold lowercase
+ * letters, digits, underscores and hyphens (`osi_provincie-utrecht`); the host
+ * is fixed, so this is all a caller can choose of the request path.
+ */
+export const ORI_INDEX_RE = /^(?:ori|osi|owi)_[a-z0-9][a-z0-9_-]{0,99}$/;
+/** ORI record ids are numeric ("1731608"); a little room for other forms, never a path. */
+export const ORI_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+/** A page or an inclusive page range: "3", "3-5". */
+export const ORI_PAGINA_RE = /^\s*(\d{1,5})\s*(?:-\s*(\d{1,5})\s*)?$/;
+export const ORI_TEXT_DEFAULT_CHARS = 12_000;
+export const ORI_TEXT_MAX_CHARS = 50_000;
+const DOCUMENT_TIMEOUT_MS = 20_000;
+
+/**
+ * Fields of one record that ori_document_get reads. Of the three copies of a
+ * document's text only md_text comes along (page by page, as Markdown), plus
+ * the page numbers from text_pages; `text` and the page texts are only fetched
+ * when a document has no md_text.
+ */
+const DOCUMENT_FIELDS = [
+  "@id", "@type", "name", "title", "file_name", "url", "original_url", "content_type",
+  "size_in_bytes", "last_discussed_at", "start_date", "date_modified", "description",
+  "classification", "attachment", "is_referenced_by", "parent", "was_generated_by.had_primary_source",
+];
+
+export interface OriPageText {
+  page: number;
+  text: string;
+}
+
+/** "3" or "3-5" (also 3 as a number) → an inclusive page range; undefined when unreadable. */
+export function parsePagina(value: string | number | undefined): { from: number; to: number } | undefined {
+  if (value === undefined) return undefined;
+  const m = ORI_PAGINA_RE.exec(String(value));
+  if (!m) return undefined;
+  const from = Number(m[1]);
+  const to = m[2] ? Number(m[2]) : from;
+  return from >= 1 && to >= from ? { from, to } : undefined;
+}
+
+/** Lowercase, accents off, whitespace (PDF line breaks) collapsed: what a zoekterm is matched against. */
+function matchKey(text: string): string {
+  return text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().replace(/\s+/g, " ");
+}
+
+function countOccurrences(haystack: string, needle: string): number {
+  let count = 0;
+  for (let at = haystack.indexOf(needle); at !== -1; at = haystack.indexOf(needle, at + needle.length)) count += 1;
+  return count;
+}
+
+/**
+ * Pages holding the zoekterm, case and accents ignored. The whole term first;
+ * when no page holds it as written, pages holding every word of it
+ * (`allWords`), since PDF text breaks phrases over columns and hyphens.
+ */
+export function pagesWithTerm(pages: OriPageText[], term: string): { pages: OriPageText[]; hits: number; allWords: boolean } {
+  const phrase = matchKey(term).trim();
+  if (!phrase) return { pages: [], hits: 0, allWords: false };
+  const keyed = pages.map((p) => ({ page: p, key: matchKey(p.text) }));
+  // On a page with a lost ligature the term is also tried with � in its place.
+  const forms = (key: string, needle: string) => (key.includes(LOST_GLYPH) ? [needle, withLostLigatures(needle)] : [needle]);
+  const count = (key: string, needle: string) => [...new Set(forms(key, needle))].reduce((n, f) => n + countOccurrences(key, f), 0);
+  const exact = keyed.map((k) => ({ ...k, hits: count(k.key, phrase) })).filter((k) => k.hits > 0);
+  if (exact.length) return { pages: exact.map((k) => k.page), hits: exact.reduce((n, k) => n + k.hits, 0), allWords: false };
+  const words = phrase.split(" ").filter(Boolean);
+  if (words.length < 2) return { pages: [], hits: 0, allWords: false };
+  const all = keyed.filter((k) => words.every((w) => count(k.key, w) > 0));
+  return { pages: all.map((k) => k.page), hits: all.length, allWords: true };
+}
+
+/**
+ * ORI's text extraction loses some ligatures to U+FFFD: "transi�e"
+ * (transitie), "warmtene�en" (warmtenetten), "buur�ni�a�even".
+ */
+const LOST_GLYPH = "�";
+
+function withLostLigatures(text: string): string {
+  return text.replace(/ffi|ffl|ff|fi|fl|ft|tt|ti/g, LOST_GLYPH);
+}
+
+/**
+ * The text of the chosen pages, at most maxChars long. Pages are headed with
+ * "--- pagina N ---" when there is more than one page, so a passage can be
+ * cited by page. A page cut off by maxChars counts as returned, and is where a
+ * follow-up call continues (next_page).
+ */
+export function assemblePages(
+  pages: OriPageText[],
+  maxChars: number,
+  withMarkers: boolean,
+): { text: string; total: number; pagesReturned: number[]; truncated: boolean; nextPage?: number; lastPartial: boolean } {
+  const blocks = pages.map((p) => (withMarkers ? `--- pagina ${p.page} ---\n${p.text.trim()}` : p.text.trim()));
+  const total = blocks.reduce((n, b, i) => n + b.length + (i ? 2 : 0), 0);
+  let text = "";
+  const pagesReturned: number[] = [];
+  for (let i = 0; i < blocks.length; i += 1) {
+    const sep = text ? "\n\n" : "";
+    const room = maxChars - text.length - sep.length;
+    if (room <= 0) return { text, total, pagesReturned, truncated: true, nextPage: pages[i].page, lastPartial: false };
+    if (blocks[i].length > room) {
+      text += sep + blocks[i].slice(0, room);
+      pagesReturned.push(pages[i].page);
+      return { text, total, pagesReturned, truncated: true, nextPage: pages[i].page, lastPartial: true };
+    }
+    text += sep + blocks[i];
+    pagesReturned.push(pages[i].page);
+  }
+  return { text, total, pagesReturned, truncated: false, lastPartial: false };
+}
+
+/** [1,2,3,5,7,8] → "1-3, 5, 7-8". */
+export function pageRanges(pages: number[]): string {
+  const parts: string[] = [];
+  for (let i = 0; i < pages.length; ) {
+    let j = i;
+    while (j + 1 < pages.length && pages[j + 1] === pages[j] + 1) j += 1;
+    parts.push(i === j ? String(pages[i]) : `${pages[i]}-${pages[j]}`);
+    i = j + 1;
+  }
+  return parts.join(", ");
+}
+
+function textArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map((v) => (typeof v === "string" ? v : ""));
+  return typeof value === "string" ? [value] : [];
+}
+
+function hasText(parts: string[]): boolean {
+  return parts.some((t) => t.trim().length > 0);
+}
+
+/**
+ * Pages from one of ORI's per-page text arrays (md_text, text). Their entries
+ * are the pages of the file in order, as text_pages numbers them. text_pages
+ * stops at 100 pages while md_text goes on, so numbers 1..k for the first
+ * pages also make the positions page numbers; otherwise, when the counts
+ * differ, the positions stand in for page numbers (`numbered` false).
+ */
+function pagesFrom(parts: string[], pageNumbers: number[]): { pages: OriPageText[]; numbered: boolean } {
+  if (pageNumbers.length === parts.length) return { pages: parts.map((text, i) => ({ page: pageNumbers[i], text })), numbered: true };
+  const numbered = pageNumbers.length > 0 && pageNumbers.length < parts.length && pageNumbers.every((n, i) => n === i + 1);
+  return { pages: parts.map((text, i) => ({ page: i + 1, text })), numbered };
+}
+
+export interface OriDocumentArgs {
+  index: string;
+  id: string;
+  max_chars?: number;
+  zoekterm?: string;
+  pagina?: string | number;
+}
+
+export interface OriDocumentResult {
+  /** Undefined when ORI has no record under this index and id (see access_note). */
+  item?: Record<string, unknown>;
+  /** Set when the record was not found: the index, the id in a known index, or either (no index list). */
+  not_found?: "index" | "id" | "index_or_id";
+  endpoint: string;
+  params: Record<string, string>;
+  access_note?: string;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Source                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -1086,6 +1263,14 @@ export function oriFailureHint(error: unknown): string | undefined {
     return "ORI weigerde de zoekopdracht (HTTP 400). Vereenvoudig de zoekterm.";
   }
   return "De ORI-zoekopdracht is mislukt; dit is geen leeg resultaat. Probeer het later opnieuw.";
+}
+
+/** Hint for a failed ori_document_get: a failure, not a missing document. */
+export function oriDocumentFailureHint(error: unknown): string {
+  if (error instanceof SourceRequestError && error.code === "timeout") {
+    return "ORI reageerde niet binnen 20 seconden. Dit is een storing of overbelasting bij ORI, niet een ontbrekend document: probeer het opnieuw.";
+  }
+  return "Het ophalen bij ORI is mislukt; dit zegt niet dat het document niet bestaat of geen tekst heeft. Probeer het later opnieuw of open de link uit ori_search.";
 }
 
 function formatDateNl(iso: string): string {
@@ -1395,6 +1580,277 @@ export class OriSource {
       endpoint: meta.url,
       params,
       ...(notes.length ? { access_note: notes.join(" ") } : {}),
+    };
+  }
+
+  /**
+   * One ORI record with its text, for ori_document_get: GET /<index>/_doc/<id>
+   * with only the fields needed. The text is ORI's md_text (Markdown, one entry
+   * per page), or for the few documents without it the plain page texts. The
+   * whole text, a page range (pagina) or only the pages holding a term
+   * (zoekterm) comes back, capped at max_chars, page by page with page numbers.
+   * A document ORI extracted no text from, a record that is no document, a
+   * text too large to fetch and an unknown index or id each say so.
+   */
+  async getDocument(args: OriDocumentArgs): Promise<OriDocumentResult> {
+    const index = args.index.trim();
+    const id = args.id.trim();
+    if (!ORI_INDEX_RE.test(index)) throw new Error(`'${index}' is geen ORI-indexnaam (bijv. 'ori_delft').`);
+    if (!ORI_ID_RE.test(id)) throw new Error(`'${id}' is geen ORI-record-id.`);
+    const endpoint = `${ORI_BASE}/${index}/_doc/${encodeURIComponent(id)}`;
+    const maxChars = Math.max(1, Math.min(ORI_TEXT_MAX_CHARS, args.max_chars ?? ORI_TEXT_DEFAULT_CHARS));
+    const zoekterm = args.zoekterm?.trim() || undefined;
+    const range = parsePagina(args.pagina);
+    const params: Record<string, string> = {
+      index,
+      id,
+      max_chars: String(maxChars),
+      ...(zoekterm ? { zoekterm } : {}),
+      ...(args.pagina !== undefined ? { pagina: String(args.pagina) } : {}),
+    };
+    const notes: string[] = [];
+    if (args.pagina !== undefined && !range) {
+      notes.push(`pagina '${args.pagina}' is niet gelezen (gebruik bijv. '3' of '3-5'); de hele tekst is genomen.`);
+    }
+
+    // The index list names the organisation and tells an unknown index from an unknown id.
+    const cataloguePromise = this.loadCatalogue();
+    // Not in the shared HTTP cache: a document's text runs to megabytes (up to the 12 MB cap),
+    // and only the part asked for is returned anyway.
+    const options = { connector: CONNECTOR, timeoutMs: DOCUMENT_TIMEOUT_MS, retries: 1, disableCache: true };
+    const fetchFields = (fields: string[]) =>
+      getJson<ElasticDoc>(endpoint, { ...options, query: { _source_includes: fields.join(",") } });
+
+    let doc: ElasticDoc;
+    let tooLarge = false;
+    try {
+      doc = (await fetchFields([...DOCUMENT_FIELDS, "md_text", "text_pages.page_number"])).data;
+    } catch (error) {
+      if (error instanceof SourceRequestError && error.status === 404) {
+        return this.documentNotFound(index, id, endpoint, params, cataloguePromise);
+      }
+      // A text past the 12 MB response cap: the record without its text still says what and where the file is.
+      if (!(error instanceof SourceRequestError) || error.code !== "malformed_response" || !/exceeded/i.test(error.message)) throw error;
+      doc = (await fetchFields([...DOCUMENT_FIELDS, "text_pages.page_number"])).data;
+      tooLarge = true;
+    }
+    if (doc.found === false || !doc._source) return this.documentNotFound(index, id, endpoint, params, cataloguePromise);
+
+    const source = doc._source;
+    const catalogue = await this.catalogueForNaming(cataloguePromise);
+    const item: OriItem = toOriItem({ _id: doc._id ?? id, _index: doc._index ?? index, _source: source }, catalogue);
+    delete item.snippet;
+    item.index = index;
+    item.ori_record_url = endpoint;
+    const originalUrl = str(source.original_url);
+    if (originalUrl && !item.original_url && item.url !== originalUrl) item.original_url = originalUrl;
+    const referencedBy = str(source.is_referenced_by);
+    if (referencedBy) item.is_referenced_by = referencedBy;
+    const fileUrl = item.link_type === "document" ? String(item.url) : "";
+
+    const type = String(item.type);
+    item.type_label = TYPE_LABELS[type] ?? type;
+    if (type !== "MediaObject") {
+      const label = String(item.type_label).toLowerCase();
+      item.text_available = false;
+      item.text_unavailable_reason = "not_a_document";
+      notes.push(
+        `Dit ORI-record is een ${label}, geen document, en heeft zelf geen tekst.${
+          Array.isArray(item.attachment_ids) && item.attachment_ids.length
+            ? " De documenten erbij staan in attachment_ids; lees ze met ori_document_get (dezelfde index)."
+            : ""
+        }`,
+      );
+      return { item, endpoint, params, access_note: notes.join(" ") };
+    }
+
+    // --- text ------------------------------------------------------
+    const pageNumbersOf = (value: unknown): number[] => {
+      const numbers = Array.isArray(value) ? value.map((p) => Number((p as { page_number?: unknown })?.page_number)) : [];
+      return numbers.every(Number.isFinite) ? numbers : [];
+    };
+    let pageNumbers = pageNumbersOf(source.text_pages);
+    let parts = tooLarge ? [] : textArray(source.md_text);
+    let textSource = "md_text";
+    let fetchFailed = false;
+    if (!tooLarge && !hasText(parts)) {
+      // About 1 in 30,000 documents has text but no md_text; most without md_text have no text at all.
+      try {
+        const { data } = await fetchFields(["text_pages", "text"]);
+        const pageTexts = Array.isArray(data._source?.text_pages)
+          ? (data._source.text_pages as Array<{ text?: unknown }>).map((p) => (typeof p?.text === "string" ? p.text : ""))
+          : [];
+        if (hasText(pageTexts)) {
+          parts = pageTexts;
+          pageNumbers = pageNumbersOf(data._source?.text_pages);
+          textSource = "text_pages";
+        } else if (hasText(textArray(data._source?.text))) {
+          parts = textArray(data._source?.text);
+          textSource = "text";
+        }
+      } catch (error) {
+        logger.warn({ err: error, index, id }, "ORI plain text fetch failed");
+        fetchFailed = true;
+      }
+    }
+
+    if (!hasText(parts)) {
+      item.text_available = false;
+      item.text_unavailable_reason = tooLarge ? "text_too_large" : fetchFailed ? "text_fetch_failed" : "no_extracted_text";
+      if (pageNumbers.length) item.page_count = pageNumbers.length;
+      const where = fileUrl ? ` Het bronbestand: ${fileUrl}${item.original_url ? ` (bronsysteem: ${String(item.original_url)})` : ""}.` : "";
+      notes.push(
+        tooLarge
+          ? `De tekst van dit document is te groot om via ORI op te halen (antwoord boven 12 MB); lees het bronbestand.${where}`
+          : fetchFailed
+            ? `Dit document heeft geen Markdown-tekst in ORI en het ophalen van de platte tekst mislukte; dit zegt niet dat er geen tekst is. Probeer het opnieuw of lees het bronbestand.${where}`
+            : `ORI heeft uit dit document geen tekst gehaald (bijvoorbeeld een scan zonder tekstlaag, audio of een bestand dat niet gelezen kon worden); er is dus geen tekst, wel het bestand.${where}`,
+      );
+      return { item, endpoint, params, access_note: notes.join(" ") };
+    }
+
+    const { pages: allPages, numbered } = pagesFrom(parts, pageNumbers);
+    const lastPage = allPages[allPages.length - 1].page;
+    let selected = allPages;
+    if (range) {
+      selected = allPages.filter((p) => p.page >= range.from && p.page <= range.to);
+      if (!selected.length) {
+        notes.push(`Pagina ${range.from === range.to ? range.from : `${range.from}-${range.to}`} bestaat niet: het document heeft ${allPages.length} pagina's (${pageRanges(allPages.map((p) => p.page))}).`);
+      } else if (range.to > lastPage) {
+        notes.push(`Het document heeft ${allPages.length} pagina's; pagina ${range.from}-${range.to} is gelezen tot en met pagina ${lastPage}.`);
+      }
+    }
+    // md_text can leave a page empty that ORI's plain text has (a cover page,
+    // say); those pages are filled from text_pages before any is called empty.
+    let plainFillFailed = false;
+    if (textSource === "md_text" && selected.some((p) => !p.text.trim())) {
+      try {
+        const { data } = await fetchFields(["text_pages"]);
+        const plain = new Map<number, string>();
+        for (const p of Array.isArray(data._source?.text_pages) ? (data._source.text_pages as Array<{ text?: unknown; page_number?: unknown }>) : []) {
+          if (typeof p?.text === "string" && p.text.trim() && Number.isFinite(Number(p.page_number))) plain.set(Number(p.page_number), p.text);
+        }
+        const filled: number[] = [];
+        selected = selected.map((p) => {
+          const text = !p.text.trim() && numbered ? plain.get(p.page) : undefined;
+          if (!text) return p;
+          filled.push(p.page);
+          return { page: p.page, text };
+        });
+        if (filled.length) {
+          item.pages_plain_text = pageRanges(filled);
+          notes.push(`Pagina ${item.pages_plain_text} ${filled.length === 1 ? "staat" : "staan"} hier als platte tekst: ORI heeft er geen Markdown van.`);
+        }
+      } catch (error) {
+        logger.warn({ err: error, index, id }, "ORI plain page text fetch failed");
+        plainFillFailed = true;
+      }
+    }
+    // Pages ORI has no text for (scanned pages in an otherwise digital file) are named, not shown as empty blocks.
+    const blank = selected.filter((p) => !p.text.trim()).map((p) => p.page);
+    if (blank.length) {
+      selected = selected.filter((p) => p.text.trim());
+      item.pages_without_text = pageRanges(blank);
+      notes.push(
+        plainFillFailed
+          ? `Pagina ${item.pages_without_text} ${blank.length === 1 ? "heeft" : "hebben"} geen Markdown-tekst in ORI en het ophalen van de platte tekst mislukte; dit zegt niet dat er geen tekst is. Lees die pagina's in het bestand.`
+          : `Pagina ${item.pages_without_text} ${blank.length === 1 ? "heeft" : "hebben"} geen tekst in ORI (bijvoorbeeld gescand); die inhoud staat alleen in het bestand.`,
+      );
+    }
+    if (zoekterm) {
+      const found = pagesWithTerm(selected, zoekterm);
+      item.zoekterm_pages = pageRanges(found.pages.map((p) => p.page));
+      item.zoekterm_hits = found.hits;
+      item.zoekterm_match = found.allWords ? "alle_woorden" : "letterlijk";
+      const searched = `${selected.length} doorzochte pagina's`;
+      if (!found.pages.length) {
+        notes.push(`'${zoekterm}' komt niet voor in de tekst (${searched}; hoofdletters en accenten genegeerd).`);
+      } else if (found.allWords) {
+        notes.push(`'${zoekterm}' staat nergens letterlijk; dit ${found.pages.length === 1 ? "is de pagina" : `zijn de ${found.pages.length} pagina's`} met alle woorden ervan.`);
+      } else {
+        notes.push(`'${zoekterm}' komt ${found.hits} keer voor, op ${found.pages.length} van de ${searched}.`);
+      }
+      selected = found.pages;
+    }
+
+    const out = assemblePages(selected, maxChars, allPages.length > 1);
+    const markdown = textSource === "md_text";
+    item.text_available = true;
+    item.text = out.text;
+    item.text_format = markdown ? "markdown" : "text";
+    item.text_source = textSource;
+    item.page_count = allPages.length;
+    item.pages_returned = pageRanges(out.pagesReturned);
+    item.text_chars = out.text.length;
+    item.text_total_chars = out.total;
+    item.text_truncated = out.truncated;
+    if (out.truncated && out.nextPage !== undefined) {
+      // A cut page is read again in full from its start, unless it was the only
+      // page returned: then reading on from it would give the same cut text.
+      const cutAlone = out.lastPartial && out.pagesReturned.length === 1;
+      const nextIndex = selected.findIndex((p) => p.page === out.nextPage) + (cutAlone ? 1 : 0);
+      const lastSelected = selected[selected.length - 1].page;
+      const next = selected[nextIndex]?.page;
+      if (next !== undefined) item.next_pagina = next === lastSelected ? String(next) : `${next}-${lastSelected}`;
+      const cutNote = cutAlone
+        ? ` Pagina ${out.nextPage} alleen is al langer dan max_chars; verhoog max_chars (max ${ORI_TEXT_MAX_CHARS}) voor de rest ervan${item.next_pagina ? `, of lees verder met pagina '${item.next_pagina}'${zoekterm ? " en dezelfde zoekterm" : ""}` : ""}.`
+        : ` Lees verder met pagina '${item.next_pagina}'${zoekterm ? " en dezelfde zoekterm" : ""}, of verhoog max_chars (max ${ORI_TEXT_MAX_CHARS}).`;
+      notes.push(`Tekst afgekapt op ${maxChars} van ${out.total} tekens: pagina ${item.pages_returned}${out.lastPartial ? " (de laatste deels)" : ""}.${cutNote}`);
+    }
+    if (out.text.includes(LOST_GLYPH)) {
+      notes.push("In ORI's tekst staat � waar de extractie een ligatuur verloor (vaak 'ti', 'tt', 'ft' of 'fi': 'transi�e' is transitie); zoekterm houdt daar rekening mee.");
+    }
+    if (!numbered && allPages.length > 1) {
+      notes.push("ORI geeft bij deze tekst geen paginanummers; 'pagina' telt hier de tekstdelen van ORI in volgorde.");
+    }
+    notes.push(
+      `De tekst is ORI's automatische extractie uit het bestand (${markdown ? "Markdown" : "platte tekst"}); opmaak en tabellen kunnen afwijken${fileUrl ? `, het bronbestand is ${fileUrl}` : ""}.`,
+    );
+    return { item, endpoint, params, access_note: notes.join(" ") };
+  }
+
+  /** An unknown index and an unknown id in a known index, told apart with the index list. */
+  private async documentNotFound(
+    index: string,
+    id: string,
+    endpoint: string,
+    params: Record<string, string>,
+    cataloguePromise: Promise<OriCatalogue | undefined>,
+  ): Promise<OriDocumentResult> {
+    const catalogue = await cataloguePromise.catch(() => undefined);
+    const entry = catalogue?.byIndex.get(index);
+    if (catalogue && !entry) {
+      const prefix = prefixOf(index);
+      const name = index.slice(prefix?.length ?? 0).replace(/_\d{8,}$/, "").replace(/[_-]+/g, " ");
+      const scope = resolveOriScope(catalogue, name, prefix ? PREFIX_LAYER[prefix] : undefined);
+      const hint = scope.entry
+        ? ` Bedoeld is waarschijnlijk '${scope.entry.index}' (${scope.entry.name}).`
+        : scope.suggestions.length
+          ? ` Vergelijkbaar: ${scope.suggestions.slice(0, 5).map((e) => `'${e.index}' (${e.name})`).join(", ")}.`
+          : "";
+      return {
+        not_found: "index",
+        endpoint,
+        params,
+        access_note: `ORI heeft geen index '${index}'.${hint} Gebruik data.index uit ori_search.`,
+      };
+    }
+    if (entry) {
+      const copies = entry.copies.filter((c) => c !== index);
+      return {
+        not_found: "id",
+        endpoint,
+        params,
+        access_note: `ORI heeft geen record '${id}' in ${entry.name} (${index}). Gebruik data.id uit ori_search of een attachments[].id met dezelfde index.${
+          copies.length ? ` ORI heeft voor ${entry.name} ook een oudere index zonder alias (${copies.join(", ")}); het record kan daar staan.` : ""
+        }`,
+      };
+    }
+    return {
+      not_found: "index_or_id",
+      endpoint,
+      params,
+      access_note: `ORI vond geen record '${id}' in '${index}' (HTTP 404): de index of het id bestaat niet. Gebruik data.index en data.id uit ori_search.`,
     };
   }
 

@@ -82,8 +82,13 @@ const CONNECTOR_CATEGORY: Record<string, ConnectorCategory> = {
   // A register organisations publish to themselves, a few entries a day: searched
   // like the API register and NGR catalogues.
   algoritmeregister: "discovery",
+  // The WODC repository: a few reports a week, searched like a catalogue.
+  wodc: "discovery",
   // TOOI organisation metadata (abbreviations, end dates) changes with reorganisations only.
   tooi_sparql: "static",
+  // Publications of the Rekenkamer and SCP, via the same RSS platform as rijksoverheid.
+  rekenkamer: "semi_live",
+  scp: "semi_live",
 };
 
 const FAILURE_THRESHOLD = 3;
@@ -91,6 +96,10 @@ const CIRCUIT_COOLDOWN_MS = 5 * 60 * 1000;
 const MAX_CONCURRENT_PER_CONNECTOR = 3;
 const QUEUE_TIMEOUT_MS = 30_000;
 const CACHE_MAX_ENTRIES = 1000;
+/** Total size of the cached response bodies; the oldest go first past it. */
+const CACHE_MAX_BYTES = 64 * 1024 * 1024;
+/** A body larger than this is not cached at all: a few such would push out everything else. */
+const CACHE_MAX_ENTRY_BYTES = 4 * 1024 * 1024;
 
 interface QueueItem {
   resolve: (release: () => void) => void;
@@ -119,6 +128,8 @@ interface CacheEntry<T> {
   value: T;
   expiresAt: number;
   connector: string;
+  /** Size counted against CACHE_MAX_BYTES (0 when the caller gives none). */
+  bytes: number;
 }
 
 export interface ConnectorHealthSnapshot {
@@ -137,6 +148,14 @@ export interface ConnectorHealthSnapshot {
 
 const states = new Map<string, RuntimeState>();
 const responseCache = new Map<string, CacheEntry<unknown>>();
+let responseCacheBytes = 0;
+
+function deleteCacheEntry(key: string): void {
+  const entry = responseCache.get(key);
+  if (!entry) return;
+  responseCacheBytes -= entry.bytes;
+  responseCache.delete(key);
+}
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -347,15 +366,15 @@ function evictExpiredCacheEntries(force = false): void {
 
   const now = Date.now();
   for (const [key, entry] of responseCache.entries()) {
-    if (now > entry.expiresAt) responseCache.delete(key);
+    if (now > entry.expiresAt) deleteCacheEntry(key);
   }
 }
 
 function enforceCacheCap(): void {
-  while (responseCache.size > CACHE_MAX_ENTRIES) {
+  while (responseCache.size > CACHE_MAX_ENTRIES || responseCacheBytes > CACHE_MAX_BYTES) {
     const oldest = responseCache.keys().next().value as string | undefined;
     if (!oldest) break;
-    responseCache.delete(oldest);
+    deleteCacheEntry(oldest);
   }
 }
 
@@ -380,7 +399,7 @@ export function getHttpCache<T>(key: string):
 
   const ttlRemainingS = Math.max(0, Math.ceil((entry.expiresAt - Date.now()) / 1000));
   if (ttlRemainingS <= 0) {
-    responseCache.delete(key);
+    deleteCacheEntry(key);
     return undefined;
   }
 
@@ -395,20 +414,34 @@ export function getHttpCache<T>(key: string):
   };
 }
 
+/**
+ * Cache a value for ttlMs. sizeBytes (the response body's size) counts against the
+ * cache's byte budget; a value larger than CACHE_MAX_ENTRY_BYTES is not cached.
+ */
 export function setHttpCache<T>(
   key: string,
   value: T,
   ttlMs: number,
   connector: string,
+  sizeBytes = 0,
 ): void {
   if (ttlMs <= 0) return;
   evictExpiredCacheEntries();
+  deleteCacheEntry(key);
+  if (sizeBytes > CACHE_MAX_ENTRY_BYTES) return;
   responseCache.set(key, {
     value,
     expiresAt: Date.now() + ttlMs,
     connector,
+    bytes: sizeBytes,
   });
+  responseCacheBytes += sizeBytes;
   enforceCacheCap();
+}
+
+/** Entries and counted bytes in the response cache (for tests and diagnostics). */
+export function getHttpCacheStats(): { entries: number; bytes: number } {
+  return { entries: responseCache.size, bytes: responseCacheBytes };
 }
 
 /**
@@ -420,6 +453,7 @@ export function setHttpCache<T>(
  */
 export function clearHttpCache(): void {
   responseCache.clear();
+  responseCacheBytes = 0;
 }
 
 export function getConnectorHealth(connector: string): ConnectorHealthSnapshot {

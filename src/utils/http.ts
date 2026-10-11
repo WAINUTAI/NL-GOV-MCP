@@ -14,6 +14,8 @@ import {
 } from "./connector-runtime.js";
 import { logger } from "./logger.js";
 
+const MAX_ERROR_ENDPOINT_CHARS = 500;
+
 export class SourceRequestError extends Error {
   public readonly status?: number;
   public readonly code:
@@ -35,7 +37,10 @@ export class SourceRequestError extends Error {
   }) {
     super(args.message);
     this.name = "SourceRequestError";
-    this.endpoint = args.endpoint;
+    // The endpoint ends up in error details: a URL carrying a 10,000-character query is cut, not echoed.
+    this.endpoint = args.endpoint.length > MAX_ERROR_ENDPOINT_CHARS
+      ? `${args.endpoint.slice(0, MAX_ERROR_ENDPOINT_CHARS)}… (${args.endpoint.length} tekens)`
+      : args.endpoint;
     this.code = args.code;
     this.status = args.status;
     this.retryAfter = args.retryAfter;
@@ -469,6 +474,7 @@ async function request(
             } satisfies CachedHttpPayload,
             cacheTtlMs,
             connector,
+            bodyBytes.byteLength,
           );
         }
 

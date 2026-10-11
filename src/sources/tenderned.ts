@@ -92,7 +92,8 @@ const SORT_PARAM: Record<TenderSort, string> = {
   date_newest: "tappublicatiedatum",
 };
 
-export type SluitingsDatumBron = "sluitingsDatum" | "sluitingsDatumMarktconsultatie" | "";
+/** Where sluitingsDatum comes from: one of TenderNed's metadata fields, or (market consultations) the notice itself. */
+export type SluitingsDatumBron = "sluitingsDatum" | "sluitingsDatumMarktconsultatie" | "aankondiging" | "";
 
 export interface TenderNedItem {
   id: string;
@@ -107,11 +108,18 @@ export interface TenderNedItem {
   /**
    * True when `sluitingsDatum` comes from (or was checked against) the detail
    * record, which carries rectifications; false when it is the search index's
-   * date of the original notice.
+   * date of the original notice. For a market consultation (MAC): true only
+   * when the date was checked against the deadline in the notice itself.
    */
   sluitingsDatumGecontroleerd: boolean;
-  /** Search only: the search index's closing date, when the detail record has another one. */
+  /**
+   * The closing date TenderNed reported before the check: the search index's
+   * date when the detail record has another one, or for a market consultation
+   * TenderNed's own field when the notice gives another deadline.
+   */
   sluitingsDatumOorspronkelijk?: string;
+  /** Why sluitingsDatum is what it is, when that needs saying (a notice that disagrees, "Onbepaald", ...). */
+  sluitingsDatumOpmerking?: string;
   /** Id of the latest rectification of this notice, when TenderNed reports one. */
   laatsteRectificatieId?: string;
   /** Notice type as shown on tenderned.nl (AAO, AGO, MAC, VBE, REC, ...). */
@@ -191,8 +199,6 @@ export interface TenderNedDetail extends TenderNedItem {
   gerelateerdePublicaties_unavailable_reason?: string;
   /** Id of the latest rectification of this notice; "" when there is none. */
   laatsteRectificatieId: string;
-  /** Set when TenderNed shows a text instead of a closing date (e.g. "Onbepaald"). */
-  sluitingsDatumOpmerking?: string;
   geraamdeWaarde?: TenderNedValue | null;
   gunning?: TenderNedAward | null;
   gunning_unavailable_reason?: string;
@@ -360,6 +366,156 @@ function detailClosingDate(data: PublicatieDetail): { value: string; bron: Sluit
 }
 
 /**
+ * The deadline a market consultation's own notice prints (eForms form E1,
+ * section 5.1.12). TenderNed's metadata field sluitingsDatumMarktconsultatie is
+ * entered separately and often differs from it: in a sample of 40 consultations
+ * published 1–9 October 2026 it differed in 24 (19 times later than the
+ * notice, up to a month) and was empty in 7 more. The notice is the official
+ * publication, so for a consultation its deadline is the closing date.
+ */
+const CONSULTATION_DEADLINE_LABELS = ["Termijn ontvangst antwoorden", "Deadline for receipt of answers"];
+const CONSULTATION_DEADLINE_LABEL_KEYS = new Set(CONSULTATION_DEADLINE_LABELS.map((l) => l.toLowerCase()));
+/** "06/11/2026 23:59 +01:00", "06/11/2026 23:59" or "06/11/2026", as the notice prints it. */
+const NOTICE_DATE = /(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?:\s*([+-]\d{2}:\d{2}|Z)\b)?)?/;
+
+export interface NoticeDeadline {
+  /** ISO 8601: "2026-11-06T23:59:00+01:00", or just the date when the notice gives no time. */
+  iso: string;
+  /** The date part, YYYY-MM-DD. */
+  datum: string;
+}
+
+function toNoticeDeadline(value: string): NoticeDeadline | null {
+  const m = NOTICE_DATE.exec(value);
+  if (!m) return null;
+  const [dd, mm, yyyy] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  if (mm < 1 || mm > 12 || dd < 1 || dd > 31) return null;
+  const datum = `${yyyy}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
+  if (!m[4]) return { iso: datum, datum };
+  const time = `${m[4].padStart(2, "0")}:${m[5]}:00`;
+  return { iso: `${datum}T${time}${m[6] ?? ""}`, datum };
+}
+
+function distinctDeadlines(found: Array<NoticeDeadline | null>): NoticeDeadline[] {
+  const byIso = new Map<string, NoticeDeadline>();
+  for (const d of found) if (d) byIso.set(d.iso, d);
+  // ISO strings sort by date and local time, so the earliest comes first.
+  return [...byIso.values()].sort((a, b) => (a.iso < b.iso ? -1 : a.iso > b.iso ? 1 : 0));
+}
+
+/** Consultation deadlines in TenderNed's HTML rendering of a notice, earliest first. */
+export function noticeDeadlinesFromHtml(html: string): NoticeDeadline[] {
+  return distinctDeadlines(
+    eformsRows(html)
+      .filter((row) => row.kind === "row" && CONSULTATION_DEADLINE_LABEL_KEYS.has(labelKey(row.label)))
+      .map((row) => toNoticeDeadline(row.value)),
+  );
+}
+
+/** Consultation deadlines in the text of the notice PDF (labels may wrap over lines), earliest first. */
+export function noticeDeadlinesFromText(text: string): NoticeDeadline[] {
+  const labels = CONSULTATION_DEADLINE_LABELS.map((l) => l.split(" ").join("\\s+")).join("|");
+  const pattern = new RegExp(`(?:${labels})\\s*:\\s*(${NOTICE_DATE.source})`, "gi");
+  return distinctDeadlines([...text.matchAll(pattern)].map((m) => toNoticeDeadline(m[1])));
+}
+
+/** "2026-11-06T23:59:00+01:00" as "06-11-2026 23:59 (+01:00)"; "2026-11-20" as "20-11-2026". */
+function nlDeadline(value: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::\d{2}(?:\.\d+)?)?([+-]\d{2}:\d{2}|Z)?)?/.exec(value);
+  if (!m) return value;
+  const date = `${m[3]}-${m[2]}-${m[1]}`;
+  if (!m[4]) return date;
+  return `${date} ${m[4]}:${m[5]}${m[6] ? ` (${m[6]})` : ""}`;
+}
+
+/** What reading a consultation's notice for its deadline gave. */
+export type NoticeDeadlineRead =
+  /** The notice was read; `deadlines` may be empty when it states none. */
+  | { kind: "read"; deadlines: NoticeDeadline[]; bron: string }
+  /**
+   * The notice that counts could not be read. `stale` holds the deadlines of
+   * the original notice when only its rectification was unreadable.
+   */
+  | { kind: "unread"; stale?: NoticeDeadline[] };
+
+function appendOpmerking(item: TenderNedItem, text: string): void {
+  const before = item.sluitingsDatumOpmerking ?? "";
+  item.sluitingsDatumOpmerking = before ? `${before}${/[.!?]$/.test(before) ? "" : "."} ${text}` : text;
+}
+
+/**
+ * Settle a market consultation's closing date against its own notice. `item`
+ * holds TenderNed's field (sluitingsDatum/-Bron) on entry. The notice wins when
+ * it gives a deadline; sluitingsDatumGecontroleerd is true only then. When the
+ * two cannot be weighed (rectification unreadable) the earlier date is shown,
+ * never silently the later one. Returns whether the date changed.
+ */
+export function applyNoticeDeadline(
+  item: TenderNedItem,
+  read: NoticeDeadlineRead,
+): { changed: boolean; confirmed: boolean; opmerking: string } {
+  const said: string[] = [];
+  const say = (text: string): void => {
+    said.push(text);
+    appendOpmerking(item, text);
+  };
+  const done = (changed: boolean, confirmed: boolean) => ({ changed, confirmed, opmerking: said.join(" ") });
+  const api = item.sluitingsDatum;
+  const field = item.sluitingsDatumBron || "sluitingsDatumMarktconsultatie";
+  const apiText = api ? `TenderNed-veld ${field} zegt ${nlDeadline(api)}` : "TenderNed zelf geeft geen sluitingsdatum";
+
+  if (read.kind === "read" && read.deadlines.length) {
+    const [earliest, ...others] = read.deadlines;
+    const changed = earliest.datum !== api.slice(0, 10);
+    if (changed && api) item.sluitingsDatumOorspronkelijk = api;
+    item.sluitingsDatum = earliest.iso;
+    item.sluitingsDatumBron = "aankondiging";
+    item.sluitingsDatumPlaceholder = isPlaceholderDate(earliest.iso);
+    item.sluitingsDatumGecontroleerd = true;
+    if (changed) {
+      say(
+        api
+          ? `${apiText}, de aankondiging zelf (${read.bron}, 'Termijn ontvangst antwoorden') ${nlDeadline(earliest.iso)}; de aankondiging is leidend.`
+          : `${apiText}; de aankondiging (${read.bron}, 'Termijn ontvangst antwoorden') noemt ${nlDeadline(earliest.iso)}.`,
+      );
+    }
+    if (others.length) {
+      say(`De aankondiging noemt meerdere termijnen (${read.deadlines.map((d) => nlDeadline(d.iso)).join(", ")}); sluitings_datum is de vroegste.`);
+    }
+    return done(changed, true);
+  }
+
+  item.sluitingsDatumGecontroleerd = false;
+  if (read.kind === "read") {
+    if (api) say(`De aankondiging zelf noemt geen termijn; sluitings_datum is TenderNed's eigen veld ${field}, niet gecontroleerd tegen de aankondiging.`);
+    return done(false, false);
+  }
+
+  const stale = read.stale?.[0];
+  if (stale && stale.datum !== api.slice(0, 10)) {
+    // Rectification unreadable: the original notice and TenderNed's field disagree
+    // and neither is known to be current, so show the earlier one.
+    const earlier = !api || stale.iso < api ? stale.iso : api;
+    if (earlier !== api) {
+      if (api) item.sluitingsDatumOorspronkelijk = api;
+      item.sluitingsDatum = earlier;
+      item.sluitingsDatumBron = "aankondiging";
+      item.sluitingsDatumPlaceholder = isPlaceholderDate(earlier);
+    }
+    say(
+      `De rectificatie van deze marktconsultatie kon niet worden gelezen. ${apiText}, de oorspronkelijke aankondiging ${nlDeadline(stale.iso)}; welke geldt is niet vast te stellen, dus sluitings_datum is de vroegste (${nlDeadline(earlier)}).`,
+    );
+    return done(earlier !== api, false);
+  }
+  if (api) {
+    say(
+      `Niet gecontroleerd tegen de aankondiging zelf (die kon niet worden gelezen); bij marktconsultaties wijkt TenderNed's veld ${field} vaak af van de termijn in de aankondiging.`,
+    );
+  }
+  return done(false, false);
+}
+
+/**
  * A missing (4xx) or unreadable detail record is about that one notice. Any
  * other failure (timeout, network error, 5xx, rate limit, open circuit) means
  * the detail endpoint is struggling, so a closing-date recheck stops there.
@@ -418,6 +574,7 @@ export function tenderNedRecordFields(x: TenderNedItem): Record<string, unknown>
     sluitings_datum_placeholder: x.sluitingsDatumPlaceholder,
     sluitings_datum_gecontroleerd: x.sluitingsDatumGecontroleerd,
     ...(x.sluitingsDatumOorspronkelijk ? { sluitings_datum_oorspronkelijk: x.sluitingsDatumOorspronkelijk } : {}),
+    ...(x.sluitingsDatumOpmerking ? { sluitings_datum_opmerking: x.sluitingsDatumOpmerking } : {}),
     ...(x.laatsteRectificatieId ? { laatste_rectificatie_id: x.laatsteRectificatieId } : {}),
     type_publicatie: x.typePublicatie,
     type_publicatie_code: x.typePublicatieCode,
@@ -1176,7 +1333,7 @@ export class TenderNedSource {
     const recheck = await this.recheckDeadlines(items);
     if (recheck.checked) {
       notes.push(
-        `sluitings_datum van ${recheck.checked} publicatie(s) met een lopende of recente termijn is gecontroleerd tegen het actuele detailrecord (sluitings_datum_gecontroleerd)` +
+        `sluitings_datum van ${recheck.checked} publicatie(s) met een lopende of recente termijn is gecontroleerd tegen het actuele detailrecord, bij een marktconsultatie tegen de aankondiging zelf (sluitings_datum_gecontroleerd)` +
           (recheck.changed
             ? `; bij ${recheck.changed} daarvan week de zoekindex af, meestal door een rectificatie: sluitings_datum is de actuele termijn, sluitings_datum_oorspronkelijk die uit de zoekindex.`
             : "."),
@@ -1189,6 +1346,24 @@ export class TenderNedSource {
             ? " De controle tegen de detailrecords is deze keer niet afgemaakt, omdat TenderNed daar niet of te traag op antwoordde."
             : ""),
       );
+    }
+    if (recheck.consultationsChanged) {
+      notes.push(
+        `Bij ${recheck.consultationsChanged} marktconsultatie(s) noemt de aankondiging zelf een andere termijn ('Termijn ontvangst antwoorden') dan TenderNed's veld sluitingsDatumMarktconsultatie, of is dat veld leeg: sluitings_datum volgt de aankondiging, sluitings_datum_oorspronkelijk is TenderNed's veld en sluitings_datum_opmerking noemt beide.`,
+      );
+    }
+    if (recheck.consultationsUnconfirmed) {
+      notes.push(
+        `Bij ${recheck.consultationsUnconfirmed} marktconsultatie(s) kon sluitings_datum niet worden bevestigd door de aankondiging zelf (sluitings_datum_gecontroleerd: false; zie sluitings_datum_opmerking).`,
+      );
+    }
+    // A consultation left unchecked still carries TenderNed's own field, which is
+    // often later than the deadline in its notice: say so on the record itself.
+    for (const item of items) {
+      if (item.typePublicatieCode !== "MAC" || item.sluitingsDatumGecontroleerd || item.sluitingsDatumOpmerking) continue;
+      if (!item.sluitingsDatum || item.sluitingsDatumPlaceholder) continue;
+      item.sluitingsDatumOpmerking =
+        "Niet gecontroleerd tegen de aankondiging zelf: bij marktconsultaties ligt de termijn in de aankondiging vaak eerder dan TenderNed's veld sluitingsDatumMarktconsultatie. tenderned_aanbesteding_get geeft de termijn uit de aankondiging.";
     }
     const placeholders = items.filter((item) => item.sluitingsDatumPlaceholder).length;
     if (placeholders) {
@@ -1220,28 +1395,47 @@ export class TenderNedSource {
    * only the detail record follows rectifications (seen moving deadlines by up
    * to ~4 months, so an open tender can look closed in search). Re-read the
    * detail of notices whose indexed deadline is current or recent, so search
-   * shows the same deadline as get.
+   * shows the same deadline as get. A market consultation's deadline is also
+   * checked against its notice (HTML rendering, one more request; one more
+   * again when it was rectified), as get does; recent consultations without
+   * any closing date in the index are included for the same reason.
    *
    * This is best-effort enrichment of a search that has already succeeded, so
    * it is bounded: its own connector (see RECHECK_CONNECTOR), at most
-   * RECHECK_CONCURRENCY requests at a time, no new request after the first
+   * RECHECK_CONCURRENCY notices at a time, no new request after the first
    * sign of a struggling upstream, and RECHECK_BUDGET_MS of wall-clock time in
    * total. Whatever is not checked keeps the indexed date, marked unchecked.
    */
-  private async recheckDeadlines(
-    items: TenderNedItem[],
-  ): Promise<{ checked: number; changed: number; unchecked: number; cutShort: boolean }> {
+  private async recheckDeadlines(items: TenderNedItem[]): Promise<{
+    checked: number;
+    changed: number;
+    unchecked: number;
+    cutShort: boolean;
+    consultationsChanged: number;
+    consultationsUnconfirmed: number;
+  }> {
     const cutoff = new Date(Date.now() - DEADLINE_RECHECK_DAYS * 86_400_000).toISOString().slice(0, 10);
+    const isConsultation = (item: TenderNedItem) => item.typePublicatieCode === "MAC";
     const dated = items.filter((item) => item.sluitingsDatum && !item.sluitingsDatumPlaceholder);
-    // Open and just-closed tenders matter most, so the latest deadlines go first.
-    const candidates = dated
-      .filter((item) => item.sluitingsDatum.slice(0, 10) >= cutoff)
-      .sort((a, b) => (a.sluitingsDatum < b.sluitingsDatum ? 1 : a.sluitingsDatum > b.sluitingsDatum ? -1 : 0))
+    const undatedConsultations = items.filter(
+      (item) => isConsultation(item) && !item.sluitingsDatum && item.publicatieDatum.slice(0, 10) >= cutoff,
+    );
+    const pool = [...dated, ...undatedConsultations];
+    // Open and just-closed tenders matter most, so the latest deadlines go first
+    // (an undated consultation by its publication date).
+    const sortKey = (item: TenderNedItem) => item.sluitingsDatum || item.publicatieDatum;
+    const candidates = pool
+      .filter((item) => sortKey(item).slice(0, 10) >= cutoff)
+      .sort((a, b) => (sortKey(a) < sortKey(b) ? 1 : sortKey(a) > sortKey(b) ? -1 : 0))
       .slice(0, MAX_DEADLINE_CHECKS);
-    if (!candidates.length) return { checked: 0, changed: 0, unchecked: dated.length, cutShort: false };
+    if (!candidates.length) {
+      return { checked: 0, changed: 0, unchecked: dated.length, cutShort: false, consultationsChanged: 0, consultationsUnconfirmed: 0 };
+    }
 
     let checked = 0;
     let changed = 0;
+    let consultationsChanged = 0;
+    let consultationsUnconfirmed = 0;
     let nextIndex = 0;
     // Set on the first failure that is not about one record: start no further rechecks.
     let halted = false;
@@ -1249,39 +1443,78 @@ export class TenderNedSource {
     // nothing changes the items after search has returned them.
     let expired = false;
 
-    const apply = (item: TenderNedItem, data: PublicatieDetail): void => {
+    const fetchOptions = {
+      connector: RECHECK_CONNECTOR,
+      // A request outliving the budget runs out in the background on the
+      // recheck connector; a shorter timeout would count a merely slow
+      // upstream as a failure.
+      timeoutMs: RECHECK_BUDGET_MS,
+      retries: 0,
+    };
+    const failed = (error: unknown): undefined => {
+      // The HTTP layer has already logged the failure; the indexed date stays, marked unchecked.
+      if (!isPerRecordFailure(error)) halted = true;
+      return undefined;
+    };
+    /** A notice's HTML rendering, or undefined when it cannot be read. */
+    const fetchHtml = (id: string): Promise<string | undefined> =>
+      getJson<{ html?: unknown }>(`${PUBLICATIES}/${encodeURIComponent(id)}/html`, fetchOptions).then(({ data }) => {
+        const html = data && typeof data === "object" ? data.html : undefined;
+        return typeof html === "string" && html.trim() ? html : undefined;
+      }, failed);
+
+    const applyDetail = (item: TenderNedItem, data: PublicatieDetail): void => {
       const closing = detailClosingDate(data);
       // A detail record without any closing date says nothing about the indexed one.
-      if (!closing.value) return;
-      if (closing.value !== item.sluitingsDatum) {
-        item.sluitingsDatumOorspronkelijk = item.sluitingsDatum;
+      if (closing.value && closing.value !== item.sluitingsDatum) {
+        if (item.sluitingsDatum) item.sluitingsDatumOorspronkelijk = item.sluitingsDatum;
         item.sluitingsDatum = closing.value;
         item.sluitingsDatumBron = closing.bron;
         item.sluitingsDatumPlaceholder = isPlaceholderDate(closing.value);
-        changed += 1;
+        if (!isConsultation(item)) changed += 1;
       }
       const rectificatie = str(data.publicatieIDLaatsteRectificatie);
       if (rectificatie) item.laatsteRectificatieId = rectificatie;
-      item.sluitingsDatumGecontroleerd = true;
-      checked += 1;
     };
 
     const worker = async (): Promise<void> => {
       while (!halted && !expired && nextIndex < candidates.length) {
         const item = candidates[nextIndex++];
-        try {
-          const { data } = await getJson<PublicatieDetail>(`${PUBLICATIES}/${encodeURIComponent(item.id)}`, {
-            connector: RECHECK_CONNECTOR,
-            // A request outliving the budget runs out in the background on the
-            // recheck connector; a shorter timeout would count a merely slow
-            // upstream as a failure.
-            timeoutMs: RECHECK_BUDGET_MS,
-            retries: 0,
-          });
-          if (!expired) apply(item, data);
-        } catch (error) {
-          // The HTTP layer has already logged the failure; the indexed date stays, marked unchecked.
-          if (!isPerRecordFailure(error)) halted = true;
+        const consultation = isConsultation(item);
+        const [detail, html] = await Promise.all([
+          getJson<PublicatieDetail>(`${PUBLICATIES}/${encodeURIComponent(item.id)}`, fetchOptions).then(({ data }) => data, failed),
+          consultation ? fetchHtml(item.id) : Promise.resolve(undefined),
+        ]);
+        if (expired || !detail) continue;
+        if (!consultation) {
+          applyDetail(item, detail);
+          item.sluitingsDatumGecontroleerd = true;
+          checked += 1;
+          continue;
+        }
+        const indexed = item.sluitingsDatum;
+        applyDetail(item, detail);
+        // Only the notice itself decides whether TenderNed's field is changed;
+        // keep the index date as original only when the notice is not read.
+        item.sluitingsDatumOorspronkelijk = undefined;
+        const rectificatie = str(detail.publicatieIDLaatsteRectificatie);
+        const ownNotice = html !== undefined ? noticeDeadlinesFromHtml(html) : undefined;
+        let read: NoticeDeadlineRead;
+        if (rectificatie && rectificatie !== item.id) {
+          const rectified = halted ? undefined : await fetchHtml(rectificatie);
+          if (expired) continue;
+          read = rectified !== undefined
+            ? { kind: "read", deadlines: noticeDeadlinesFromHtml(rectified), bron: `rectificatie ${rectificatie}` }
+            : { kind: "unread", stale: ownNotice };
+        } else {
+          read = ownNotice ? { kind: "read", deadlines: ownNotice, bron: `publicatie ${item.id}` } : { kind: "unread" };
+        }
+        const outcome = applyNoticeDeadline(item, read);
+        if (outcome.changed) consultationsChanged += 1;
+        if (outcome.confirmed) checked += 1;
+        else consultationsUnconfirmed += 1;
+        if (!item.sluitingsDatumOorspronkelijk && indexed && indexed.slice(0, 10) !== item.sluitingsDatum.slice(0, 10)) {
+          item.sluitingsDatumOorspronkelijk = indexed;
         }
       }
     };
@@ -1297,7 +1530,15 @@ export class TenderNedSource {
     const finished = await Promise.race([Promise.all(workers).then(() => true as const), budget]);
     clearTimeout(budgetTimer);
     expired = true;
-    return { checked, changed, unchecked: dated.length - checked, cutShort: halted || !finished };
+    return {
+      checked,
+      changed,
+      // Consultations whose notice could not confirm the date get their own note.
+      unchecked: pool.length - checked - consultationsUnconfirmed,
+      cutShort: halted || !finished,
+      consultationsChanged,
+      consultationsUnconfirmed,
+    };
   }
 
   /** Other notices of the same procedure; the detail record itself never lists them. */
@@ -1356,13 +1597,19 @@ export class TenderNedSource {
       connector: CONNECTOR,
       timeoutMs: 20_000,
     });
-    const [related, noticeHtml] = await Promise.all([
+    const typeCode = str(data.aankondigingCode?.code);
+    // A market consultation's deadline is checked against its notice (see
+    // CONSULTATION_DEADLINE_LABELS): the latest rectification's when there is one.
+    const isConsultation = typeCode === "MAC";
+    const rectificatieId = str(data.publicatieIDLaatsteRectificatie);
+    const deadlineNoticeId = isConsultation && rectificatieId && rectificatieId !== id ? rectificatieId : "";
+    const [related, noticeHtml, rectificationHtml] = await Promise.all([
       this.fetchRelated(id),
-      includeAward ? this.fetchNoticeHtml(id) : Promise.resolve(undefined),
+      includeAward || isConsultation ? this.fetchNoticeHtml(id) : Promise.resolve(undefined),
+      deadlineNoticeId ? this.fetchNoticeHtml(deadlineNoticeId) : Promise.resolve(undefined),
     ]);
 
     const notes: string[] = [];
-    const typeCode = str(data.aankondigingCode?.code);
     const closing = detailClosingDate(data);
     const looptijd = str(data.looptijdCode?.code);
     const europeesCode = str(data.nationaalOfEuropeesCode?.code);
@@ -1421,11 +1668,6 @@ export class TenderNedSource {
 
     // tenderned.nl shows the looptijd text ("Onbepaald") instead of a date for these codes.
     if (looptijd === "OBP" || looptijd === "OBK") item.sluitingsDatumOpmerking = str(data.looptijdCode?.omschrijving);
-    if (item.sluitingsDatumPlaceholder) {
-      notes.push(
-        `sluitingsDatum ${item.sluitingsDatum} is een plaatshouder van TenderNed (jaar ${PLACEHOLDER_DATE_YEAR} of later), geen echte termijn.`,
-      );
-    }
     if (item.laatsteRectificatieId && item.laatsteRectificatieId !== item.id) {
       notes.push(
         `Deze publicatie is gerectificeerd (laatste rectificatie ${item.laatsteRectificatieId}); sluitings_datum is de termijn na rectificatie. De zoekindex van TenderNed en de aankondigings-PDF tonen mogelijk nog de oorspronkelijke termijn.`,
@@ -1436,7 +1678,7 @@ export class TenderNedSource {
       notes.push("Gerelateerde publicaties konden niet worden opgehaald; de lijst kan onvolledig zijn.");
     }
 
-    if (noticeHtml) {
+    if (includeAward && noticeHtml) {
       if ("error" in noticeHtml) {
         item.gunning_unavailable_reason = noticeHtml.error;
         notes.push("Waarde- en gunningsgegevens konden niet worden opgehaald (HTML-weergave van TenderNed); zie pdfUrl.");
@@ -1516,6 +1758,30 @@ export class TenderNedSource {
         item.pdf_text_unavailable_reason = extracted.reason;
         notes.push(`Aankondigings-PDF kon niet als tekst worden gelezen (${extracted.reason}); gebruik pdfUrl.`);
       }
+    }
+
+    if (isConsultation) {
+      const fromHtml = noticeHtml && "html" in noticeHtml ? noticeDeadlinesFromHtml(noticeHtml.html) : undefined;
+      const fromPdf = item.pdf_text !== undefined ? noticeDeadlinesFromText(item.pdf_text) : undefined;
+      // The PDF is the same notice as the HTML rendering; a cut-off PDF text that
+      // shows no deadline says nothing about the rest of the notice.
+      const pdfConclusive = fromPdf !== undefined && (fromPdf.length > 0 || !item.pdf_text_truncated);
+      const ownNotice: NoticeDeadline[] | undefined = fromHtml?.length ? fromHtml : pdfConclusive ? fromPdf : fromHtml;
+      let read: NoticeDeadlineRead;
+      if (deadlineNoticeId) {
+        read = rectificationHtml && "html" in rectificationHtml
+          ? { kind: "read", deadlines: noticeDeadlinesFromHtml(rectificationHtml.html), bron: `rectificatie ${deadlineNoticeId}` }
+          : { kind: "unread", stale: ownNotice };
+      } else {
+        read = ownNotice ? { kind: "read", deadlines: ownNotice, bron: `publicatie ${item.id}` } : { kind: "unread" };
+      }
+      const { opmerking } = applyNoticeDeadline(item, read);
+      if (opmerking) notes.push(`Sluitingsdatum: ${opmerking}`);
+    }
+    if (item.sluitingsDatumPlaceholder) {
+      notes.push(
+        `sluitingsDatum ${item.sluitingsDatum} is een plaatshouder van TenderNed (jaar ${PLACEHOLDER_DATE_YEAR} of later), geen echte termijn.`,
+      );
     }
 
     return {

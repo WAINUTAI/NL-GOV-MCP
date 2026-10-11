@@ -23,7 +23,7 @@ Technical overview of how NL-GOV-MCP is structured internally.
                                    │
                      ┌─────────────┴─────────────┐
                      │   tools.ts                 │
-                     │   78 tool handlers         │
+                     │   85 tool handlers         │
                      │   Zod schemas + logic      │
                      └───┬────────┬────────┬─────┘
                          │        │        │
@@ -31,7 +31,7 @@ Technical overview of how NL-GOV-MCP is structured internally.
               ▼                   ▼                    ▼
      ┌────────────────┐  ┌────────────────┐  ┌────────────────┐
      │  sources/*.ts   │  │  utils/*.ts     │  │  types.ts      │
-     │  47 connectors  │  │  shared infra   │  │  contracts     │
+     │  50 connectors  │  │  shared infra   │  │  contracts     │
      └───────┬────────┘  └────────────────┘  └────────────────┘
              │
              ▼
@@ -79,12 +79,13 @@ A single tool call flows through these steps:
 | File | Role |
 |------|------|
 | `src/index.ts` | Entry point. Reads `--sse` / `--streamable-http` flags or `MCP_TRANSPORT` env, starts the matching transport. |
-| `src/server.ts` | Creates `McpServer`, calls `registerTools()`, sets up Express routes for HTTP transports, adds `/health` and `/health/sources` endpoints. |
-| `src/tools.ts` | All 78 tool registrations. Each tool has a Zod input schema and an async handler that calls a source, transforms results, and returns via `toMcpToolPayload()`. |
+| `src/server.ts` | Creates `McpServer` with the server `instructions` (`SERVER_INSTRUCTIONS`, sent at `initialize`), calls `registerTools()`, sets up Express routes for HTTP transports, adds `/health` and `/health/sources` endpoints. |
+| `src/tools.ts` | All 85 tool registrations. Each tool has a Zod input schema and an async handler that calls a source, transforms results, and returns via `toMcpToolPayload()`. |
+| `src/router/` | The `nl_gov_ask` router: `nl-gov-ask.ts` holds its registration and handler (called from `registerTools()`), `intents.ts` what it reads from a question (places, EU acts, policy and council questions, debates, Algoritmeregister, DSO documents, ECLIs, law articles, research bodies, population questions), `routes.ts` the route chain: which routes a question takes and in what order, shared by the handler and `dryRun`. |
 | `src/types.ts` | Shared TypeScript interfaces: `MCPRecord`, `Provenance`, `MCPToolResponse`, `MCPErrorResponse`, `AppConfig`. |
 | `src/config.ts` | Loads `config/default.json`, merges env var overrides. |
 
-### Sources (47 connectors)
+### Sources (50 connectors)
 
 Each source is a class with one or more async methods. All methods return a normalized shape:
 
@@ -104,15 +105,16 @@ The tool handler in `tools.ts` maps `items` to `MCPRecord[]` and wraps provenanc
 | `data-overheid.ts` | CKAN REST | `data_overheid` |
 | `cbs.ts` | OData v4 + v3 fallback | `cbs` |
 | `tweede-kamer.ts` | OData v4 + REST | `tweede_kamer` |
-| `rechtspraak.ts` | POST JSON | `rechtspraak` |
+| `tweede-kamer-debatten.ts` | OData v4 + VLOS XML (verslagen) | `tweede_kamer` |
+| `rechtspraak.ts` | POST JSON (search) + open data XML (one ruling by ECLI) | `rechtspraak` |
 | `bekendmakingen.ts` | SRU/XML | `officiele_bekendmakingen` |
-| `rijksoverheid.ts` | REST | `rijksoverheid` |
+| `rijksoverheid.ts` | RSS 2.0 XML (`/api/rss`, one platform, several sites in `RSS_SITES`) + REST (school holidays) | `rijksoverheid`, `rekenkamer`, `scp` |
 | `rijksbegroting.ts` | HTML scraping | `rijksbegroting` |
 | `duo.ts` | REST + OData | `duo` |
 | `api-register.ts` | REST (key required) | `api_register` |
 | `knmi.ts` | REST (key required) | `knmi` |
-| `pdok.ts` / `pdokBag.ts` | REST + SPARQL | `pdok_bag` |
-| `ori.ts` | Elasticsearch | `ori` |
+| `pdok.ts` | REST (PDOK Locatieserver) | `pdok_bag` |
+| `ori.ts` | Elasticsearch (`_search`, and `_doc` for one document's text) | `ori`, `ori_pages` |
 | `ndw.ts` | SPARQL | `ndw` |
 | `luchtmeetnet.ts` | REST | `luchtmeetnet` |
 | `rdw.ts` | CKAN | `rdw` |
@@ -127,7 +129,7 @@ The tool handler in `tools.ts` maps `items` to `MCPRecord[]` and wraps provenanc
 | `bagDetail.ts` | Kadaster REST (key required) | `pdok_bag` (bag_address_detail) |
 | `data-politie.ts` | OData v3 (dataderden) | `data_politie` |
 | `cbs-iv3.ts` | OData v3 (dataderden) | `cbs_iv3` |
-| `wetten-bwb.ts` | SRU/XML (KOOP) | `wetten_bwb` |
+| `wetten-bwb.ts` | SRU/XML (KOOP) + BWB toestand XML from the KOOP repository (article text) | `wetten_bwb` |
 | `cvdr.ts` | SRU/XML (KOOP) | `cvdr` |
 | `bestuurlijke-gebieden.ts` | OGC API Features | `bestuurlijke_gebieden` |
 | `brk-kadastrale-kaart.ts` | OGC API Features | `brk_kadastrale_kaart` |
@@ -150,6 +152,7 @@ The tool handler in `tools.ts` maps `items` to `MCPRecord[]` and wraps provenanc
 | `eu-cellar.ts` | CELLAR SPARQL (EU Publications Office, keyless) | `eu_cellar` |
 | `lido.ts` | LiDO REST services (XML): public counts + `get-links` list | `lido` |
 | `algoritmeregister.ts` | REST JSON (POST search, keyless) | `algoritmeregister` |
+| `wodc.ts` | DSpace 7 REST (discovery search, items, bitstreams) + PDF text extraction | `wodc` |
 
 ### Utilities
 
@@ -199,9 +202,19 @@ Request arrives
 | Category | TTL | Sources |
 |----------|-----|---------|
 | static | 1 hour | CBS, Rijksbegroting, DUO, Eurostat |
-| semi_live | 10 min | Tweede Kamer, Rechtspraak, Bekendmakingen, Rijksoverheid, data.overheid, PDOK, data.europa, the DSO search's Locatieserver and bekendmakingen lookups |
+| semi_live | 10 min | Tweede Kamer, Rechtspraak, Bekendmakingen, Rijksoverheid, Algemene Rekenkamer, SCP, data.overheid, PDOK, data.europa, the DSO search's Locatieserver and bekendmakingen lookups |
 | live | 2 min | Luchtmeetnet, NDW, RDW, Rijkswaterstaat, KNMI |
-| discovery | 30 min | NGR, RIVM, ORI, API Register, BAG/RCE Linked Data, Ruimtelijke Plannen, DSO Omgevingsdocumenten |
+| discovery | 30 min | NGR, RIVM, ORI, API Register, BAG/RCE Linked Data, Ruimtelijke Plannen, DSO Omgevingsdocumenten, Algoritmeregister, WODC |
+
+The table names the main sources; `CONNECTOR_CATEGORY` in `connector-runtime.ts` is the full list. The cache holds at most 64 MB of response bodies (oldest out first) and never caches a body over 4 MB. Large documents bypass it where it would hold megabytes: the BWB toestand XML (`wetten_bwb_tekst`) and the DSO documentstructuur are parsed once and kept in a small in-source cache instead, and ORI document texts are not cached.
+
+## nl_gov_ask router
+
+`nl_gov_ask` is the one tool that takes a natural-language question. Its router decodes the question, parses date expressions against a real reference time (`temporal.ts`), detects the intent and picks one or more source routes: specific routes first (EU legislation, DSO/Omgevingswet with `DSO_API_KEY`, Tweede Kamer debates, the Algoritmeregister, elections, procurement, disciplinary law, per-school education, air quality), then the broad document and statistics routes, and finally the data.overheid.nl catalogue. Detection is precision-first: a question another route already answered keeps that route. Each route calls the same source classes as the individual tools, searches the topic keywords of the question rather than the sentence, and reports the terms, the routes tried and why one fell through in `access_note`; a failing route is listed in `failures`. The routes and their guards are described in `docs/TOOLS.md` under "Meta router".
+
+## Server instructions and tool metadata
+
+`createServer()` passes `SERVER_INSTRUCTIONS` to the `McpServer`; the client receives them at `initialize`. With a tool search (Claude Code) only tool names and these instructions load upfront, so they say when to reach for this server (start with `nl_gov_ask` when the source is unclear, then that source's own tools), how to read results (cite canonical URLs; `error` is a failure, `failures` lists sources that failed while others answered, zero records without either is a real empty answer, `access_note` explains filters, truncation and fallbacks) and which keys exist. `nl_gov_ask` is registered with `_meta: { "anthropic/alwaysLoad": true }` so it is loaded upfront as well; no other tool carries it. `tests/server-metadata.test.ts` checks both, and that the instructions and every tool description stay within the 2,048 characters at which Claude Code cuts them.
 
 ## Response contract
 
@@ -246,7 +259,7 @@ The HTTP client, caching, circuit breaker, retry, and concurrency limiting are a
 
 ## Transport modes
 
-All three transports expose the same 78 tools and are created by `server.ts`:
+All three transports expose the same 85 tools and are created by `server.ts`:
 
 | Mode | Protocol | Session model | Use case |
 |------|----------|---------------|----------|
@@ -255,3 +268,5 @@ All three transports expose the same 78 tools and are created by `server.ts`:
 | **Streamable HTTP** | `POST /mcp` + `GET /mcp` + `DELETE /mcp` | `mcp-session-id` header, in-memory map | MCP spec 2025-03-26 compliant clients |
 
 HTTP transports also serve `/health` and `/health/sources` for monitoring.
+
+Each HTTP session gets its own `McpServer` from `createServer()` (roughly 14 MB per session). Sessions are bounded: one without requests and without an open stream for `NL_GOV_SESSION_TTL_MS` (default 30 min) is closed, and at `NL_GOV_MAX_SESSIONS` (default 100 per transport) the least recently used one is closed to make room. `NL_GOV_HTTP_HOST` sets the interface to bind, `NL_GOV_ALLOWED_ORIGINS` an Origin allowlist (others get `403`). A body that is not valid JSON gets `400` with JSON-RPC error `-32700`, one over 1 MB `413` with `-32600`, without stack traces or file paths.

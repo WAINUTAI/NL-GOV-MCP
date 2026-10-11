@@ -2,8 +2,8 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { loadConfig, ENV_KEYS } from "./config.js";
 import { DataOverheidSource } from "./sources/data-overheid.js";
-import { CbsSource } from "./sources/cbs.js";
-import { TweedeKamerSource, mapTweedeKamerError, parseTkQuery, tkRecordView, tkSubjectTitle } from "./sources/tweede-kamer.js";
+import { CbsSource, cbsCatalogItemUrl } from "./sources/cbs.js";
+import { TweedeKamerSource, mapTweedeKamerError, tkRecordView, tkSubjectTitle } from "./sources/tweede-kamer.js";
 import { DEBAT_DEFAULT_CHARS, DEBAT_DEFAULT_DAYS, DEBAT_MAX_CHARS, DEBAT_MAX_VERSLAGEN, TweedeKamerDebattenSource, type DebatFragment, type DebatHit, type DebatSearchResult } from "./sources/tweede-kamer-debatten.js";
 import { BekendmakingenSource, AUTHORITY_TYPES, MAX_TEXT_CHARS, SRU_MAX_START_RECORD, bekendmakingSnippet, normalizeBekendmakingIdentifier, rewriteKeepingSyntax } from "./sources/bekendmakingen.js";
 import { RijksoverheidSource } from "./sources/rijksoverheid.js";
@@ -12,10 +12,10 @@ import { DuoSource } from "./sources/duo.js";
 import { ApiRegisterSource } from "./sources/api-register.js";
 import { KnmiSource } from "./sources/knmi.js";
 import { PdokSource } from "./sources/pdok.js";
-import { OriSource, oriFailureHint } from "./sources/ori.js";
+import { ORI_ID_RE, ORI_INDEX_RE, ORI_PAGINA_RE, ORI_TEXT_DEFAULT_CHARS, ORI_TEXT_MAX_CHARS, OriSource, oriDocumentFailureHint, oriFailureHint, parsePagina } from "./sources/ori.js";
 import { NdwSource } from "./sources/ndw.js";
 import { LuchtmeetnetSource } from "./sources/luchtmeetnet.js";
-import { RechtspraakSource } from "./sources/rechtspraak.js";
+import { RechtspraakSource, UITSPRAAK_DEFAULT_CHARS, UITSPRAAK_MAX_CHARS, readEcliInput, sectieIsReadable, selectUitspraakText, tuchtrechtUrl, uitspraakDataUrl, uitspraakDetailsUrl, uitspraakInhoudsopgave } from "./sources/rechtspraak.js";
 import { RdwSource } from "./sources/rdw.js";
 import { RijkswaterstaatWaterdataSource } from "./sources/rijkswaterstaat-waterdata.js";
 import { NgrSource } from "./sources/ngr.js";
@@ -27,7 +27,7 @@ import { EurostatSource } from "./sources/eurostat.js";
 import { DataEuropaSource } from "./sources/data-europa.js";
 import { DataPolitieSource } from "./sources/data-politie.js";
 import { CbsIv3Source } from "./sources/cbs-iv3.js";
-import { WettenBwbSource } from "./sources/wetten-bwb.js";
+import { BWB_SRU_ENDPOINT, BWB_TEXT_DEFAULT_CHARS, BWB_TEXT_MAX_CHARS, BwbTekstError, bwbSearchCql, bwbVersieUrl, todayAmsterdam, WettenBwbSource, type BwbArtikel, type BwbRegeling } from "./sources/wetten-bwb.js";
 import { CvdrSource, CVDR_ORGANIZATION_TYPES, CvdrQueryError } from "./sources/cvdr.js";
 import { BestuurlijkeGebiedenSource } from "./sources/bestuurlijke-gebieden.js";
 import { BrkKadastraleKaartSource } from "./sources/brk-kadastrale-kaart.js";
@@ -44,20 +44,21 @@ import { TenderNedSource, TENDERNED_MAX_REACHABLE, TenderNedInputError, planUpst
 import { KoopCollectieSource } from "./sources/koop-collecties.js";
 import { BrpGewasperceelSource } from "./sources/brp-gewaspercelen.js";
 import { VerkiezingsuitslagenSource } from "./sources/verkiezingsuitslagen.js";
-import { EuCellarSource, normalizeCelex, parseDocumentNumber } from "./sources/eu-cellar.js";
+import { EuCellarSource, normalizeCelex } from "./sources/eu-cellar.js";
 import { LidoSource, parseLidoId, normalizeLidoType, clampLidoRows } from "./sources/lido.js";
-import { DsoOmgevingsdocumentenSource, DsoInputError, DSO_DOCUMENT_TYPES, DSO_PRESENTEREN_BASE, DSO_RODK_URL, dsoApiKeyProblem, type DocumentType as DsoDocumentType, type DsoSearchArgs, type DsoSearchItem } from "./sources/dso-omgevingsdocumenten.js";
+import { DsoOmgevingsdocumentenSource, DsoInputError, DSO_DOCUMENT_TYPES, DSO_PRESENTEREN_BASE, DSO_RODK_URL, dsoApiKeyProblem, type DsoSearchItem } from "./sources/dso-omgevingsdocumenten.js";
 import { DSO_TEXT_DEFAULT_CHARS, DSO_TEXT_MAX_CHARS, selectDsoText, zoektermWords, type DsoTextPart } from "./sources/dso-regeltekst.js";
+import { WodcSource, WODC_SEARCH_ENDPOINT, WODC_MAX_ROWS, WODC_MAX_OFFSET, WODC_DEFAULT_CHARS, WODC_MAX_CHARS, WODC_MAX_PASSAGES, clampWodcRows, mapWodcError, planWodcWindow, shortAbstract, type WodcItem } from "./sources/wodc.js";
 import { AlgoritmeregisterSource, ALGORITMEREGISTER_SEARCH_ENDPOINT, ALGORITMEREGISTER_ORG_ENDPOINT, ALGORITMEREGISTER_MAX_ROWS, ALGORITME_STATUSSEN, ALGORITME_PUBLICATIECATEGORIEEN, ALGORITME_ORGANISATIETYPES, clampAlgoritmeRows, planAlgoritmeWindow, summarizeAlgoritmeSearch } from "./sources/algoritmeregister.js";
 import { mapSourceError, nowIso, successResponse, toMcpToolPayload, errorResponse } from "./utils/response.js";
 import { SourceRequestError } from "./utils/http.js";
-import { parseTemporalRange } from "./utils/temporal.js";
 import { applyOutputFormat } from "./utils/output-format.js";
-import { getConnectorHealth } from "./utils/connector-runtime.js";
 import { buildFormattedResponse, dryRunPayload, mergeAccessNotes, singleConnectorVerbose } from "./utils/tool-runner.js";
-import type { MCPRecord } from "./types.js";
-import { rewriteQuery, extractKeywords, extractKeywordTerms, looseTimePhrases, metaNounBinding, rewriteNote, quotedQuery } from "./utils/query-rewriter.js";
+import type { MCPRecord, ToolResult } from "./types.js";
+import { rewriteQuery, rewriteNote } from "./utils/query-rewriter.js";
 import { logger } from "./utils/logger.js";
+import { registerNlGovAsk } from "./router/nl-gov-ask.js";
+export { extractPlaceName, cbsNarrowingCandidates, extractLuchtComponent, extractVerkiezingHint, type EuIntent, detectEuIntent, shouldDeepenTweedeKamerQuery, MUNICIPAL_SCOPE_WORDS, ORGANISATION_WORDS, uitsprakenSense, asksForRulings, hasDataIntent, type PolicyIntent, detectPolicyIntent, type DebatIntent, detectDebatIntent, type AlgoritmeIntent, detectAlgoritmeIntent, type DsoIntent, detectDsoIntent, toPhraseQuery, toOriQuery, oriPlacePhrase } from "./router/intents.js";
 
 const config = loadConfig();
 
@@ -105,6 +106,7 @@ const verkiezingsuitslagen = new VerkiezingsuitslagenSource(config);
 const euCellar = new EuCellarSource(config);
 const lido = new LidoSource(config);
 const algoritmeregister = new AlgoritmeregisterSource(config);
+const wodc = new WodcSource(config);
 
 function record(source: string, title: string, canonical_url: string, data: Record<string, unknown>, snippet?: string, date?: string): MCPRecord {
   return { source_name: source, title, canonical_url, data, snippet, date };
@@ -115,6 +117,19 @@ function algoritmeRecord(x: Awaited<ReturnType<AlgoritmeregisterSource["search"]
   const meta = [x.organisation, x.status, x.publication_category].filter(Boolean).join(" · ");
   const desc = x.description_short.length > 240 ? `${x.description_short.slice(0, 239)}…` : x.description_short;
   return record("algoritmeregister", x.title, x.url, x as unknown as Record<string, unknown>, [meta, desc].filter(Boolean).join(" — "), x.published_at?.slice(0, 10));
+}
+
+/** "Statsch, P.D., Burger, A.M. e.a. · Cahier 2026-12 · project 3105g" */
+function wodcMeta(x: WodcItem): string {
+  const authors = x.authors.length > 2 ? `${x.authors.slice(0, 2).join("; ")} e.a.` : x.authors.join("; ");
+  return [authors, x.series.join(", "), x.projectnummers.length ? `project ${x.projectnummers.join(", ")}` : ""].filter(Boolean).join(" · ");
+}
+
+/** A WODC report as wodc_search shows it: the abstract shortened, the full one via wodc_document_get. */
+function wodcRecord(x: WodcItem): MCPRecord {
+  const abstract = shortAbstract(x.abstract);
+  const snippet = shortAbstract(x.abstract, 240).text;
+  return record("wodc", x.subtitle ? `${x.title}: ${x.subtitle}` : x.title, x.url, { ...x, abstract: abstract.text, abstract_ingekort: abstract.cut || undefined }, [wodcMeta(x), snippet].filter(Boolean).join(" — "), x.issued);
 }
 
 /** "Annelotte Lammers (Groep Markuszower)", "David van Weel (minister van Justitie en Veiligheid)", "Thom van Campen (voorzitter)". */
@@ -202,29 +217,6 @@ function debatNotes(out: DebatSearchResult, single: boolean): string | undefined
 }
 
 /**
- * An ORI item as nl_gov_ask shows it, the way ori_search does: the passage
- * around the matched terms as snippet (kept out of `data`, so it is not sent
- * twice) instead of the bare record type.
- */
-function oriRecord({ snippet, ...item }: Record<string, unknown>): MCPRecord {
-  return record("ori", String(item.title ?? item.id ?? "ORI item"), String(item.url ?? "https://www.openraadsinformatie.nl"), item, String(snippet ?? item.type ?? ""), String(item.publishedAt ?? ""));
-}
-
-/** data.match of a Tweede Kamer record that holds the words of a name apart, not as the phrase (nl_gov_ask). */
-const TK_WORDS_APART = "woorden afzonderlijk";
-
-/**
- * A Tweede Kamer document as nl_gov_ask shows it, the way
- * tweede_kamer_documents does: its subject rather than the dossier title that
- * hundreds of documents share, its kamerstuk page rather than the API
- * resource, and its type, number and date.
- */
-function tkDocumentRecord(item: Record<string, unknown>): MCPRecord {
-  const view = tkRecordView("Document", item, config.endpoints.tweedeKamer);
-  return record("tweedekamer", view.title, view.url, item, view.snippet, view.date);
-}
-
-/**
  * A DSO omgevingsdocument as dso_omgevingsdocumenten_search and nl_gov_ask show
  * it: linked to its readable text (documentUrl), dated by the start of its
  * current version or, for an ontwerp, by its announcement. An ontwerp's snippet
@@ -271,6 +263,21 @@ function prov(tool: string, endpoint: string, query_params: Record<string, strin
   };
 }
 
+/**
+ * The summary of a page cut locally from `fetched` records: "20 publicaties",
+ * "5 van 20 publicaties (6-10)", or, for an offset past the last record, that the
+ * page is empty: never the count of records that are not on it.
+ */
+function pageSummary(fetched: number, offset: number, limit: number, noun: string): string {
+  const shown = Math.max(0, Math.min(limit, fetched - offset));
+  if (shown === fetched) return `${fetched} ${noun}`;
+  if (!shown) return `Geen ${noun} op deze pagina: offset ${offset} ligt voorbij de ${fetched} opgehaalde`;
+  return `${shown} van ${fetched} ${noun} (${offset + 1}-${offset + shown})`;
+}
+
+/** Longest keyword query the search tools take: a URL with more is refused upstream (HTTP 414/400). */
+const SEARCH_QUERY_MAX = 500;
+
 const outputFormatSchema = z.enum(["json", "csv", "geojson", "markdown_table"]).default("json");
 const cbsFilterScalarSchema = z.union([z.string(), z.number(), z.boolean()]);
 const cbsFilterValueSchema = z.union([cbsFilterScalarSchema, z.array(cbsFilterScalarSchema)]);
@@ -278,1441 +285,6 @@ const paginationInputSchema = {
   offset: z.number().int().min(0).default(0),
   limit: z.number().int().min(1).max(config.limits.maxRows).optional(),
 };
-
-function getRecordIdentifier(rec: MCPRecord): string | undefined {
-  const data = (rec.data ?? {}) as Record<string, unknown>;
-  const keys = ["ecli", "document_id", "cbs_table_id", "bwb_id", "url", "identifier", "id"];
-  for (const key of keys) {
-    const value = data[key];
-    if (typeof value === "string" && value.trim()) {
-      return `${key}:${value.trim().toLowerCase()}`;
-    }
-  }
-  if (rec.canonical_url) return `canonical:${rec.canonical_url.toLowerCase()}`;
-  return undefined;
-}
-
-function metadataScore(rec: MCPRecord): number {
-  const data = (rec.data ?? {}) as Record<string, unknown>;
-  let score = Object.keys(data).length;
-  if (rec.snippet) score += 2;
-  if (rec.date) score += 1;
-  if (rec.title) score += 1;
-  if (rec.canonical_url) score += 1;
-  return score;
-}
-
-/**
- * Lowercase words that bind the parts of a Dutch place name together:
- * "Alphen aan den Rijn", "Bergen op Zoom", "Berkel en Rodenrijs". They only ever
- * appear *between* capitalised words, so a match still has to end on one.
- */
-const PLACE_INFIXES = "aan|bij|de|den|der|en|het|op|ten|ter|van|['’]t";
-
-/**
- * One place name: a capitalised word followed by any number of further
- * capitalised words, optionally bound by the infixes above.
- *
- * Shaped as `capital (infix* capital)*` rather than `capital (infix capital)*`,
- * because the second half of a Dutch place name is not always introduced by an
- * infix: "Den Helder" and "Den Haag" are two capitals in a row, and the earlier
- * pattern stopped after "Den". That truncation was not harmless — "Den" prefix-
- * matches the "Den Haag-…" Luchtmeetnet stations and resolves to De Bilt in the
- * PDOK Locatieserver, so a question about Den Helder came back with Den Haag's
- * air quality and parcels 89 km away.
- *
- * "'s-Hertogenbosch" and "'t Zand" open on an apostrophe, hence the prefix.
- */
-const PLACE_CORE = `(?:['’]s-|['’]t\\s+)?[A-ZÀ-Þ][\\wÀ-ÿ'’-]*(?:(?:\\s+(?:${PLACE_INFIXES}))*\\s+[A-ZÀ-Þ][\\wÀ-ÿ'’-]*)*`;
-
-const GEMEENTE_PLACE_RE = new RegExp(`\\bgemeente\\s+(${PLACE_CORE})`);
-const IN_PLACE_RE = new RegExp(`\\bin\\s+(${PLACE_CORE})`);
-
-/**
- * Pull a place name out of a raw (non-lowercased) question so bbox- and
- * gemeente-scoped sources can be driven from natural language: "in Tilburg",
- * "gemeente Land van Cuijk". Exported for router-intent tests.
- *
- * Over-capturing ("in Amsterdam en Utrecht") is preferred over truncating: an
- * unresolvable name makes a source answer "not found", which is honest, while a
- * truncated one silently resolves to a different place.
- */
-export function extractPlaceName(text: string): string | undefined {
-  const gemeenteMatch = GEMEENTE_PLACE_RE.exec(text);
-  const inMatch = IN_PLACE_RE.exec(text);
-  const raw = (gemeenteMatch?.[1] ?? inMatch?.[1] ?? "").trim().replace(/[?.,;:!]+$/, "");
-  return raw.length >= 3 ? raw : undefined;
-}
-
-/**
- * Narrow a natural question down to CBS-searchable topic words.
- *
- * CBS table titles are national and topical ("Woningen; ...", "Bevolking; ..."):
- * they never carry a municipality name and rarely a question word, so searching
- * the full sentence — even after the generic rewriter — returns nothing. These
- * candidates are only ever tried AFTER the existing ones come back empty, so a
- * query that works today keeps its current result.
- */
-export function cbsNarrowingCandidates(strictQuery: string, place?: string): string[] {
-  const placeTokens = new Set(
-    (place ?? "")
-      .toLowerCase()
-      .split(/\s+/)
-      .filter(Boolean),
-  );
-  // Quantity/question words survive the shared rewriter (its frames only strip
-  // them directly before a verb) but never appear in a CBS table title.
-  const quantityWords = new Set([
-    "hoeveel", "aantal", "aantallen", "veel", "many", "much", "count",
-    "welke", "welk", "wat", "hoe", "waar", "wanneer", "wie",
-  ]);
-
-  const tokens = strictQuery
-    .toLowerCase()
-    .split(/\s+/)
-    .map((t) => t.replace(/[^\p{L}\p{N}-]/gu, ""))
-    .filter((t) => t.length > 2 && !quantityWords.has(t) && !placeTokens.has(t));
-
-  if (!tokens.length) return [];
-
-  const joined = tokens.join(" ");
-  // Longest token = most distinctive noun; the last resort when even the
-  // narrowed phrase finds nothing ("woningen gebouwd" -> "woningen").
-  const longest = [...tokens].sort((a, b) => b.length - a.length)[0];
-
-  return [...new Set([joined, longest])].filter(Boolean);
-}
-
-/** Map an air-quality component named in a (lowercased) question to a Luchtmeetnet formula. */
-export function extractLuchtComponent(lowered: string): string | undefined {
-  if (/\bno2\b|stikstofdioxide/.test(lowered)) return "NO2";
-  if (/\bpm\s?2[.,]?5\b|\bpm25\b/.test(lowered)) return "PM25";
-  if (/\bpm\s?10\b|fijn\s?stof/.test(lowered)) return "PM10";
-  if (/\bozon\b|\bo3\b/.test(lowered)) return "O3";
-  if (/\bso2\b|zwaveldioxide/.test(lowered)) return "SO2";
-  return undefined;
-}
-
-/** Map an election kind mentioned in a (lowercased) question to a Kiesraad code prefix. */
-export function extractVerkiezingHint(lowered: string): string | undefined {
-  if (/tweede\s*kamer/.test(lowered)) return "TK";
-  if (/gemeenteraad/.test(lowered)) return "GR";
-  if (/provinciale\s*staten/.test(lowered)) return "PS";
-  if (/europe(es|se)\s*parlement|europese verkiezing/.test(lowered)) return "EP";
-  if (/eerste\s*kamer/.test(lowered)) return "EK";
-  if (/waterschap/.test(lowered)) return "WS";
-  const code = /\b([a-z]{2})\s?(\d{8})\b/.exec(lowered);
-  return code ? `${code[1].toUpperCase()}${code[2]}` : undefined;
-}
-
-export type EuIntent =
-  | { kind: "document"; celex: string }
-  | { kind: "transposition"; celex: string }
-  | { kind: "search"; query: string };
-
-const EU_CELEX_TOKEN = /(?:^|[^\p{L}\d])(?:celex\s*:?\s*)?(3\d{4}[RLD]\d{4})(?=$|[^\p{L}\d])/iu;
-// Tight citation shape: a bare "verordening 2024/12" can be a municipal bylaw, so
-// regulations and decisions need an EU/EG/EEG marker; directives are EU-only.
-const EU_CITATION = /(?:uitvoerings|gedelegeerde\s+)?(verordening|richtlijn|besluit)\s*(\((?:eu|eg|eeg|euratom)\)|\b(?:eu|eg|eeg)\b)?\s*(?:nr\.?\s*)?\d{1,4}\s*\/\s*\d{1,4}(\s*\/\s*(?:eu|eg|eeg)\b)?/iu;
-const EU_SEARCH_TRIGGER = /(?:^|[^\p{L}\d-])(?:eur-?lex|eu-(?:richtlijn|verordening|wetgeving)(?:en)?|europese\s+(?:richtlijn|verordening|wetgeving)(?:en)?|omzetting\s+(?:van\s+(?:de\s+|een\s+)?)?(?:eu-)?richtlijn(?:en)?)(?=$|[^\p{L}\d-])/iu;
-const EU_STRIP_WORDS = /(?:^|[^\p{L}\d-])(?:eur-?lex|eu|eu-richtlijn(?:en)?|eu-verordening(?:en)?|eu-wetgeving|europese|europees|richtlijn(?:en)?|verordening(?:en)?|wetgeving|omzetting|welke|zijn|er|over|op|het|gebied|van|de|een|in)(?=$|[^\p{L}\d-])/giu;
-
-/**
- * Narrow EU-legislation intent for nl_gov_ask. Runs on the RAW question: the
- * query rewriter strips '/', which would destroy citations like "2016/679".
- */
-export function detectEuIntent(question: string): EuIntent | undefined {
-  const raw = String(question ?? "");
-  let celex: string | null = null;
-  const token = EU_CELEX_TOKEN.exec(raw);
-  if (token) celex = normalizeCelex(token[1]);
-  if (!celex) {
-    const cit = EU_CITATION.exec(raw);
-    if (cit && (cit[2] || cit[3] || cit[1].toLowerCase() === "richtlijn")) celex = normalizeCelex(cit[0]);
-  }
-  if (celex) {
-    const isDirective = celex.charAt(5) === "L";
-    return isDirective && /omzet|omgezet|implementatie|ge[iï]mplementeerd|transpos/i.test(raw) ? { kind: "transposition", celex } : { kind: "document", celex };
-  }
-  if (!EU_SEARCH_TRIGGER.test(raw)) return undefined;
-  const query = raw.replace(/[?!.,;:]/g, " ").replace(EU_STRIP_WORDS, " ").replace(/\s+/g, " ").trim();
-  return query ? { kind: "search", query } : undefined;
-}
-
-export function shouldDeepenTweedeKamerQuery(question: string): boolean {
-  const q = question.trim().toLowerCase();
-  if (!q) return false;
-
-  const explicitContentIntent = [
-    /\bvat(?:\s+\w+){0,4}\s+samen\b/i,
-    /\bsamenvatting\b/i,
-    /\bsummary\b/i,
-    /\bsummar(?:ise|ize)\b/i,
-    /\bwat\s+staat\s+er(?:in|\s+in)\b/i,
-    /\binhoud\b/i,
-    /\bleg\s+uit\b/i,
-    /\banalyse(?:er)?\b/i,
-    /\bwat\s+is\s+besloten\b/i,
-    /\bwat\s+heeft\s+de\s+tweede\s+kamer\s+besloten\b/i,
-    /\bwat\s+besluiten\s+deze\s+stukken\b/i,
-    /\bwhat\s+does\s+(?:this|the)\s+(?:document|motion|letter|brief|stuk)\s+say\b/i,
-    /\bwhat\s+is\s+in\s+(?:this|the)\s+(?:document|motion|letter|brief|stuk)\b/i,
-  ];
-
-  return explicitContentIntent.some((pattern) => pattern.test(q));
-}
-
-/** Words that only say "a municipality"; dropped from a search that is already scoped to one. */
-export const MUNICIPAL_SCOPE_WORDS = ["gemeente", "gemeenten", "gemeentes", "gemeentelijk", "gemeentelijke", "gemeenteraad", "gemeenteraden"];
-
-/**
- * Words that place a question in a municipal council: the council, its members
- * and its papers, whose documents live in Open Raadsinformatie. Plain
- * "gemeente(n)" is not among them; it only names the kind of organisation
- * ("Rechtspraak over gemeentelijke belastingen" is no council question).
- */
-const COUNCIL_RE = /(?:^|[^\p{L}])(?:gemeenteraad|gemeenteraden|raadslid|raadsleden|raadsvoorstel(?:len)?|raadsbesluit(?:en)?|raadsbrie(?:f|ven)|raadsinformatiebrie(?:f|ven)|raadsvergadering(?:en)?|raadsinformatie|wethouders?|burgemeesters?|collegebesluit(?:en)?|b&w)(?=$|[^\p{L}])/iu;
-
-/** "gemeente", "gemeenten", "gemeentelijke": a municipal question, but no signal of its own. */
-const MUNICIPALITY_NOUN_RE = /(?:^|[^\p{L}])(?:gemeente|gemeenten|gemeentes|gemeentelijke?)(?=$|[^\p{L}])/iu;
-
-/** Generic organisation nouns: they mark an organisation question but are no search topic. */
-export const ORGANISATION_WORDS = ["overheid", "overheden", "organisatie", "organisaties", "overheidsorganisatie", "overheidsorganisaties", "uitvoeringsorganisatie", "uitvoeringsorganisaties"];
-
-const ORGANISATION_RE = /(?:^|[^\p{L}])(?:gemeente|gemeenten|gemeentes|provincie|provincies|waterschap|waterschappen|ministerie|ministeries|overheid|overheden|overheidsorganisaties?|uitvoeringsorganisaties?|veiligheidsregio(?:'s)?|agentschap(?:pen)?)(?=$|[^\p{L}])/iu;
-
-/**
- * National actors. When one of them is the subject, "in Amsterdam" is where
- * something happens, not the municipality whose council records answer it
- * ("Wat doet het kabinet aan woningnood in Amsterdam?").
- */
-const NATIONAL_ACTOR_RE = /(?:^|[^\p{L}])(?:kabinet|regering|ministers?|ministerie|ministeries|staatssecretaris(?:sen)?|rijksoverheid|tweede\s+kamer|eerste\s+kamer)(?=$|[^\p{L}])/iu;
-
-const RULING_WORD_RE = /(?:^|[^\p{L}])uitspra(?:ak|ken)(?=$|[^\p{L}])/iu;
-
-/**
- * Courts, judges and case-law words: with one of them named, "uitspraken" are
- * rulings. "hof" is the court of appeal, but not in the municipality name "Hof
- * van Twente". The chambers of a court ("meervoudige kamer", "strafkamer")
- * are named here so that "kamer" in them is not read as parliament.
- */
-const COURT_RE = /(?:^|[^\p{L}])(?:\p{L}*rechters?|rechtbank(?:en)?|gerechtsh(?:of|oven)|hof(?!\s+van\s+twente)|raad\s+van\s+state|hoge\s+raad|centrale\s+raad\s+van\s+beroep|college\s+van\s+beroep|tuchtcolleges?|ecli|jurisprudentie|rechtspraak|rechterlijke?|(?:meervoudige|enkelvoudige|civiele)\s+kamer|(?:straf|kanton|belasting|ondernemings|pacht|familie|handels)kamer)(?=$|[^\p{L}])/iu;
-
-/**
- * Office holders, politicians and bodies that make statements. "Uitspraken van
- * de minister over jeugdzorg" asks what the minister said; "uitspraken" is the usual
- * Dutch word for that as well as for court rulings. Bare "partij(en)" is not
- * among them: "tussen partijen" names the parties to a court case.
- */
-const STATEMENT_SPEAKER = String.raw`(?:kabinet|regering|ministers?|minister-president|premier|staatssecretaris(?:sen)?|bewindslieden|bewindspersonen?|(?:tweede\s+|eerste\s+)?kamer|kamerleden|kamerlid|politicus|politici|(?:politieke\s+|coalitie|oppositie|regerings)partij(?:en)?|fracties?|fractievoorzitters?|lijsttrekkers?|wethouders?|burgemeesters?|gemeenteraad|raadsleden|raadslid|raad|college|gedeputeerden?|commissaris|koning|president)`;
-
-/** "de", "het" or "een", then at most one word ("de demissionaire minister", "minister Keijzer" needs none). */
-const SPEAKER_LEAD = String.raw`(?:(?:de|het|een)\s+)?(?:\p{L}+\s+)?`;
-
-const UITSPRAAK = String.raw`uitspra(?:ak|ken)`;
-const WORD_START = String.raw`(?:^|[^\p{L}])`;
-const WORD_END = String.raw`(?=$|[^\p{L}])`;
-/** The rest of the clause up to a word boundary: no sentence or clause mark in between. */
-const CLAUSE_GAP = String.raw`(?:[^.!?;:]*[^\p{L}.!?;:])?`;
-
-/** Speech verbs: with one of them the speaker made statements ("Wat zei de minister", "de premier zegt"). */
-const SPEECH_VERB = String.raw`(?:zei|zeiden|zegt|zeggen)`;
-
-/**
- * Forms of "doen", the verb of "een uitspraak doen". They tie the speaker to
- * the word only when "uitspraak" is their object ("Welke uitspraken deed de
- * premier", "Deed de premier uitspraken"), not in "Wat doet het college met de
- * uitspraak over de parkeervergunning?", where the college acts on a ruling.
- */
-const DO_VERB = String.raw`(?:deed|deden|doet|doen)`;
-
-/**
- * Auxiliaries. "heeft de minister" is a statement only with a statement
- * participle in the same clause ("Welke uitspraken heeft het kabinet gedaan"),
- * not in "Heeft de staatssecretaris de uitspraak aangevochten?" or "Welke
- * uitspraak heeft de minister verloren?", where the office holder is a party.
- */
-const AUX_VERB = String.raw`(?:heeft|hebben|had|hadden)`;
-const STATEMENT_PARTICIPLE = String.raw`(?:gedaan|gezegd|geuit|uitgesproken|herhaald|teruggenomen)`;
-
-/** Prepositions that make "de uitspraak" the thing talked about or acted on ("met de uitspraak", "na de uitspraak"). */
-const TOPIC_PREPOSITION = String.raw`(?:over|met|tegen|na|naar|bij|op|in|aan|voor|door|om|ondanks|volgens|rond|rondom|omtrent|inzake|sinds|zonder|uit|tot|onder)`;
-
-/** A determiner and at most one other word (no preposition) before "uitspraak" as the object of "doen": "deed de premier een opvallende uitspraak". */
-const OBJECT_LEAD = String.raw`(?:(?:de|het|een|die|deze|dit|dat|geen|zulke|enkele|veel|vele|meerdere)\s+)?(?:(?!${TOPIC_PREPOSITION}\s)\p{L}+\s+)?`;
-
-/**
- * "uitspraak" in a prepositional phrase ("met de uitspraak", "na de recente
- * uitspraak"): a ruling talked about or acted on, not something a speaker
- * says. A possessive keeps it the speaker's own ("in zijn uitspraak").
- */
-const TOPIC_UITSPRAAK_RE = new RegExp(String.raw`${WORD_START}${TOPIC_PREPOSITION}\s+(?:(?:de|het|een|deze|die|dit|dat)\s+)?(?:(?!(?:zijn|haar|hun|diens|mijn|onze|jullie)\s)\p{L}+\s+)?${UITSPRAAK}${WORD_END}`, "giu");
-
-/**
- * A speaker tied to "uitspraak"/"uitspraken". Checked on the question as
- * typed: its owner ("uitspraken van de minister", "gedaan door het kabinet",
- * "uitspraken die de wethouder deed"), the subject of a speech verb ("Wat zei
- * de premier") or of an auxiliary with a statement participle ("Welke
- * uitspraken heeft het kabinet gedaan"). An office holder that is only named
- * somewhere in the question is often a party to a case instead ("Uitspraak
- * over verblijfsvergunning tegen de staatssecretaris", "Uitspraken die de
- * staatssecretaris heeft verloren").
- */
-const LINKED_SPEAKER_RES = [
-  new RegExp(String.raw`${WORD_START}${UITSPRAAK}\s+(?:(?:gedaan|gedane)\s+)?(?:van|door)\s+${SPEAKER_LEAD}${STATEMENT_SPEAKER}${WORD_END}`, "iu"),
-  new RegExp(String.raw`${WORD_START}(?:gedaan|gedane)\s+door\s+${SPEAKER_LEAD}${STATEMENT_SPEAKER}${WORD_END}`, "iu"),
-  new RegExp(String.raw`${WORD_START}${UITSPRAAK}\s+die\s+${SPEAKER_LEAD}${STATEMENT_SPEAKER}${WORD_END}${CLAUSE_GAP}(?:${DO_VERB}|${SPEECH_VERB}|${STATEMENT_PARTICIPLE}|uitte|uitten)${WORD_END}`, "iu"),
-  new RegExp(String.raw`${WORD_START}${SPEECH_VERB}\s+${SPEAKER_LEAD}${STATEMENT_SPEAKER}${WORD_END}`, "iu"),
-  new RegExp(String.raw`${WORD_START}${STATEMENT_SPEAKER}\s+${SPEECH_VERB}\s+(?:\p{L}+\s+){0,3}${UITSPRAAK}${WORD_END}`, "iu"),
-  new RegExp(String.raw`${WORD_START}${AUX_VERB}\s+${SPEAKER_LEAD}${STATEMENT_SPEAKER}${WORD_END}${CLAUSE_GAP}${STATEMENT_PARTICIPLE}${WORD_END}`, "iu"),
-  new RegExp(String.raw`${WORD_START}${STATEMENT_SPEAKER}\s+${AUX_VERB}\s+(?:\p{L}+\s+){0,3}${UITSPRAAK}${WORD_END}${CLAUSE_GAP}${STATEMENT_PARTICIPLE}${WORD_END}`, "iu"),
-];
-
-/**
- * A speaker as the subject of "doen" with "uitspraak" as its object. Checked
- * on the question with every "uitspraak" in a prepositional phrase set aside
- * (TOPIC_UITSPRAAK_RE): "uitspraak" before the verb in the same clause
- * ("Welke uitspraken over migratie deed de premier", but not "Uitspraak over
- * de parkeervergunning wat doet het college ermee", whose object is "wat"),
- * or right after the speaker or verb ("Deed de premier uitspraken", "De
- * premier deed een opvallende uitspraak").
- */
-const DO_STATEMENT_RES = [
-  new RegExp(String.raw`${WORD_START}${UITSPRAAK}${WORD_END}(?:(?![^\p{L}](?:wat|hoe|waarom)[^\p{L}])[^.!?;:,])*[^\p{L}.!?;:,]${DO_VERB}\s+${SPEAKER_LEAD}${STATEMENT_SPEAKER}${WORD_END}`, "iu"),
-  new RegExp(String.raw`${WORD_START}${DO_VERB}\s+${SPEAKER_LEAD}${STATEMENT_SPEAKER}\s+${OBJECT_LEAD}${UITSPRAAK}${WORD_END}`, "iu"),
-  new RegExp(String.raw`${WORD_START}${STATEMENT_SPEAKER}\s+${DO_VERB}\s+${OBJECT_LEAD}${UITSPRAAK}${WORD_END}`, "iu"),
-];
-
-/** Whether an office holder or body in the question is the speaker of "uitspraak"/"uitspraken". */
-function hasLinkedSpeaker(question: string): boolean {
-  if (LINKED_SPEAKER_RES.some((re) => re.test(question))) return true;
-  const withoutTopics = question.replace(TOPIC_UITSPRAAK_RE, (m) => m.replace(/uitspra(?:ak|ken)$/iu, "…"));
-  return DO_STATEMENT_RES.some((re) => re.test(withoutTopics));
-}
-
-/**
- * Words that only occur in court proceedings: appeal, the parties and their
- * roles, a case against someone, contesting a ruling and its outcome ("de
- * uitspraak aangevochten", "in het gelijk gesteld", "gelijk gekregen", "het
- * besluit … vernietigd"). With one of them "uitspraken" are rulings, also when
- * an office holder is tied to the word ("Welke uitspraken heeft de
- * staatssecretaris in hoger beroep verloren?"). Words that are also a policy
- * topic ("bezwaar", "geschil", "bestemmingsplan", "beroep" as a trade) are not
- * among them, nor bare "verloren"/"gewonnen" ("Uitspraken van de premier over
- * de gewonnen verkiezingen"); without a tied speaker the question is read as
- * rulings anyway ("Welke uitspraak heeft de minister verloren?").
- */
-const LITIGATION_RE = /(?:^|[^\p{L}])(?:hoger\s+beroep|in\s+beroep|beroep\s+(?:tegen|ingesteld|aangetekend)|beroepschrift(?:en)?|beroepszaak|beroepszaken|cassatie|bezwaarschrift(?:en)?|(?:tussen\s+(?:de\s+)?|proces)partijen|procespartij|eisers?|eiseres|gedaagden?|verweerders?|verweerster|appellant(?:e|en)?|kort\s+geding|rechtszaak|rechtszaken|za(?:ak|ken)\s+tegen|aangevochten|aanvechten|aanvecht|aanvocht(?:en)?|(?:vecht|vechten|vocht|vochten)\s+(?:[^.!?;:]*\s)?aan(?=\s*(?:$|[.!?;:,]))|in\s+het\s+gelijk\s+(?:gesteld|stelde|stelden|stelt)|gelijk\s+(?:gekregen|kreeg|kregen|krijgt|krijgen)|vernietiging\s+van\s+(?:het|de)\s+(?:besluit|beschikking|vonnis|uitspraak)|(?:besluit(?:en)?|beschikkingen?|vonnis(?:sen)?)\s+(?:\p{L}+\s+){0,3}vernietigd)(?=$|[^\p{L}])/iu;
-
-/**
- * What "uitspraak"/"uitspraken" means in a question, if it occurs. With a
- * court named ("Uitspraken van de rechtbank over de gemeente") or a word of
- * court proceedings ("Uitspraak huurgeschil tussen partijen") the word means
- * rulings. It means statements, which court rulings do not answer, only when
- * an office holder or body is tied to it as its speaker ("Uitspraken van de
- * minister over jeugdzorg", "Welke uitspraken deed de premier over migratie?",
- * "Uitspraken van de wethouder van Utrecht"). Every other question asks for
- * rulings: "Welke uitspraken zijn er over huurrecht?", and also "Uitspraak in
- * de zaak tegen de minister van Justitie", "Heeft de staatssecretaris de
- * uitspraak aangevochten?" and "Wat doet het college met de uitspraak?",
- * where the office holder is a party or acts on a ruling. A speaker named
- * only by surname is not recognised.
- */
-export function uitsprakenSense(question: string): "rulings" | "statements" | undefined {
-  const raw = String(question ?? "");
-  if (!RULING_WORD_RE.test(raw)) return undefined;
-  if (COURT_RE.test(raw) || LITIGATION_RE.test(raw)) return "rulings";
-  return hasLinkedSpeaker(raw) ? "statements" : "rulings";
-}
-
-/** Whether a question asks for court rulings with "uitspraak"/"uitspraken". Exported for router tests. */
-export function asksForRulings(question: string): boolean {
-  return uitsprakenSense(question) === "rulings";
-}
-
-/**
- * Policy vocabulary, compounds included ("GGZ-beleid", "kabinetsbeleid",
- * "woonstrategie", "omgevingsvisie"). "visie" is matched only on its own or as
- * a compound with a linking -s or hyphen, so "televisie" and "revisie" stay out.
- */
-const POLICY_RE = /(?:^|[^\p{L}])(?:[\p{L}-]*beleid(?:s\p{L}*)?|[\p{L}-]*strategie(?:ën|s)?|(?:\p{L}+-)?visie|\p{L}+svisie|omgevingsvisie|toekomstvisie|aanpak|plannen|ambities?|maatregelen|inzet|toepassing(?:en)?)(?=$|[^\p{L}])/iu;
-
-/** Questions about what an organisation does: "Wat doet …", "Hoe gaat … om met …". */
-const ORGANISATION_ACTIVITY_RES = [
-  /\bwat\s+(?:doet|doen|deed|deden)\b/i,
-  /\bhoe\s+(?:gaat|gaan|ging|gingen)\b[\s\S]*\bom\s+met\b/i,
-  /\bhoe\s+(?:gebruikt|gebruiken|zet|zetten|pakt|pakken|werkt|werken)\b/i,
-  /\b(?:werkt|werken)\s+(?:aan|met)\b/i,
-  /\b(?:van\s+plan|bezig\s+met)\b/i,
-];
-
-/** Words that ask for data rather than documents. */
-const DATA_INTENT_WORDS = new Set(["data", "dataset", "datasets", "gegevens", "databestand", "databestanden", "cijfers", "statistiek", "statistieken", "tabel", "tabellen"]);
-
-/**
- * A question that asks for data rather than documents ("Welke data is er over
- * verkeersongevallen?"); the catalogue fallback is the right answer there.
- * A data word only counts on its own: lowercase (a capitalised "Data"
- * mid-sentence is part of a name), not a compound ("data-uitwisseling") and not the
- * first half of a term ("open data portaal", "data strategie"). Before, a
- * lowercase question about an open data portaal went to the catalogue, which
- * dropped "data" and searched "open portaal".
- */
-export function hasDataIntent(question: string): boolean {
-  const words = String(question ?? "").split(/[^\p{L}\p{N}&+-]+/u).filter(Boolean);
-  return words.some((word, i) => {
-    const lower = word.toLowerCase();
-    if (!DATA_INTENT_WORDS.has(lower)) return false;
-    const sentenceInitial = i === 0 && /^\p{Lu}\p{Ll}/u.test(word);
-    if (word !== lower && !sentenceInitial) return false;
-    return metaNounBinding(undefined, lower, words[i + 1]) !== "head";
-  });
-}
-
-// No "i" flag on these: PLACE_CORE relies on capitals to know where a place name ends.
-const GEMEENTE_PLACE_ANY_CASE_RE = new RegExp(`\\b[Gg]emeente\\s+(${PLACE_CORE})`);
-/**
- * "de raad van Amsterdam", "het college in Delft", "burgemeester van Tilburg".
- * "raad" and "college" only in lowercase: capitalised they open the name of a
- * court or body ("Raad van State", "Centrale Raad van Beroep", "College van
- * Beroep voor het bedrijfsleven"), which is no municipality.
- */
-const GOVERNANCE_PLACE_RE = new RegExp(`(?:^|[^\\p{L}])(?:[Gg]emeenteraad|raad|college|[Bb]urgemeester|[Ww]ethouders?)\\s+(?:van|in)\\s+(${PLACE_CORE})`, "u");
-
-/** Places that extractPlaceName can return but that have no municipal ORI index. */
-const NOT_A_MUNICIPALITY = new Set([
-  "nederland", "europa", "eu", "tweede kamer", "eerste kamer", "noord-holland", "zuid-holland",
-  "noord-brabant", "gelderland", "overijssel", "drenthe", "friesland", "fryslân", "flevoland",
-  "limburg", "zeeland", "randstad",
-  // Second halves of the names of courts and bodies: "raad van State",
-  // "college van Beroep", "raad van Bestuur", "college van B en W".
-  "state", "beroep", "bestuur", "toezicht", "commissarissen", "advies", "state-generaal",
-  "b en w", "burgemeester en wethouders", "gedeputeerde staten", "ministers", "europese unie",
-]);
-
-/** Lowercase infixes inside a place name ("Bergen op Zoom"); a name never ends on one. */
-const PLACE_INFIX_WORDS = new Set(["aan", "bij", "de", "den", "der", "en", "het", "op", "ten", "ter", "van"]);
-
-export interface PolicyIntent {
-  /**
-   * Municipality named in the question; scopes an ORI search to its council
-   * index. Not set when a national actor is the subject ("Wat doet het kabinet
-   * voor de gemeente Groningen?").
-   */
-  gemeente?: string;
-  /** The question concerns municipal councils, so ORI is a relevant source even without a named municipality. */
-  municipal: boolean;
-  /** What made the router treat this as an organisation/policy question. */
-  signals: Array<"beleid" | "activiteit" | "organisatie" | "gemeente">;
-  /**
-   * "strong": a policy word, an activity question or the council itself; the
-   * router searches documents before its national routes (Rijksoverheid, DUO).
-   * "weak": only an organisation noun or a named municipality; the document
-   * search is then a last resort before the catalogue, after every route that
-   * a question word picked (Rijksbegroting for "uitgaven van de overheid").
-   */
-  strength: "strong" | "weak";
-}
-
-/**
- * Clean a captured place name and reject what is no municipality. The place
- * pattern lets infixes join capitalised words, so "de raad van Amsterdam van
- * het OV" captured "Amsterdam van het OV"; an acronym ends a place name.
- */
-function cleanPlace(raw: string | undefined): string | undefined {
-  const words = (raw ?? "").trim().replace(/[?.,;:!]+$/, "").split(/\s+/).filter(Boolean);
-  if (!words.length || /^\p{Lu}{2,}$/u.test(words[0])) return undefined;
-  let end = words.findIndex((w, i) => i > 0 && /^\p{Lu}{2,}$/u.test(w));
-  if (end < 0) end = words.length;
-  while (end > 1 && PLACE_INFIX_WORDS.has(words[end - 1].toLowerCase())) end--;
-  const place = words.slice(0, end).join(" ");
-  if (place.length < 3 || NOT_A_MUNICIPALITY.has(place.toLowerCase())) return undefined;
-  return place;
-}
-
-/**
- * Organisation and policy questions ("Wat doet de Belastingdienst met de BTW?",
- * "GGZ-beleid gemeente Utrecht") have no dataset as answer: they are answered by
- * council documents (ORI), official publications, parliamentary papers and
- * government news. Without this the router sent them to the dataset catalogue,
- * which matched the whole sentence against dataset titles and found nothing.
- *
- * Returns undefined for questions without an organisation or policy signal, and
- * for data questions ("Welke gegevens heeft de gemeente over parkeren?") unless
- * they also carry a policy or activity signal. The router uses
- * {@link PolicyIntent.strength} to decide how early the document search runs,
- * and skips it for case-law and API questions.
- */
-export function detectPolicyIntent(question: string): PolicyIntent | undefined {
-  const raw = String(question ?? "").trim();
-  if (!raw) return undefined;
-
-  const policy = POLICY_RE.test(raw);
-  const activity = ORGANISATION_ACTIVITY_RES.some((re) => re.test(raw));
-  const organisation = ORGANISATION_RE.test(raw);
-  const municipalityNounMatch = MUNICIPALITY_NOUN_RE.exec(raw);
-  const municipalityNoun = Boolean(municipalityNounMatch);
-  const gemeenteMatch = GEMEENTE_PLACE_ANY_CASE_RE.exec(raw);
-  const governanceMatch = GOVERNANCE_PLACE_RE.exec(raw);
-  const councilMatch = COUNCIL_RE.exec(raw);
-  const governancePlace = cleanPlace(governanceMatch?.[1]);
-  const council = Boolean(councilMatch) || Boolean(governancePlace);
-  const strong = policy || activity || council;
-
-  if (hasDataIntent(raw) && !strong) return undefined;
-
-  // A national actor named before any municipal word is the subject: "Wat
-  // doet het kabinet voor de gemeente Groningen?" and "Wat zegt de minister
-  // over de gemeente Groningen?" ask what the cabinet or minister does or
-  // says, which council records do not answer (searching Groningen's for
-  // "kabinet" returned council papers, a national ORI search motions from
-  // other councils). Such a question is no municipal one; the national
-  // sources answer it. "Wat vindt de gemeenteraad van Utrecht van de plannen
-  // van het kabinet?" keeps its council.
-  const nationalIndex = NATIONAL_ACTOR_RE.exec(raw)?.index;
-  const municipalIndex = Math.min(
-    ...[municipalityNounMatch, gemeenteMatch, governanceMatch, councilMatch].map((m) => m?.index ?? Number.POSITIVE_INFINITY),
-  );
-  const nationalSubject = nationalIndex !== undefined && nationalIndex < municipalIndex;
-
-  // A municipality to scope by: named as "gemeente X" / "de raad van X" when no
-  // national actor is the subject, or "in X" when the question is about policy
-  // or a municipality and no national actor appears at all.
-  const named = nationalSubject ? undefined : (cleanPlace(gemeenteMatch?.[1]) ?? governancePlace);
-  const inPlace = (strong || municipalityNoun) && nationalIndex === undefined ? cleanPlace(extractPlaceName(raw)) : undefined;
-  const gemeente = named ?? inPlace;
-
-  if (!strong && !organisation && !municipalityNoun && !gemeente) return undefined;
-
-  const municipal = !nationalSubject && (council || municipalityNoun || Boolean(gemeente));
-  const signals: PolicyIntent["signals"] = [];
-  if (policy) signals.push("beleid");
-  if (activity) signals.push("activiteit");
-  if (organisation) signals.push("organisatie");
-  if (municipal) signals.push("gemeente");
-
-  return { ...(gemeente ? { gemeente } : {}), municipal, signals, strength: strong ? "strong" : "weak" };
-}
-
-/**
- * Questions longer than this get no DSO intent and keep the route they had
- * before the DSO route: real questions are far shorter, and the detector's
- * work stays bounded whatever nl_gov_ask is sent.
- */
-const DEBAT_QUESTION_MAX_CHARS = 300;
-
-export type DebatIntent = {
-  /** Words in what was said: the topic after "over". */
-  query?: string;
-  /** Words in the debate subject: "stikstof" of "het stikstofdebat". */
-  debat?: string;
-  fractie?: string;
-  spreker?: string;
-};
-
-/** Fracties as a question writes them, to the name in the verslagen. Upper case only where the name is a common word ("PRO", "SP"). */
-const DEBAT_FRACTIES: Array<[RegExp, string]> = [
-  [/\bVVD\b/, "VVD"], [/\bCDA\b/, "CDA"], [/\bPVV\b/, "PVV"], [/\bD66\b/i, "D66"], [/\bSP\b/, "SP"], [/\bPRO\b/, "PRO"],
-  [/\bJA21\b/i, "JA21"], [/\bSGP\b/, "SGP"], [/\bDENK\b/, "DENK"], [/\bBBB\b/, "BBB"], [/\bFvD\b/, "FvD"], [/\bChristenUnie\b/i, "ChristenUnie"],
-  [/\bGL-PvdA\b|\bGroenLinks-PvdA\b/i, "GroenLinks-PvdA"], [/\bPvdD\b|\bPartij voor de Dieren\b/i, "PvdD"], [/\bVolt\b/, "Volt"],
-  [/\b50PLUS\b/i, "50PLUS"], [/\bNSC\b/, "NSC"], [/\bGroep Markuszower\b/i, "Groep Markuszower"],
-];
-
-/** Speaking, in the past or present: what someone said, argued or answered. */
-const DEBAT_SPEECH = /\b(?:zei|zeiden|zegt|zeggen|gezegd|sprak|spraken|gesproken|uitspraak|uitspraken|inbreng|betoog|betoogde|beweerde|antwoordde|citaat|citaten)\b/;
-/** "in het debat", "tijdens het commissiedebat", "in debatten". */
-const DEBAT_IN = /\b(?:in|tijdens|uit|bij)\s+(?:het\s+|de\s+|een\s+)?\p{L}*debat(?:ten)?\b/u;
-/** A debate word, alone or in a compound ("stikstofdebat", "commissiedebat"). */
-const DEBAT_WORD = /(?<![\p{L}\p{N}])(\p{L}*?)debat(?:ten)?(?![\p{L}\p{N}])/u;
-const DEBAT_KIND_PREFIXES = new Set(["", "kamer", "commissie", "plenair", "plenaire", "tweeminuten", "dertigleden", "begrotings", "wetgevings", "nota", "spoed", "interpellatie", "het"]);
-/** Another body than the Tweede Kamer, or a question about the agenda, votes or moties: other routes. */
-const DEBAT_OTHER = /\b(?:gemeenteraad|raadsvergadering|raadsleden|raadslid|provinciale staten|statenvergadering|statenleden|eerste kamer|senaat|europees parlement|waterschap|wanneer|agenda|gepland|stem(?:de|den|ming|mingen)|motie|moties|amendement|amendementen|aangenomen|verworpen)\b/;
-const DEBAT_SPREKER_FUNCTIES: Array<[RegExp, string]> = [
-  [/\b(?:premier|minister-president)\b/, "minister-president"],
-  [/\bstaatssecretaris(?:sen)?\b/, "staatssecretaris"],
-  [/\bminister(?:s)?\b/, "minister"],
-  [/\b(?:kamer)?voorzitter\b/, "voorzitter"],
-];
-
-/**
- * A question about what was said in a Tweede Kamer debate, for
- * tweede_kamer_debatten. Precision first: it names a debate and asks what was
- * said ("Wat zei de VVD in het debat over stikstof?"), or asks what someone
- * said in the Kamer ("Wat heeft de minister in de Tweede Kamer gezegd over
- * Pallas?"), and gives a topic ("over …"), a debate ("het stikstofdebat"), a
- * fractie or a speaker. Never: a question about another body, the agenda, votes,
- * moties or amendementen, or one longer than DEBAT_QUESTION_MAX_CHARS.
- */
-export function detectDebatIntent(question: string): DebatIntent | undefined {
-  const text = String(question ?? "").trim();
-  if (!text || text.length > DEBAT_QUESTION_MAX_CHARS) return undefined;
-  const q = text.toLowerCase();
-  if (DEBAT_OTHER.test(q)) return undefined;
-  const debatWord = DEBAT_WORD.exec(q);
-  const speech = DEBAT_SPEECH.test(q);
-  const inKamer = /\b(?:in de (?:tweede )?kamer|in het parlement|kamerlid|kamerleden)\b/.test(q);
-  if (!(debatWord && (speech || DEBAT_IN.test(q))) && !(speech && inKamer)) return undefined;
-
-  const intent: DebatIntent = {};
-  const fracties = DEBAT_FRACTIES.filter(([re]) => re.test(text)).map(([, name]) => name);
-  if (fracties.length === 1) intent.fractie = fracties[0];
-  const functie = DEBAT_SPREKER_FUNCTIES.find(([re]) => re.test(q));
-  if (functie) intent.spreker = functie[1];
-  if (!intent.spreker) {
-    // "Wat zei Klaver …", "Wat heeft Van Campen gezegd …": a capitalised name after the verb.
-    const name = /\b(?:zei|zegt|sprak|heeft|hebben|had)\s+((?:(?:van|de|der|den|ten|ter)\s+)*[A-Z][\p{L}'-]+(?:\s+(?:(?:van|de|der|den|ten|ter)\s+)*[A-Z][\p{L}'-]+)?)/u.exec(text);
-    const candidate = name?.[1];
-    if (candidate && !DEBAT_FRACTIES.some(([re]) => re.test(candidate)) && !/^(?:De|Het|Een|Er|Ik|Je|U|Wij|We|Zij|Ze|Tweede|Kamer)\b/.test(candidate)) {
-      intent.spreker = candidate;
-    }
-  }
-  const prefix = debatWord?.[1] ?? "";
-  if (prefix.length >= 4 && !DEBAT_KIND_PREFIXES.has(prefix)) intent.debat = prefix;
-
-  // The topic: what follows "over", up to where the question goes on about the debate, the Kamer or the time.
-  const over = /\bover\s+(.+?)(?=\s+(?:in|tijdens|bij|gezegd|gesproken|vorige|afgelopen|deze|dit|vandaag|gisteren|eergisteren)\b|[?.!]|$)/u.exec(text);
-  if (over) {
-    const topic = parseTkQuery(over[1].replace(/\b(?:het|de|een)\s+\p{L}*debat(?:ten)?\b/giu, " ")).terms
-      .map((t) => (t.mode === "word" && /\s/.test(t.text) ? `"${t.text}"` : t.text))
-      .join(" ");
-    if (topic) intent.query = topic;
-  }
-  return intent.query || intent.debat || intent.fractie || intent.spreker ? intent : undefined;
-}
-
-const ALGORITME_QUESTION_MAX_CHARS = 300;
-
-export type AlgoritmeIntent = {
-  organisatie?: string;
-  query?: string;
-  publicatiecategorie?: "Hoog-risico AI-systeem";
-};
-
-const ALGORITME_WORD = /\b(?:algoritmes?|algoritmen|algoritmeregister|ai-systemen|ai-systeem)\b/;
-/** Documents about algorithms (council papers, Kamerstukken, reports, rulings) are other routes. */
-const ALGORITME_OTHER = /\b(?:raad|gemeenteraad|raadsvoorstel\w*|raadsvragen|raadsinformatiebrief\w*|motie\w*|amendement\w*|kamervra\w*|kamerbrie\w*|kamerstuk\w*|\w*debat\w*|rekenkamer\w*|rapport\w*|onderzoek\w*|wetsvoorstel\w*|nieuws|uitspra\w*|rechter\w*|vonnis\w*|toezicht\w*|wet|wetten|wetgeving|regels|eisen|verordening|ai act)\b/;
-const ALGORITME_BODIES = /\b(?:gemeente|provincie|waterschap|hoogheemraadschap)\s+((?:'s-)?[A-Z][\p{L}'.-]*(?:[\s-]+(?:aan|den|de|op|van|[A-Z][\p{L}'.-]*))*)/u;
-const ALGORITME_MINISTERIE = /\b[Mm]inisterie\s+van\s+([A-Z][\p{L}'.-]*(?:\s+(?:en|van|[A-Z][\p{L}'.-]*))*)/u;
-const ALGORITME_AGENCIES = /\b(UWV|DUO|SVB|CJIB|RDW|IND|CBS|RIVM|Belastingdienst|Dienst Toeslagen|Rijkswaterstaat|Kadaster|Politie|Nationale Politie|Rechtspraak|Kamer van Koophandel)\b/;
-
-/**
- * A question about the algorithms a government body uses or has registered,
- * for the Algoritmeregister ("Welke algoritmes gebruikt de gemeente
- * Amsterdam?", "Welke hoog-risico AI-systemen gebruikt het UWV?"). Precision
- * first: it names algorithms or AI systems and an organisation, a topic ("voor
- * fraudedetectie") or high-risk AI. Never: a question about documents on
- * algorithms (council papers, Kamerstukken, reports, rulings) or about the law
- * on them, which other routes answer.
- */
-export function detectAlgoritmeIntent(question: string): AlgoritmeIntent | undefined {
-  const text = String(question ?? "").trim();
-  if (!text || text.length > ALGORITME_QUESTION_MAX_CHARS) return undefined;
-  const q = text.toLowerCase();
-  if (!ALGORITME_WORD.test(q) || ALGORITME_OTHER.test(q)) return undefined;
-  const intent: AlgoritmeIntent = {};
-  const body = ALGORITME_BODIES.exec(text);
-  const ministerie = ALGORITME_MINISTERIE.exec(text);
-  const agency = ALGORITME_AGENCIES.exec(text);
-  if (body) intent.organisatie = `${body[0].split(/\s+/)[0].toLowerCase()} ${body[1].replace(/\s+(?:aan|den|de|op|van)$/, "")}`;
-  else if (ministerie) intent.organisatie = `Ministerie van ${ministerie[1].replace(/\s+(?:en|van)$/, "")}`;
-  else if (agency) intent.organisatie = agency[1];
-  if (/\bhoog[- ]?risico\b/.test(q)) intent.publicatiecategorie = "Hoog-risico AI-systeem";
-  const topic = /\b(?:voor|bij het|bij de|om)\s+(.+?)[?.!]*$/u.exec(text);
-  if (topic && !(intent.organisatie && topic[1].includes(intent.organisatie.split(" ").pop() ?? ""))) {
-    // "voor vergunningverlening in Utrecht": the place is no topic word.
-    const words = parseTkQuery(topic[1].replace(/\s+in\s+(?:'s-)?[A-Z][\p{L}'.-]*.*$/u, "")).terms.map((t) => t.text).join(" ");
-    if (words) intent.query = words;
-  }
-  return intent.organisatie || intent.query || intent.publicatiecategorie ? intent : undefined;
-}
-
-const DSO_QUESTION_MAX_CHARS = 500;
-
-/** The Omgevingswet documents the DSO holds, as a question names them. */
-const DSO_DOCUMENT_NOUNS = [
-  "omgevingsplan(?:nen)?",
-  "omgevingsvisies?",
-  "omgevingsverordening(?:en)?",
-  "waterschapsverordening(?:en)?",
-  "omgevingsprogramma(?:'s|s)?",
-  "omgevingsdocument(?:en)?",
-  "voorbereidingsbesluit(?:en)?",
-  "voorbeschermingsregels?",
-  "projectbesluit(?:en)?",
-  "ontwerpregeling(?:en)?",
-];
-const DSO_DOCUMENT_WORDS_RE = new RegExp(`(?:^|[^\\p{L}])(?:${DSO_DOCUMENT_NOUNS.join("|")})(?=$|[^\\p{L}])|regels\\s+op\\s+de\\s+kaart`, "iu");
-/** One document word as a lowercase token (the apostrophe of "programma's" splits it off). */
-const DSO_DOCUMENT_TOKEN_RE = new RegExp(`^(?:${DSO_DOCUMENT_NOUNS.join("|")}|novi)$`, "u");
-/** The document words with a case-free first letter only, for patterns whose PLACE_CORE needs its capitals. */
-const DSO_DOCUMENT_NOUNS_CASED = DSO_DOCUMENT_NOUNS.map((n) => `[${n[0].toUpperCase()}${n[0]}]${n.slice(1)}`).join("|");
-/** "de NOVI", the Nationale Omgevingsvisie: in capitals only. */
-const DSO_NOVI_RE = /(?:^|[^\p{L}])NOVI(?=$|[^\p{L}])/u;
-/** A document word in the plural: the question asks for every such document. */
-const DSO_PLURAL_DOCUMENT_RE = /(?:^|[^\p{L}])(?:omgevingsplannen|omgevingsvisies|omgevingsverordeningen|waterschapsverordeningen|omgevingsprogramma(?:'s|s)|omgevingsdocumenten|voorbereidingsbesluiten|voorbeschermingsregels|projectbesluiten|ontwerpregelingen|ontwerpen)(?=$|[^\p{L}])/iu;
-/** Words that ask for a list, which a document word without a place may get. */
-const DSO_LIST_RE = /(?:^|[^\p{L}])(?:welke|hoeveel|alle|lijst|overzicht|toon|geef|noem|which|list|zijn\s+er|bestaan)(?=$|[^\p{L}])/iu;
-
-/**
- * Qualifiers that keep a question on the documents: "onder de Omgevingswet"
- * names the regime, not the law's text, and "beroep aan huis" is no appeal.
- * Masked before the checks below.
- */
-const DSO_NEUTRAL_PHRASE_RE = /(?:^|[^\p{L}])(?:onder\s+de\s+(?:nieuwe\s+)?omgevingswet|beroep\s+aan\s+huis|aan[\s-]huis[\s-]gebonden\s+beroep(?:en)?)(?=$|[^\p{L}])/giu;
-/**
- * Words that give a question another route, also next to a document word:
- * the council, Staten, parliament or government as the subject, opinions,
- * other sources and their documents, money, procedures and participation,
- * and the law or a concept rather than a document. Lowercase whole words;
- * DSO_OTHER_ROUTE_WORD_RE has the word families.
- */
-const DSO_OTHER_ROUTE_WORDS = new Set([
-  "kabinet", "regering", "premier", "stemde", "stemden", "stemt", "besprak", "bespraken", "bespreekt", "bespreken", "besproken",
-  "besloot", "besloten", "beslist", "woo", "wob", "vng", "ipo", "iplo", "bzk",
-  "vindt", "vond", "vonden", "denkt", "denken", "dacht", "dachten", "zei", "zeiden", "mening", "standpunt", "reageert", "reageerde", "kritiek", "oordeel", "oordeelt", "adviseert", "adviseerde",
-  "rechtspraak", "gesanctioneerd", "gegund", "inkoop", "procurement", "cbs", "cijfers", "rijksoverheid", "nieuws", "toespraak",
-  "api", "apis", "apv", "eu", "europese", "europa", "notitie", "onderzoek", "keur", "legger",
-  "kost", "kosten", "kostte", "kostten", "gekost", "geld", "begroot", "budget", "uitgaven", "woz", "planning",
-  "inwoners", "wetten", "wetgeving", "omgevingsregeling", "bkl", "bal", "bbl", "amvb", "amvbs", "prijs", "prijzen", "vragen", "vraag", "aangenomen", "verworpen",
-  "definitie", "betekenis", "betekent", "betekenen", "verschil", "verschillen", "waarom", "why", "wie", "who", "bindend", "moet", "moeten", "bewoners",
-]);
-/** Word families with the same effect: prefixes, compounds of another document type, permits, the law. */
-const DSO_OTHER_ROUTE_WORD_RE = new RegExp(
-  "^(?:raads|college|staten|gedeputeerde|wethouder|burgemeester|kamer|parlement|minister|staatssecretaris|fractie|motie|amendement|stemming|agenda|commissie|rekenkamer|ombudsman|vacature|klacht|persbericht|persconferentie|nieuwsbericht" +
-    "|bekendmaking|publicatie|uitspra|rechter|rechtbank|rechtszaak|rechtszaken|gerechtshof|bestuursrecht|beroep|bezwaar|jurisprudentie|ecli|vonnis|arrest|tucht|handhav|boete|sanctie|overtreding|beschikking|dwangsom" +
-    "|aanbesteding|tender|gunning|marktconsultatie|offerteaanvra|overheidsopdracht|statistiek|dataset|databestand|algoritme|bestemmingsplan|structuurvisie|beleidsregel" +
-    "|jaarrekening|financ|investe|belasting|heffing|tarie|leges|inspraak|zienswijze|evaluat|aanvra|melding|invoering|inwerkingtreding|implementatie|overgang|ambtena|medewerker" +
-    "|wets|wettelijk|wettekst|instructieregel|juridisch|verplicht|advie|reactie|politie|partij|verkiezing|griffie|commissaris|protest|petitie|referendum" +
-    "|bijeenkomst|webinar|cursus|training|opleiding|software|leverancier|applicatie|systeem|storing|omgevingsdienst|staalkaart|modelregel|handreiking" +
-    "|informatiepunt|uitleg|voorbeeld|vergelijk|geschiedenis|historie|voortgang|monitor|antwoord|beantwoord|besluitvorming|vaststelling|ingediend" +
-    "|toezicht|inspectie|rapport)" +
-    "|(?:raad|raden|blad|courant|nota|brief|brieven|avond|wet)$" +
-    "|debat|vergader|begroting|subsidie|participatie|vergunning(?!s?vrij|s?plichtig)" +
-    "|(?<!omgevings)(?<!waterschaps)verordening(?:en)?$|(?<!voorbereidings)(?<!project)besluit(?:en)?$|(?<!omgevings)programma$|(?<!omgevings)visies?$|(?<!omgevings)plan(?:nen)?$|.(?<!omgevings)document(?:en)?$",
-  "u",
-);
-/** Phrases with the same effect: parliament, data, definitions and how-it-works questions. */
-const DSO_OTHER_ROUTE_PHRASE_RE = /(?:^|[^\p{L}])(?:open\s+data|data\s+over|dagelijks\s+bestuur|algemeen\s+bestuur|stand\s+van\s+zaken|b\s*(?:&|en)\s*w|sinds\s+wanneer|in\s+werking\s+(?:getreden|treedt|trad|traden|treden)|wat\s+(?:is|zijn)\s+(?:een|eigenlijk)|wat\s+houdt|wat\s+(?:vind|vindt|vinden|vond|vonden)|wie\s+(?:stelt|stellen|maakt|maken|beslist|beslissen|bepaalt|bepalen|neemt|nemen)|what\s+is\s+an?|how\s+(?:does|do|is|are))(?=$|[^\p{L}])/u;
-/** Abbreviations in capitals: Provinciale and Gedeputeerde Staten, associations, agencies. */
-const DSO_OTHER_ROUTE_ACRONYM_RE = /(?:^|[^\p{L}])(?:PS|GS|VNG|IPO|IPLO|BZK|RCE|ILT|PBL)(?=$|[^\p{L}])/u;
-/** Verbs whose subject must be the document: "Wat zegt het omgevingsplan", not "Wat zegt de VNG over het omgevingsplan". */
-const DSO_DOCUMENT_SUBJECT_VERBS = new Set(["zegt", "zeggen", "regelt", "regelen", "schrijft", "schreef", "stelt", "stelde", "doet", "deed", "gaat", "ging", "meldt", "meldde"]);
-const DSO_ARTICLES = new Set(["de", "het", "een", "dit", "deze", "dat", "die", "the"]);
-/** "Hoe hoog mag ik bouwen" asks for rules; any other "hoe" asks how something works or went. */
-const DSO_HOW_RULES = new Set(["hoog", "hoger", "groot", "groter", "diep", "dieper", "breed", "breder", "ver", "verder", "dicht", "high", "big", "tall", "far", "deep", "wide"]);
-
-/** The question's words in lowercase, letters only. */
-function dsoWords(text: string): string[] {
-  return text.toLowerCase().split(/[^\p{L}]+/u).filter(Boolean);
-}
-
-/** Whether a question belongs to another route (see the word lists above). */
-function dsoOtherRoute(text: string): boolean {
-  if (DSO_OTHER_ROUTE_ACRONYM_RE.test(text) || COUNCIL_RE.test(text) || DSO_OTHER_ROUTE_PHRASE_RE.test(text.toLowerCase())) return true;
-  const words = dsoWords(text);
-  const documentFollows = (i: number) => {
-    const j = DSO_ARTICLES.has(words[i] ?? "") ? i + 1 : i;
-    return DSO_DOCUMENT_TOKEN_RE.test(words[j] ?? "") || DSO_DOCUMENT_TOKEN_RE.test(words[j + 1] ?? "");
-  };
-  return words.some(
-    (w, i) =>
-      DSO_OTHER_ROUTE_WORDS.has(w) ||
-      DSO_OTHER_ROUTE_WORD_RE.test(w) ||
-      ((w === "hoe" || w === "how") && !DSO_HOW_RULES.has(words[i + 1] ?? "")) ||
-      (DSO_DOCUMENT_SUBJECT_VERBS.has(w) && !documentFollows(i + 1)),
-  );
-}
-
-/** documentType per word, for a question that names exactly one kind of document. */
-const DSO_TYPE_WORDS: Array<[RegExp, DsoDocumentType]> = [
-  [/(?:^|[^\p{L}])omgevingsplan(?:nen)?(?=$|[^\p{L}])/iu, "omgevingsplan"],
-  [/(?:^|[^\p{L}])omgevingsvisies?(?=$|[^\p{L}])/iu, "omgevingsvisie"],
-  [DSO_NOVI_RE, "omgevingsvisie"],
-  [/(?:^|[^\p{L}])omgevingsverordening(?:en)?(?=$|[^\p{L}])/iu, "omgevingsverordening"],
-  [/(?:^|[^\p{L}])(?:waterschapsverordening(?:en)?|waterschapsregels)(?=$|[^\p{L}])/iu, "waterschapsverordening"],
-  [/(?:^|[^\p{L}])omgevingsprogramma(?:'s|s)?(?=$|[^\p{L}])/iu, "programma"],
-  [/(?:^|[^\p{L}])(?:voorbereidingsbesluit(?:en)?|voorbeschermingsregels?)(?=$|[^\p{L}])/iu, "voorbereidingsbesluit"],
-  [/(?:^|[^\p{L}])projectbesluit(?:en)?(?=$|[^\p{L}])/iu, "projectbesluit"],
-];
-
-const DUTCH_MONTHS: Record<string, number> = {
-  januari: 1, jan: 1, februari: 2, feb: 2, maart: 3, mrt: 3, april: 4, apr: 4, mei: 5, juni: 6, jun: 6, juli: 7, jul: 7,
-  augustus: 8, aug: 8, september: 9, sep: 9, sept: 9, oktober: 10, okt: 10, november: 11, nov: 11, december: 12, dec: 12,
-};
-
-const DSO_STREET_SUFFIXES = "straat|straatweg|laan|weg|plein|gracht|burgwal|kade|singel|baan|dijk|dreef|hof|pad|steeg|markt|park|plantsoen|ring|wal|haven|veld|dam|allee|boulevard|kanaal|erf|zijde|brink|oord|kwartier|plaats";
-const DSO_STREET_SUFFIX_RE = new RegExp(`(?:${DSO_STREET_SUFFIXES})$`, "u");
-const DSO_STREET_SUFFIX_WORD_RE = new RegExp(`^(?:${DSO_STREET_SUFFIXES})$`, "u");
-/** Lowercase words inside a street name: "Van Asch van Wijckstraat", "Weg der Verenigde Naties". */
-const DSO_STREET_INFIXES = "van|de|der|den|des|het|['’]t|ter|ten|en";
-const DSO_STREET_INFIX_RE = new RegExp(`^(?:${DSO_STREET_INFIXES})$`, "u");
-/** Place names that end like a street ("Amsterdam 31 december" is no address). */
-const DSO_PLACES_LIKE_STREETS = new Set(["amsterdam", "rotterdam", "schiedam", "zaandam", "edam", "volendam", "monnickendam", "alblasserdam", "leidschendam", "veendam", "moerdijk", "langedijk", "stadskanaal", "barneveld", "westerveld", "noordenveld"]);
-/** A house number, but no year: "Omgevingsvisie Amsterdam 2050" and "invoering 2024" are no address. */
-const DSO_HOUSE_NUMBER = "(?!(?:19|20)\\d\\d(?![\\d\\p{L}]))\\d{1,5}(?:\\s?[a-zA-Z](?![\\p{L}])|-[\\dA-Za-z]{1,4}(?![\\p{L}\\d]))?";
-/**
- * Capitalised words (an ordinal like "1e" or "Tweede" and infixes allowed),
- * then a house number, after a word that introduces an address ("op", "aan",
- * "bij", "voor", "adres") or at the very start. Every other start needs that
- * word and a space, so a long run of name characters is scanned once.
- */
-const DSO_ADDRESS_RE = new RegExp(
-  `(?:^|[^\\p{L}](?:op|aan|bij|voor|nabij|rond(?:om)?|adres|at)\\s+(?:(?:de|het)\\s+)?)` +
-    `((?:(?:\\d{1,2}(?:e|de|ste)|Eerste|Tweede|Derde|Vierde)\\s+)?(?:['’]s-|['’]t\\s+)?[A-ZÀ-Þ][\\p{L}'’.-]*(?:\\s+(?:(?:${DSO_STREET_INFIXES})\\s+)*(?:['’]s-)?[A-ZÀ-Þ][\\p{L}'’.-]*){0,4})` +
-    `\\s+(${DSO_HOUSE_NUMBER})(?![\\p{L}\\d])`,
-  "dgu",
-);
-/** Words that open an address phrase at the start of a question ("Op Brennerbaan 150"), not the street. */
-const DSO_ADDRESS_LEAD_WORDS = new Set(["op", "aan", "bij", "voor", "nabij", "rond", "rondom", "adres"]);
-/** Capitalised words before a number that name no street ("voor Box 3", "op Schiphol Terminal 3"). */
-const DSO_NOT_A_STREET = new Set([
-  "artikel", "hoofdstuk", "afdeling", "paragraaf", "bijlage", "lid", "natura", "box", "groep", "fase", "categorie", "formule", "euro", "covid", "windkracht",
-  "terminal", "rijksmonument", "monument", "sectie", "code", "klasse", "niveau", "zone", "gate", "pier", "versie", "week", "dag", "jaar", "nummer",
-]);
-/** A number followed by these is a day, a unit or a duration, not a house number. */
-const DSO_NOT_AFTER_HOUSE_NUMBER = new Set([
-  ...Object.keys(DUTCH_MONTHS),
-  "uur", "uren", "minuut", "minuten", "dag", "dagen", "week", "weken", "maand", "maanden", "jaar", "jaren", "meter", "m", "km", "cm", "mm",
-  "kilo", "kg", "gram", "ton", "liter", "procent", "euro", "mw", "kw", "kwh", "gw", "db", "graden", "keer", "stuks", "personen", "mensen",
-]);
-/** A Dutch postcode, letters in capitals ("2026 de" is no postcode). */
-const DSO_POSTCODE_RE = /(?:^|[^\p{L}\d])([1-9]\d{3})\s?(?!SA|SD|SS)([A-Z]{2})(?![\p{L}\d])/dgu;
-/** Two capitals after a number that are a unit or a country, not postcode letters ("1000 MW", "3500 KG"). */
-const DSO_POSTCODE_UNITS = new Set(["MW", "KW", "KG", "GW", "GB", "MB", "TB", "KB", "PJ", "TJ", "GJ", "MJ", "KV", "KM", "CM", "MM", "HA", "PK", "CC", "ML", "CL", "DL", "MG", "KJ", "EU", "NL", "US", "UK", "VS"]);
-/** What may stand right before a postcode for it to be one: "op 3524 BN", "postcode 3524 BN", "adres: 3524 BN". */
-const DSO_BEFORE_POSTCODE_RE = /(?:^|[^\p{L}])(?:op|aan|bij|voor|nabij|postcode|adres|at)\s*:?\s*$|,\s*$/iu;
-const DSO_POSTCODE_AFTER_RE = /\s*,?\s*([1-9]\d{3})\s?(?!SA|SD|SS)([A-Z]{2})(?![\p{L}\d])/uy;
-const DSO_NUMBER_AFTER_RE = /\s*,?\s*(\d{1,5}(?:\s?[a-zA-Z](?![\p{L}]))?)(?![\p{L}\d])/uy;
-/** The place written behind an address: ", Utrecht", " te Utrecht", " in (de gemeente) Utrecht", " (Utrecht)", " Utrecht". */
-const DSO_PLACE_AFTER_RE = new RegExp(`(?:\\s*,\\s*|\\s+te\\s+|\\s+in\\s+(?:de\\s+gemeente\\s+)?|\\s*\\(\\s*|\\s+)(${PLACE_CORE})`, "uy");
-
-/** "provincie Utrecht", "Hoogheemraadschap De Stichtse Rijnlanden", "gemeente Utrecht". */
-const DSO_BODY_RE = new RegExp(`(?:^|[^\\p{L}])((?:[Gg]emeente|[Pp]rovincie|[Ww]aterschap|[Hh]oogheemraadschap(?:\\s+van)?|[Ww]etterskip)\\s+${PLACE_CORE})`, "du");
-/** "province of Utrecht", "municipality of Ede". */
-const DSO_ENGLISH_BODY_RE = new RegExp(`(?:^|[^\\p{L}])([Pp]rovince|[Mm]unicipality)\\s+of\\s+(?:the\\s+)?(${PLACE_CORE})`, "du");
-/** "in de provincie Utrecht", "in the province of Utrecht": an area, not the provincie as the body that adopts. */
-const DSO_PROVINCE_AREA_RE = new RegExp(`(?:^|[^\\p{L}])(?:in|binnen)\\s+(?:de\\s+|the\\s+)?(?:[Pp]rovincie|[Pp]rovince\\s+of)\\s+(${PLACE_CORE})`, "du");
-const DSO_IN_PLACE_RE = new RegExp(`(?:^|[^\\p{L}])in\\s+(${PLACE_CORE})`, "du");
-/**
- * The place right after a document word: "omgevingsplan Utrecht", "Omgevingsvisie
- * van Amsterdam", "the omgevingsplan of Groningen", "het omgevingsplan voor Utrecht".
- */
-const DSO_DOCUMENT_PLACE_RE = new RegExp(`(?:^|[^\\p{L}])(?:${DSO_DOCUMENT_NOUNS_CASED})\\s+(?:([Vv]an|[Vv]oor|of|for)\\s+(?:de\\s+|het\\s+|the\\s+)?)?(${PLACE_CORE})`, "du");
-/** The place before the document word: "Utrecht omgevingsplan" at the start, "the Utrecht omgevingsplan". */
-const DSO_PLACE_DOCUMENT_RE = new RegExp(`(?:^|[^\\p{L}]the\\s+)(${PLACE_CORE})\\s+(?:${DSO_DOCUMENT_NOUNS_CASED})(?=$|[^\\p{L}])`, "du");
-/** "heeft Utrecht", "geldt voor Rotterdam", "gelden er voor Ede". */
-const DSO_VERB_PLACE_RE = new RegExp(`(?:^|[^\\p{L}])(?:[Hh]eeft|[Hh]ebben|geldt|gelden|gold|golden)\\s+(?:er\\s+)?(?:voor\\s+)?(${PLACE_CORE})`, "du");
-/** "in het centrum van Utrecht": any "van <Place>", the last resort. */
-const DSO_OF_PLACE_RE = new RegExp(`(?:^|[^\\p{L}])van\\s+(?:de\\s+|het\\s+)?(${PLACE_CORE})`, "du");
-/** "Welke omgevingsplannen gelden er op Schiphol?": a place without a number, as a point. */
-const DSO_AT_PLACE_RE = new RegExp(`(?:^|[^\\p{L}])op\\s+(${PLACE_CORE})\\s*[?.!]?\\s*$`, "du");
-/** A place in a question typed in lowercase: after "gemeente", "provincie", "van", "in" or a document word. */
-const DSO_LOWER_PLACE = "(?:(?:den|['’]s-|['’]t)\\s*)?\\p{Ll}[\\p{Ll}'’-]+(?:\\s+(?:aan|op|bij|en)\\s+\\p{Ll}[\\p{Ll}'’-]+)?";
-const DSO_LOWER_BODY_RE = new RegExp(`(?:^|[^\\p{L}])(gemeente|provincie|waterschap)\\s+(${DSO_LOWER_PLACE})`, "du");
-const DSO_LOWER_PLACE_RE = new RegExp(`(?:^|[^\\p{L}])(?:(?:${DSO_DOCUMENT_NOUNS_CASED})\\s+(?:van\\s+|of\\s+)?|in\\s+)(${DSO_LOWER_PLACE})(?=\\s*(?:[?.!,]|over\\b|voor\\b|\\d|$))`, "du");
-/** Lowercase words that are no place after those cues. */
-const DSO_LOWER_NOT_A_PLACE = new Set([
-  "de", "het", "een", "die", "dat", "deze", "dit", "mijn", "onze", "uw", "alle", "elke", "welke", "wat", "regels", "regel", "over", "voor", "met", "zonder",
-  "heel", "nationale", "rijk", "nu", "er", "hier", "daar", "toepassing", "werking", "kracht", "inzage", "ontwerp", "ontwerpen", "gemeente", "provincie",
-  "waterschap", "buurt", "wijk", "centrum", "stad", "dorp", "totaal", "principe", "feite", "gebruik", "voorbereiding", "ontwikkeling", "belang", "geval",
-  "kaart", "praktijk", "algemeen", "wijzigen", "gewijzigd", "vastgesteld", "zien", "vinden", "bouwen",
-]);
-/** Words that open a question or describe a document: no place, also when capitalised before a document word. */
-const DSO_NOT_A_PLACE_START = new Set([
-  "welke", "welk", "wat", "wie", "waar", "wanneer", "hoe", "hoeveel", "is", "zijn", "heeft", "hebben", "toon", "geef", "laat", "lees", "zoek", "mag", "kan",
-  "geldt", "gelden", "ligt", "liggen", "wordt", "de", "het", "een", "nieuwste", "nieuwe", "recente", "recentste", "laatste", "alle", "nationale", "ontwerp",
-  "ontwerpen", "gemeentelijke", "provinciale", "huidige", "oude", "geldende", "actuele", "vigerende", "which", "what", "show", "the", "all", "list", "mijn",
-  "onze", "uw", "dit", "deze", "die", "elk", "elke",
-]);
-/** Words a place name cannot hold: it ends before them ("provincie Gelderland de Omgevingswet"). */
-const DSO_NOT_A_PLACE_WORD_RE = new RegExp(`^(?:\\p{L}*wet|${DSO_DOCUMENT_NOUNS.join("|")}|raad|staten|kamer|regels?|artikel|hoofdstuk|afdeling|paragraaf|bijlage|novi|dso)$`, "iu");
-/** English names of places the DSO knows in Dutch. */
-const DSO_ENGLISH_PLACES: Record<string, string> = { "north holland": "Noord-Holland", "south holland": "Zuid-Holland", "north brabant": "Noord-Brabant", "the hague": "Den Haag", frisia: "Fryslân" };
-/** Provincie names no gemeente shares: "in Noord-Holland" is an area like "in de provincie Noord-Holland". */
-const DSO_PROVINCES = new Set(["noord-holland", "zuid-holland", "noord-brabant", "brabant", "gelderland", "overijssel", "drenthe", "friesland", "fryslân", "flevoland", "limburg", "zeeland"]);
-/** Capitalised words that name no place: an unscoped list question with any other capitalised word is not answered nationwide. */
-const DSO_NOT_A_PLACE_CAPITAL = new RegExp(`^(?:${DSO_DOCUMENT_NOUNS.join("|")}|novi|dso|rijk|nationale|nederland|europa|regels|kaart|omgevingswet|ontwerp\\p{L}*)$`, "iu");
-
-/** A body or place the question names ("gemeente Utrecht", "Utrecht"), and where it stands in the question. */
-interface DsoPlaceHit {
-  name: string;
-  start: number;
-  end: number;
-}
-
-/** A place cut where it runs on into the question ("Gelderland de Omgevingswet"), English names in Dutch, no country. */
-function dsoPlace(captured: string | undefined, start: number): DsoPlaceHit | undefined {
-  const words = (captured ?? "").replace(/[?.,;:!)]+$/, "").split(/\s+/).filter(Boolean);
-  if (!words.length || DSO_NOT_A_PLACE_WORD_RE.test(words[0])) return undefined;
-  let end = words.findIndex((w, i) => i > 0 && DSO_NOT_A_PLACE_WORD_RE.test(w));
-  if (end < 0) end = words.length;
-  while (end > 1 && PLACE_INFIX_WORDS.has(words[end - 1].toLowerCase())) end--;
-  const place = words.slice(0, end).join(" ");
-  if (place.length < 2 || /^(?:nederland|europa|eu|(?:the\s+)?netherlands)$/i.test(place)) return undefined;
-  return { name: DSO_ENGLISH_PLACES[place.toLowerCase()] ?? place, start, end: start + place.length };
-}
-
-/** The place in a pattern's capture group (the pattern has the "d" flag). */
-function dsoPlaceIn(re: RegExp, text: string, group = 1): DsoPlaceHit | undefined {
-  const m = re.exec(text);
-  return m?.[group] && m.indices?.[group] ? dsoPlace(m[group], m.indices[group][0]) : undefined;
-}
-
-/** A place in a lowercase question, unless it is a common word after the same cue ("in werking", "van toepassing"). */
-function dsoLowerPlaceIn(re: RegExp, text: string, group: number): DsoPlaceHit | undefined {
-  const hit = dsoPlaceIn(re, text, group);
-  return hit && !hit.name.split(/\s+/).some((w) => DSO_LOWER_NOT_A_PLACE.has(w)) ? hit : undefined;
-}
-
-/** Replace a span by "§", so the checks after it neither read it nor join words across it. */
-function dsoMask(text: string, hit: { start: number; end: number } | undefined): string {
-  return hit ? text.slice(0, hit.start) + "§".repeat(Math.max(0, hit.end - hit.start)) + text.slice(hit.end) : text;
-}
-
-interface DsoAddressHit {
-  /** As the search's locatie takes it: "Brennerbaan 150, Utrecht", "3524 BN 150". */
-  locatie: string;
-  /** A street with a street ending, or with a postcode, or a postcode; else only capitalised words before a number. */
-  strict: boolean;
-  /** A place or postcode is written behind it. */
-  hasPlace: boolean;
-  start: number;
-  end: number;
-}
-
-/** The postcode, or the place, written behind an address that ends at `end`. */
-function dsoAfterAddress(text: string, end: number): { place?: string; postcode?: string; end: number } {
-  DSO_POSTCODE_AFTER_RE.lastIndex = end;
-  const pc = DSO_POSTCODE_AFTER_RE.exec(text);
-  const postcode = pc && !DSO_POSTCODE_UNITS.has(pc[2]) ? `${pc[1]} ${pc[2]}` : undefined;
-  if (postcode) end = DSO_POSTCODE_AFTER_RE.lastIndex;
-  DSO_PLACE_AFTER_RE.lastIndex = end;
-  const m = DSO_PLACE_AFTER_RE.exec(text);
-  const place = m ? dsoPlace(m[1], DSO_PLACE_AFTER_RE.lastIndex - m[1].length) : undefined;
-  return { postcode, place: place?.name, end: place?.end ?? end };
-}
-
-/**
- * The address a question names: a street that ends like one ("Brennerbaan",
- * "Grote Markt", "Laan van Meerdervoort") with a house number, or a postcode
- * after "op", "postcode" or "adres", each with the place or postcode written
- * behind it. Without a street suffix only capitalised words and a number
- * with a place behind them, which counts only next to a document word.
- */
-function dsoAddress(text: string): DsoAddressHit | undefined {
-  let lenient: DsoAddressHit | undefined;
-  for (const m of text.matchAll(DSO_ADDRESS_RE)) {
-    let [start] = m.indices![1];
-    const numberEnd = m.indices![2][1];
-    const words = m[1].split(/\s+/);
-    // "Op Brennerbaan 150" at the start: the word opens the address, it is no part of the street.
-    const led = words.length > 1 && DSO_ADDRESS_LEAD_WORDS.has(words[0].toLowerCase());
-    if (led) start += words.shift()!.length + 1;
-    const next = /^\s*([\p{L}%]+)/u.exec(text.slice(numberEnd, numberEnd + 24))?.[1]?.toLowerCase();
-    if (next && DSO_NOT_AFTER_HOUSE_NUMBER.has(next)) continue;
-    const head = words.find((w) => /^\p{Lu}/u.test(w) && !/^(?:Eerste|Tweede|Derde|Vierde)$/.test(w))?.toLowerCase() ?? "";
-    if (DSO_NOT_A_STREET.has(head)) continue;
-    const after = dsoAfterAddress(text, numberEnd);
-    const hit: DsoAddressHit = {
-      locatie: [`${words.join(" ")} ${m[2]}`, after.postcode ?? after.place].filter(Boolean).join(", "),
-      strict: dsoStrictStreet(words) || Boolean(after.postcode),
-      hasPlace: Boolean(after.postcode ?? after.place),
-      start,
-      end: after.end,
-    };
-    if (hit.strict) return hit;
-    // Without a street ending: after "op", "voor" and the like, and with a place behind it.
-    if (!lenient && after.place && (m.indices![1][0] > 0 || led)) lenient = hit;
-  }
-  for (const m of text.matchAll(DSO_POSTCODE_RE)) {
-    if (DSO_POSTCODE_UNITS.has(m[2])) continue;
-    const [start, end] = [m.indices![1][0], m.indices![2][1]];
-    DSO_NUMBER_AFTER_RE.lastIndex = end;
-    const number = DSO_NUMBER_AFTER_RE.exec(text);
-    if (!number && !DSO_BEFORE_POSTCODE_RE.test(text.slice(Math.max(0, start - 12), start))) continue;
-    const after = dsoAfterAddress(text, number ? DSO_NUMBER_AFTER_RE.lastIndex : end);
-    return { locatie: [`${m[1]} ${m[2]}`, number?.[1]].filter(Boolean).join(" "), strict: true, hasPlace: true, start, end: after.end };
-  }
-  return lenient;
-}
-
-/**
- * A street name: its last word ends like a street and is more than the
- * ending ("Brennerbaan", "'s-Gravendijkwal"); or the bare ending after
- * another capitalised word ("Grote Markt"); or a street word opening the
- * name ("Laan van Meerdervoort", "Weg der Verenigde Naties"). Not "Ring 10",
- * "de Dam 4 mei" or "Amsterdam 31".
- */
-function dsoStrictStreet(words: string[]): boolean {
-  const named = words.filter((w) => !/^\d/.test(w));
-  const capitals = named.filter((w) => /^(?:\p{Lu}|['’]s-)/u.test(w)).length;
-  const last = (named[named.length - 1] ?? "").toLowerCase().replace(/^['’]s-/, "");
-  const suffix = DSO_STREET_SUFFIX_RE.exec(last)?.[0];
-  if (suffix) return last.length > suffix.length ? !DSO_PLACES_LIKE_STREETS.has(last) : capitals >= 2;
-  return named.length >= 3 && DSO_STREET_SUFFIX_WORD_RE.test(named[0].toLowerCase()) && DSO_STREET_INFIX_RE.test(named[1]);
-}
-
-/** The question's words outside the masked spans, all from the given sets. */
-function dsoOnlyWords(text: string, ...allowed: ReadonlySet<string>[]): boolean {
-  return dsoWords(text).every((w) => allowed.some((set) => set.has(w)));
-}
-
-/** Words a question about the rules at an address may hold besides the address and its place. */
-const DSO_ADDRESS_QUESTION_WORDS = new Set([
-  ...Object.keys(DUTCH_MONTHS),
-  "welke", "welk", "wat", "zijn", "is", "er", "zit", "zitten", "de", "het", "een", "op", "aan", "bij", "voor", "nabij", "rond", "rondom", "in", "te", "ter", "van",
-  "en", "of", "ook", "nu", "hier", "daar", "dit", "deze", "die", "dat", "mijn", "ons", "onze", "me", "mij", "ik", "je", "u", "men", "we", "wij", "nog", "al",
-  "alle", "allemaal", "precies", "eigenlijk", "graag", "toon", "laat", "zien", "geef", "noem", "lijst", "overzicht", "gelden", "geldt", "golden", "gold",
-  "geldig", "geldende", "actuele", "huidige", "toepassing", "momenteel", "vandaag", "per", "vanaf", "tot", "sindsdien", "bijgekomen", "gewijzigd", "veranderd",
-  "nieuw", "nieuwe", "adres", "postcode", "huisnummer", "locatie", "perceel", "kavel", "pand", "huis", "woning", "tuin", "achtertuin", "voortuin", "plek",
-  "grond", "terrein", "onder",
-  "rijk", "gemeente", "provincie", "waterschap", "gemeentelijke", "provinciale", "kan", "kun", "kunt", "kunnen", "hoe", "hoog", "hoger", "groot", "groter",
-  "diep", "breed", "ver", "which", "what", "are", "the", "at", "on", "for", "there", "my", "to", "can", "apply", "applies",
-]);
-/** Rule words: "Welke regels gelden op <adres>". */
-const DSO_ADDRESS_RULE_WORDS = new Set(["regels", "regel", "regelgeving", "regelingen", "regeling", "omgevingsregels", "omgevingsplanregels", "waterschapsregels", "bouwregels", "rules", "regulations", "zoning"]);
-/** Permission words: "Mag ik een dakkapel plaatsen op <adres>", with a building topic. */
-const DSO_ADDRESS_PERMISSION_WORDS = new Set(["mag", "mogen", "toegestaan", "verboden", "vergunningvrij", "vergunningsvrij", "vergunningplichtig", "vergunningsplichtig", "allowed"]);
-/** What one builds or changes on a plot: the topics of an omgevingsplan and the Bbl. */
-const DSO_BUILDING_TOPICS = new Set([
-  "bouwen", "bouw", "verbouwen", "bijbouwen", "plaatsen", "maken", "aanleggen", "neerzetten", "zetten", "slopen", "sloop", "kappen", "vellen", "splitsen",
-  "dakkapel", "dakkapellen", "aanbouw", "uitbouw", "opbouw", "dakopbouw", "optopping", "bijgebouw", "bijgebouwen", "bijbehorend", "bijbehorende", "bouwwerk",
-  "bouwwerken", "schuur", "schuurtje", "schutting", "erfafscheiding", "hek", "hekwerk", "tuinhuis", "tuinhuisje", "blokhut", "carport", "overkapping", "veranda",
-  "serre", "uitrit", "inrit", "boom", "bomen", "zonnepanelen", "dakterras", "balkon", "gevel", "kozijnen", "airco", "warmtepomp", "bed", "and", "breakfast", "b",
-  "mantelzorgwoning", "woningsplitsing", "bouwhoogte", "goothoogte", "hoogte", "bouwvlak", "bestemming", "functie", "gebruik", "wonen", "build", "extension",
-]);
-/** Words a question for the ontwerpen ter inzage of a body or place may hold besides that name. */
-const DSO_ONTWERP_QUESTION_WORDS = new Set([
-  ...Object.keys(DUTCH_MONTHS),
-  "welke", "welk", "wat", "zijn", "is", "er", "liggen", "ligt", "lagen", "lag", "nu", "momenteel", "op", "dit", "moment", "ter", "inzage", "ontwerp",
-  "ontwerpen", "de", "het", "een", "in", "bij", "van", "alle", "nog", "toon", "geef", "overzicht", "lijst", "recent", "recente", "nieuwste", "laatste", "open",
-  "zie", "zien", "laat", "kan", "ik", "gemeente", "provincie", "waterschap", "hoogheemraadschap", "wetterskip", "vandaag",
-]);
-
-/** "ontwerp" or "ontwerpen" as a word of its own: "ontwerpbegroting" and "wetsontwerp" are other documents. */
-const DSO_ONTWERP_WORD_RE = /(?:^|[^\p{L}-])ontwerp(?:en)?(?=$|[^\p{L}-])/iu;
-const DSO_TER_INZAGE_RE = /\bter\s+inzage\b|\binzagetermijn(?:en)?\b/i;
-/** "de Nationale Omgevingsvisie", "de programma's van het Rijk": the Rijk's documents (bevoegd gezag type ministerie). */
-const DSO_RIJK_RE = /(?:^|[^\p{L}])(?:nationale|het\s+rijk)(?=$|[^\p{L}])/iu;
-const DSO_APPLY_RE = /(?:^|[^\p{L}])(?:gelden|geldt|golden|gold|van\s+toepassing)(?=$|[^\p{L}])/iu;
-const DSO_RECENT_RE = /(?:^|[^\p{L}])(?:nieuwste|recentste|recente?|laatste|onlangs|net\s+(?:gepubliceerd|vastgesteld))(?=$|[^\p{L}])/iu;
-/** "gelden op 1 januari 2025": the day the question asks the rules for (geldigOp). */
-const DSO_VALIDITY_RE = /(?:^|[^\p{L}])(?:gelden|geldt|golden|gold|geldig|van\s+kracht|in\s+werking)(?=$|[^\p{L}])/iu;
-
-/** The calendar days a question names: "1 januari 2025", "2025-01-01", "1-1-2025". */
-function explicitDays(text: string): string[] {
-  const days = new Set<string>();
-  const add = (y: number, m: number, d: number) => {
-    const date = new Date(Date.UTC(y, m - 1, d));
-    if (date.getUTCFullYear() === y && date.getUTCMonth() === m - 1 && date.getUTCDate() === d) days.add(date.toISOString().slice(0, 10));
-  };
-  for (const m of text.matchAll(/(?<![\d-])(\d{4})-(\d{2})-(\d{2})(?![\d-])/g)) add(Number(m[1]), Number(m[2]), Number(m[3]));
-  for (const m of text.matchAll(/(?<![\d/-])(\d{1,2})[-/](\d{1,2})[-/](\d{4})(?![\d/-])/g)) add(Number(m[3]), Number(m[2]), Number(m[1]));
-  for (const m of text.matchAll(/(?<!\d)(\d{1,2})\s+(\p{L}+)\.?\s+(\d{4})(?!\d)/gu)) {
-    const month = DUTCH_MONTHS[m[2].toLowerCase()];
-    if (month) add(Number(m[3]), month, Number(m[1]));
-  }
-  return [...days];
-}
-
-/** What nl_gov_ask passes to dso_omgevingsdocumenten_search; the field names are the search's own. */
-export type DsoIntent = Pick<DsoSearchArgs, "locatie" | "bevoegdGezag" | "typeBevoegdGezag" | "documentType" | "soort" | "alleenTerInzage" | "geldigOp"> & {
-  /** An area: the provincie's own documents and those of every gemeente in it (the search's `provincie`). */
-  provincie?: string;
-};
-
-/**
- * A question about Omgevingswet documents, for the DSO. Precision first: a
- * question another route answered before the DSO route keeps that route.
- *  - It names a document (omgevingsplan, omgevingsvisie, omgevingsverordening,
- *    waterschapsverordening, omgevingsprogramma, omgevingsdocument,
- *    voorbereidingsbesluit, voorbeschermingsregels, projectbesluit,
- *    ontwerpregeling, "regels op de kaart", NOVI) with a scope (address,
- *    place, body, provincie area, the Rijk), or asks for a list or the
- *    newest, or for ontwerpen;
- *  - or it asks which rules apply at an address (a street with a street
- *    ending and a house number, or a postcode), with nothing but rule,
- *    permission and building words besides ("Welke regels gelden op
- *    Brennerbaan 150, Utrecht?", "Mag ik een dakkapel plaatsen op ...");
- *  - or it asks for the ontwerpen ter inzage of a named gemeente, provincie,
- *    waterschap or place, and for nothing else.
- * Never: a question longer than DSO_QUESTION_MAX_CHARS; a question about the
- * law, a definition or how something works; one about money, procedures,
- * participation, the council, Staten, parliament or government; one that
- * names another source or another kind of document (dsoOtherRoute).
- *
- * Where: an address becomes `locatie` with the place or postcode written
- * behind it (or "in Utrecht" elsewhere); "in de provincie X", or "in
- * Noord-Holland", asking for ontwerpen, all documents or omgevingsplannen is
- * the area `provincie`; a verordening "in <gemeente>" is the point there;
- * otherwise the body or place the question names is `bevoegdGezag`. What:
- * documentType when the question names one kind; "ontwerp" or "ter inzage"
- * asks for ontwerpregelingen; a day the rules "gelden op" is geldigOp.
- * `maxChars` is for tests that time the detector on long input.
- */
-export function detectDsoIntent(question: string, maxChars = DSO_QUESTION_MAX_CHARS): DsoIntent | undefined {
-  const text = String(question ?? "");
-  if (text.length > maxChars) return undefined;
-  const raw = text.replace(/\s+/g, " ").trim();
-  if (!raw) return undefined;
-
-  // The address and the neutral qualifiers are read first and masked, so a
-  // street name ("Burgemeester Reigerstraat") is no council word below.
-  const neutral = raw.replace(DSO_NEUTRAL_PHRASE_RE, (m) => "§".repeat(m.length));
-  const address = dsoAddress(neutral);
-  let masked = dsoMask(neutral, address);
-  if (dsoOtherRoute(masked)) return undefined;
-
-  const documentWords = DSO_DOCUMENT_WORDS_RE.test(masked) || DSO_NOVI_RE.test(masked);
-  const terInzage = DSO_TER_INZAGE_RE.test(masked);
-  const ontwerp = terInzage || /(?:^|[^\p{L}])ontwerp/iu.test(masked);
-  const types = [...new Set(DSO_TYPE_WORDS.filter(([re]) => re.test(masked)).map(([, type]) => type))];
-  const documentType = types.length === 1 ? types[0] : undefined;
-  const plural = DSO_PLURAL_DOCUMENT_RE.test(masked);
-  const lowercase = !/\p{Lu}/u.test(raw.slice(1));
-
-  // Bodies and places, each masked once read.
-  const english = DSO_ENGLISH_BODY_RE.exec(masked);
-  const englishBody = english?.indices?.[2] ? dsoPlace(english[2], english.indices[2][0]) : undefined;
-  const lowerBody = lowercase ? DSO_LOWER_BODY_RE.exec(masked) : null;
-  const lowerBodyPlace = lowerBody ? dsoLowerPlaceIn(DSO_LOWER_BODY_RE, masked, 2) : undefined;
-  const body =
-    dsoPlaceIn(DSO_BODY_RE, masked) ??
-    (englishBody && english ? { ...englishBody, name: `${/^p/i.test(english[1]) ? "provincie" : "gemeente"} ${englishBody.name}` } : undefined) ??
-    (lowerBodyPlace && lowerBody ? { ...lowerBodyPlace, name: `${lowerBody[1]} ${lowerBodyPlace.name}` } : undefined);
-  const area = dsoPlaceIn(DSO_PROVINCE_AREA_RE, masked);
-  masked = dsoMask(dsoMask(masked, area), body);
-  const documentPlace = DSO_DOCUMENT_PLACE_RE.exec(masked);
-  const nextTo = documentPlace?.indices?.[2] ? dsoPlace(documentPlace[2], documentPlace.indices[2][0]) : undefined;
-  // "het omgevingsplan voor Utrecht" yields to "in": "een voorbereidingsbesluit voor Lunetten in Utrecht".
-  const forPlace = /^(?:[Vv]oor|for)$/.test(documentPlace?.[1] ?? "");
-  const inPlace = dsoPlaceIn(DSO_IN_PLACE_RE, masked);
-  const placeFirst = dsoPlaceIn(DSO_PLACE_DOCUMENT_RE, masked);
-  // Without a document word only "in <place>" counts: "gelden voor Airbnb" names no place.
-  const place = !documentWords
-    ? inPlace
-    : ((forPlace ? undefined : nextTo) ??
-      inPlace ??
-      nextTo ??
-      dsoPlaceIn(DSO_VERB_PLACE_RE, masked) ??
-      (placeFirst && !DSO_NOT_A_PLACE_START.has(placeFirst.name.split(" ")[0].toLowerCase()) && !/(?:se|sche)$/i.test(placeFirst.name) ? placeFirst : undefined) ??
-      dsoPlaceIn(DSO_OF_PLACE_RE, masked) ??
-      (lowercase ? dsoLowerPlaceIn(DSO_LOWER_PLACE_RE, masked, 1) : undefined));
-  const placeFromIn = Boolean(place && place === inPlace);
-  masked = dsoMask(masked, place);
-
-  // Which rules apply at an address, and nothing else.
-  const words = dsoWords(masked);
-  const ruleWord = words.some((w) => DSO_ADDRESS_RULE_WORDS.has(w));
-  const permission = words.some((w) => DSO_ADDRESS_PERMISSION_WORDS.has(w)) && words.some((w) => DSO_BUILDING_TOPICS.has(w));
-  const addressRules =
-    Boolean(address?.strict) &&
-    (ruleWord || permission) &&
-    dsoOnlyWords(masked, DSO_ADDRESS_QUESTION_WORDS, DSO_ADDRESS_RULE_WORDS, DSO_ADDRESS_PERMISSION_WORDS, DSO_BUILDING_TOPICS);
-  // The ontwerpen ter inzage of a body or place, and nothing else.
-  const ontwerpenTerInzage = DSO_ONTWERP_WORD_RE.test(masked) && terInzage && Boolean(body || area || place) && dsoOnlyWords(masked, DSO_ONTWERP_QUESTION_WORDS);
-  if (!documentWords && !addressRules && !ontwerpenTerInzage) return undefined;
-
-  // An address keeps its place; without one written behind it, the place the question names elsewhere.
-  const addressPlace = address && !address.hasPlace ? (body?.name.replace(/^gemeente\s+/i, "") ?? place?.name) : undefined;
-  const verordeningHere =
-    placeFromIn && !body && (documentType === "waterschapsverordening" || (documentType === "omgevingsverordening" && !DSO_PROVINCES.has(place!.name.toLowerCase())));
-  const locatie =
-    address && (address.strict || documentWords)
-      ? [address.locatie, addressPlace].filter(Boolean).join(", ")
-      : // A verordening "in Amersfoort" is the one that applies there, not the gemeente's own (none).
-        documentWords && verordeningHere
-        ? place!.name
-        : // "Welke omgevingsplannen gelden er op Schiphol?": the point.
-          documentWords && !body && !place && !area && DSO_APPLY_RE.test(masked)
-          ? dsoPlaceIn(DSO_AT_PLACE_RE, masked)?.name
-          : undefined;
-
-  // "in de provincie Utrecht" is an area when the question asks for ontwerpen,
-  // for documents of every kind or in the plural, or for omgevingsplannen,
-  // which only gemeenten adopt ("provincie Utrecht" + omgevingsplan is one
-  // too); so is a provincie's own name "in Noord-Holland". "de omgevingsvisie
-  // van de provincie Utrecht" is the provincie's own.
-  const areaWanted = ontwerp || !documentType || documentType === "omgevingsplan" || plural;
-  const provincieBody = body && /^provincie\s/i.test(body.name) ? body.name.replace(/^provincie\s+/i, "") : undefined;
-  const provinceNamed = place && !body && DSO_PROVINCES.has(place.name.toLowerCase()) ? place.name : undefined;
-  const provincie = locatie
-    ? undefined
-    : area && areaWanted
-      ? area.name
-      : provincieBody && documentType === "omgevingsplan"
-        ? provincieBody
-        : provinceNamed && (documentType === "omgevingsplan" || (placeFromIn && areaWanted))
-          ? provinceNamed
-          : undefined;
-  const bevoegdGezag = locatie || provincie ? undefined : (body?.name ?? place?.name ?? (area ? `provincie ${area.name}` : undefined));
-  const typeBevoegdGezag = locatie || bevoegdGezag || provincie
-    ? undefined
-    : /\b(?:gemeenten|gemeentes)\b/i.test(masked)
-      ? "gemeente"
-      : /\bprovincies\b/i.test(masked)
-        ? "provincie"
-        : /\bwaterschappen\b/i.test(masked)
-          ? "waterschap"
-          : DSO_RIJK_RE.test(masked) || DSO_NOVI_RE.test(masked)
-            ? "ministerie"
-            : undefined;
-  // Only a single day the rules "gelden op"; a year or a period stays today's list (the route says so).
-  const days = !ontwerp && DSO_VALIDITY_RE.test(masked) ? explicitDays(raw) : [];
-  const geldigOp = days.length === 1 ? days[0] : undefined;
-
-  if (!locatie && !bevoegdGezag && !provincie && !typeBevoegdGezag) {
-    // Nowhere: only a list, the newest documents or ontwerpen, and not when a
-    // capitalised word that may be a place went unread ("Omgevingsplan Artikel 22").
-    const list = (plural && DSO_LIST_RE.test(masked)) || DSO_RECENT_RE.test(masked) || ontwerp;
-    const unread = raw
-      .split(/[^\p{L}'’-]+/u)
-      .slice(1)
-      .some((w) => /^\p{Lu}/u.test(w) && !w.split("-").some((part) => DSO_NOT_A_PLACE_CAPITAL.test(part.replace(/['’]s$/, ""))));
-    if (!list || unread) return undefined;
-  }
-  return {
-    ...(locatie ? { locatie } : {}),
-    ...(bevoegdGezag ? { bevoegdGezag } : {}),
-    ...(provincie ? { provincie } : {}),
-    ...(typeBevoegdGezag ? { typeBevoegdGezag } : {}),
-    ...(documentType ? { documentType } : {}),
-    ...(ontwerp ? { soort: "ontwerpregelingen" as const } : {}),
-    ...(terInzage ? { alleenTerInzage: true } : {}),
-    ...(geldigOp ? { geldigOp } : {}),
-  };
-}
-
-/**
- * A question about an address gets every bestuurslaag that has rules at that
- * point (about 25 documents in a city); cut at `top`, the Rijk went missing.
- * The search's own default for a locatie.
- */
-const DSO_LOCATIE_ROWS = 50;
-
-/**
- * How long nl_gov_ask waits for the DSO. A cold catalogue takes about 5 s; a
- * hanging DSO retries for up to a minute, past the 60 s an MCP client waits.
- */
-const DSO_ROUTE_DEADLINE_MS = 20_000;
-
-/** The rows nl_gov_ask asks the DSO for. */
-function dsoRows(intent: DsoIntent, top: number): number {
-  return intent.locatie ? Math.max(top, DSO_LOCATIE_ROWS) : top;
-}
-
-/** The bestuurslagen in the order the search sorts an address answer, with their TOOI code prefix. */
-const DSO_LAYERS: Array<{ layer: string; code: RegExp; label: string }> = [
-  { layer: "gemeente", code: /^gm\d/i, label: "gemeente" },
-  { layer: "waterschap", code: /^ws\d/i, label: "waterschap" },
-  { layer: "provincie", code: /^pv\d/i, label: "provincie" },
-  { layer: "ministerie", code: /^mnre\d/i, label: "Rijk" },
-];
-
-function dsoLayerOf(item: DsoSearchItem): string {
-  const laag = (item.bestuurslaag ?? "").toLowerCase();
-  return DSO_LAYERS.find((l) => l.code.test(item.bevoegdGezagCode ?? "") || laag.startsWith(l.layer))?.layer ?? "overig";
-}
-
-/**
- * An address answer in bestuurslaag order (as the search sorts it) whose first
- * page holds one document of every layer: cut at the page size, the Rijk and
- * often the provincie fell off. The rest follows in order on the next pages.
- */
-function dsoLayerFirstPage(items: DsoSearchItem[], pageSize: number): DsoSearchItem[] {
-  if (items.length <= pageSize) return items;
-  const page = new Set<DsoSearchItem>();
-  const layers = new Set<string>();
-  for (const item of items) {
-    if (page.size >= pageSize) break;
-    const layer = dsoLayerOf(item);
-    if (!layers.has(layer)) {
-      layers.add(layer);
-      page.add(item);
-    }
-  }
-  for (const item of items) {
-    if (page.size >= pageSize) break;
-    page.add(item);
-  }
-  return [...items.filter((x) => page.has(x)), ...items.filter((x) => !page.has(x))];
-}
-
-/** "Op dit punt: 26 documenten (gemeente 3, waterschap 2, provincie 6, Rijk 15)". */
-function dsoLayerNote(items: DsoSearchItem[], pageSize: number): string {
-  const counts = [...DSO_LAYERS, { layer: "overig", label: "overig" }]
-    .map(({ layer, label }) => [label, items.filter((x) => dsoLayerOf(x) === layer).length] as const)
-    .filter(([, n]) => n > 0)
-    .map(([label, n]) => `${label} ${n}`);
-  const more = items.length > pageSize ? `; de eerste ${pageSize} tonen elke bestuurslaag, de rest volgt met offset ${pageSize}` : "";
-  return `Op dit punt: ${items.length} ${items.length === 1 ? "document" : "documenten"} (${counts.join(", ")})${more}.`;
-}
-
-/** The DSO request nl_gov_ask plans for a question (dryRun). */
-function dsoPlannedRequests(intent: DsoIntent, question: string, top: number) {
-  const soort = intent.soort ?? "regelingen";
-  const zoek = Boolean(intent.locatie || intent.bevoegdGezag || intent.provincie);
-  const rows = dsoRows(intent, top);
-  return [
-    {
-      connector: "dso_omgevingsdocumenten",
-      method: zoek ? "POST" : "GET",
-      url: `${DSO_PRESENTEREN_BASE}/${soort}${zoek ? "/_zoek" : ""}`,
-      params: {
-        ...(intent.locatie ? { locatie: intent.locatie } : {}),
-        ...(intent.bevoegdGezag ? { bevoegdGezag: intent.bevoegdGezag } : {}),
-        ...(intent.provincie ? { provincie: intent.provincie } : {}),
-        ...(intent.typeBevoegdGezag ? { typeBevoegdGezag: intent.typeBevoegdGezag } : {}),
-        ...(intent.documentType ? { documentType: intent.documentType } : {}),
-        soort,
-        ...(intent.alleenTerInzage ? { alleen_ter_inzage: true } : {}),
-        ...(intent.geldigOp ? { geldigOp: intent.geldigOp } : {}),
-        question,
-        top,
-        ...(rows !== top ? { rows } : {}),
-      },
-    },
-  ];
-}
-
-/** Topic words after "over"/"voor" that the DSO search does not look at (it searches titles and metadata). */
-const DSO_TOPIC_RE = /(?:^|[^\p{L}])(?:over|voor|betreffende|inzake)\s+((?:\p{Ll}[\p{L}-]*)(?:\s+(?:en|of|\p{Ll}[\p{L}-]*))*)/u;
-const DSO_NOT_A_TOPIC = [
-  "regels", "regel", "regelgeving", "gelden", "geldt", "golden", "gold", "staat", "staan", "zegt", "over", "voor",
-  "omgevingswet", "documenten", "document", "adres", "locatie", "gemeente", "provincie", "waterschap", "mij", "mijn",
-  "huis", "woning", "perceel", "kavel", "plek", "plaats", "gebied", "nu", "er",
-  // Words the route already turned into parameters: the Rijk, the newest, ontwerpen ter inzage, a layer.
-  "nationale", "rijk", "nieuwste", "recentste", "recente", "laatste", "ontwerp", "ontwerpen", "ter", "inzage",
-  "gemeenten", "provincies", "waterschappen",
-];
-
-/** The topic words of a DSO question that no search parameter carries ("over dakkapellen"); `used` holds the parameter values. */
-function dsoTopicWords(question: string, used: string[]): string[] {
-  const tail = DSO_TOPIC_RE.exec(question)?.[1] ?? "";
-  const usedWords = used.flatMap(dsoWords);
-  return tail ? extractKeywords(tail, { exclude: [...DSO_NOT_A_TOPIC, ...usedWords] }).filter((w) => !DSO_DOCUMENT_WORDS_RE.test(w) && !usedWords.includes(w.toLowerCase())) : [];
-}
-
-/** A year the question asks a period for ("in 2025", "sinds 2024"), not one in a title ("Omgevingsvisie Amsterdam 2050"). */
-const DSO_PERIOD_YEAR_RE = /(?:^|[^\p{L}])(?:in|sinds|vanaf|tot|tussen|uit|per|tijdens|na)\s+(?:het\s+jaar\s+)?(?:19|20)\d\d(?!\d)/iu;
-
-/**
- * The search's notes in nl_gov_ask's terms: nl_gov_ask has no `rows` (the
- * paging note names `top`) and no `provincie` parameter ("in de provincie X").
- */
-function dsoRouterNote(note: string | undefined, bevoegdGezagNaam?: string): string | undefined {
-  const provincie = bevoegdGezagNaam?.replace(/^provincie\s+/i, "");
-  return note
-    ?.replace(/Niet getoond \(rows (\d+)\)/g, "Niet getoond (nl_gov_ask haalt er $1 op)")
-    .replace(/; verhoog rows (?:naar \d+|\(max \d+\)) voor de volledige lijst\./g, ".")
-    .replace(/Voor de provincie met al haar gemeenten: provincie '(pv\d+)'\./g, (_, code: string) => `Voor de provincie met al haar gemeenten: vraag naar 'in de provincie ${provincie ?? code}'.`);
-}
-
-/**
- * How long nl_gov_ask's document search waits for its sources. Tweede Kamer
- * regularly needs 30 s or times out; the other sources answer within a few
- * seconds, so the answer goes out without a straggler and names it.
- */
-const POLICY_SEARCH_DEADLINE_MS = 10_000;
-
-/**
- * Keyword terms as a query for the sources that read quoted phrases: ORI
- * (Elasticsearch query_string), Tweede Kamer (parseTkQuery matches a quoted
- * term as a whole phrase) and Officiële Bekendmakingen (freeTextCqlPlan keeps
- * a quoted phrase). Multi-word terms (names, quoted phrases, "open data
- * portaal") become phrases; unquoted, each source made every word a term of
- * its own, so "open data portaal" matched any document with "data" in it.
- *
- * A term in `loose` goes as its words: a run of capitalised words that the
- * keywords grouped into one term (extractKeywordTerms kind "name") is often
- * no phrase in the documents. Tweede Kamer and Officiële Bekendmakingen AND
- * every word, and "Schiphol Geluidsoverlast" or "Wet Kwaliteitsborging
- * Bouwen" as a phrase found nothing or unrelated publications.
- */
-export function toPhraseQuery(terms: string[], loose: ReadonlySet<string> = new Set()): string {
-  return terms.map((t) => (t.includes(" ") && !loose.has(t) ? `"${t.replace(/"/g, "")}"` : t)).join(" ");
-}
-
-/** Keyword terms as an Elasticsearch query_string for ORI, see {@link toPhraseQuery}. */
-export function toOriQuery(terms: string[]): string {
-  return toPhraseQuery(terms);
-}
-
-/**
- * A municipality as a national ORI search names it: a phrase. A loose town
- * name that is also a common word matched unrelated text (Kampen: the verb
- * "kampen met", and "kamp" through stemming), and a one-word name in
- * quotes is still that one stemmed word, so it is bound to "gemeente". A
- * longer name ("Bergen op Zoom") is a phrase of its own.
- */
-export function oriPlacePhrase(place: string): string {
-  const name = place.replace(/"/g, "").replace(/\s+/g, " ").trim().toLowerCase();
-  return /\s/.test(name) ? `"${name}"` : `"gemeente ${name}"`;
-}
-
-/**
- * Officiële Bekendmakingen refused the query: an SRU diagnostic without a
- * count or records (BekendmakingenSearchResult.diagnostic). Nothing was
- * searched, so nl_gov_ask reports it as a failure instead of "0 resultaten".
- */
-class BekendmakingenRefusedError extends Error {
-  constructor(readonly diagnostic: string) {
-    super(`Officiële Bekendmakingen weigerde de zoekvraag (SRU-diagnose: ${diagnostic}); er is niet gezocht.`);
-    this.name = "BekendmakingenRefusedError";
-  }
-}
-
-/** Throw {@link BekendmakingenRefusedError} for a refused Officiële Bekendmakingen search. */
-function assertBekendmakingenSearched(out: { items: unknown[]; diagnostic?: string }): void {
-  if (out.diagnostic && !out.items.length) throw new BekendmakingenRefusedError(out.diagnostic);
-}
-
-function dedupeMergedRecords(records: MCPRecord[]): MCPRecord[] {
-  const byId = new Map<string, MCPRecord>();
-  const passthrough: MCPRecord[] = [];
-
-  for (const rec of records) {
-    const id = getRecordIdentifier(rec);
-    if (!id) {
-      passthrough.push(rec);
-      continue;
-    }
-
-    const current = byId.get(id);
-    if (!current) {
-      byId.set(id, { ...rec, data: { ...(rec.data ?? {}) } });
-      continue;
-    }
-
-    const currentScore = metadataScore(current);
-    const nextScore = metadataScore(rec);
-    const keep = nextScore > currentScore ? { ...rec, data: { ...(rec.data ?? {}) } } : current;
-    const drop = keep === current ? rec : current;
-
-    const keepData = (keep.data ?? {}) as Record<string, unknown>;
-    const existing = Array.isArray(keepData.also_found_in)
-      ? (keepData.also_found_in as Array<Record<string, unknown>>)
-      : [];
-
-    const relation = {
-      source_name: drop.source_name,
-      canonical_url: drop.canonical_url,
-    };
-
-    const already = existing.some(
-      (x) =>
-        String(x.source_name ?? "") === relation.source_name &&
-        String(x.canonical_url ?? "") === relation.canonical_url,
-    );
-
-    keepData.also_found_in = already ? existing : [...existing, relation];
-    keep.data = keepData;
-
-    byId.set(id, keep);
-  }
-
-  return [...byId.values(), ...passthrough];
-}
 
 export function registerTools(server: McpServer): void {
   server.registerTool("data_overheid_datasets_search", {
@@ -1821,7 +393,8 @@ export function registerTools(server: McpServer): void {
       const out = await cbs.searchTables(rw.rewritten, fetchRows);
       const responseTimeMs = Date.now() - started;
 
-      const records = out.items.map((x) => record("cbs", String(x.Title ?? x.title ?? x.Identifier ?? "CBS tabel"), `https://www.cbs.nl`, x));
+      // Each table's own StatLine page; a dataset of the data.overheid.nl fallback its catalogue page.
+      const records = out.items.map((x) => record("cbs", String(x.Title ?? x.title ?? x.Identifier ?? "CBS tabel"), cbsCatalogItemUrl(x), x));
       const response = buildFormattedResponse({
         summary: `${records.length} CBS tabellen`,
         records,
@@ -2029,8 +602,6 @@ export function registerTools(server: McpServer): void {
         if (r.text_preview_source === "docx_document_xml") {
           notes.push("Tekst uit de hoofdtekst van het Word-bestand (word/document.xml); kop- en voetteksten en voetnoten zijn niet meegenomen.");
         }
-      } else if (include_text && r.text_preview_unavailable_reason === "pdf_not_extracted_in_lean_mode") {
-        notes.push("PDF text extraction is intentionally skipped in lean mode; use the resolved resource URL for downstream PDF handling.");
       } else if (include_text && r.text_preview_unavailable_reason === "content_type_not_supported") {
         notes.push(`Text preview unavailable: tekstextractie wordt voor ${contentType || "dit bestandstype"} niet ondersteund; open het bestand via download_url of resource_url.`);
       } else if (include_text && typeof r.text_preview_unavailable_reason === "string") {
@@ -2295,7 +866,7 @@ export function registerTools(server: McpServer): void {
     }
   });
 
-  server.registerTool("rijksoverheid_search", { description: "Search Rijksoverheid.nl content via the government's RSS search platform. Server-side keyword search returns at most 20 results per query, ranked by relevance, with no pagination; when the feed is full the real number of matches is unknown and total is left empty. date_from/date_to are applied server-side before that cap. Each item has date (the date Rijksoverheid.nl itself shows for the item, as an Amsterdam calendar day: for news the publication date, for documents the document date, for a revised document that of its latest version; date_from/date_to filter on this same date), issued (that date as a full timestamp), url_date (documents only: the date in the URL path, when the page was created, which for a revised document dates its first version; not when it went online) and type (page kind from the URL path: news, document, video, agenda, weblog, question_and_answer, topic, webpage); the feed carries no finer document type and no ministry. Use topic keywords. type='news' returns news only; type='all' returns news + documents + other pages.", inputSchema: { query: z.string().describe("Government topic keywords. Examples: 'energietransitie', 'pensioenwet', 'toeslagen'. Do NOT pass full questions."), top: z.number().int().min(1).max(config.limits.maxRows).default(20), type: z.enum(["news", "all"]).optional().default("news").describe("'news' = only news documents; 'all' = news + policy documents + other pages. The platform returns at most 20 items per query."), date_from: z.string().optional().describe("Start of the period, inclusive: YYYY-MM-DD, or YYYY-MM / YYYY for the first day of that month or year (Amsterdam calendar days). Filters server-side on the item's date. An unreadable value is ignored with a warning in access_note."), date_to: z.string().optional().describe("End of the period, inclusive: YYYY-MM-DD, or YYYY-MM / YYYY for the last day of that month or year (Amsterdam calendar days). Filters server-side on the item's date. An unreadable value is ignored with a warning in access_note."), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) }, annotations: TOOL_ANNOTATIONS }, async ({ query, top, type, date_from, date_to, offset, limit, outputFormat, verbose, dryRun }) => {
+  server.registerTool("rijksoverheid_search", { description: "Search Rijksoverheid.nl content via the government's RSS search platform. Server-side keyword search returns at most 20 results per query, ranked by relevance, with no pagination; when the feed is full the real number of matches is unknown and total is left empty. date_from/date_to are applied server-side before that cap. Each item has date (the date Rijksoverheid.nl itself shows for the item, as an Amsterdam calendar day: for news the publication date, for documents the document date, for a revised document that of its latest version; date_from/date_to filter on this same date), issued (that date as a full timestamp), url_date (documents only: the date in the URL path, when the page was created, which for a revised document dates its first version; not when it went online) and type (page kind from the URL path: news, document, video, agenda, weblog, question_and_answer, topic, webpage); the feed carries no finer document type and no ministry. Use topic keywords. type='news' returns news only; type='all' returns news + documents + other pages.", inputSchema: { query: z.string().max(SEARCH_QUERY_MAX).describe("Government topic keywords. Examples: 'energietransitie', 'pensioenwet', 'toeslagen'. Do NOT pass full questions."), top: z.number().int().min(1).max(config.limits.maxRows).default(20), type: z.enum(["news", "all"]).optional().default("news").describe("'news' = only news documents; 'all' = news + policy documents + other pages. The platform returns at most 20 items per query."), date_from: z.string().optional().describe("Start of the period, inclusive: YYYY-MM-DD, or YYYY-MM / YYYY for the first day of that month or year (Amsterdam calendar days). Filters server-side on the item's date. An unreadable value is ignored with a warning in access_note."), date_to: z.string().optional().describe("End of the period, inclusive: YYYY-MM-DD, or YYYY-MM / YYYY for the last day of that month or year (Amsterdam calendar days). Filters server-side on the item's date. An unreadable value is ignored with a warning in access_note."), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) }, annotations: TOOL_ANNOTATIONS }, async ({ query, top, type, date_from, date_to, offset, limit, outputFormat, verbose, dryRun }) => {
     const rw = rewriteQuery(query, "moderate");
     try {
       const effectiveLimit = limit ?? top;
@@ -2315,7 +886,7 @@ export function registerTools(server: McpServer): void {
 
       const records = out.items.map((x)=>record("rijksoverheid", String(x.title ?? x.id ?? "Rijksoverheid item"), String(x.url ?? "https://www.rijksoverheid.nl"), x, String(x.snippet ?? ""), String(x.date ?? "")));
       const response = buildFormattedResponse({
-        summary: `${records.length} resultaten`,
+        summary: pageSummary(records.length, offset, effectiveLimit, "resultaten"),
         records,
         provenance: prov("rijksoverheid_search", out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), out.total),
         outputFormat,
@@ -2341,6 +912,51 @@ export function registerTools(server: McpServer): void {
   server.registerTool("rijksoverheid_schoolholidays", { description: "Get Dutch school holiday dates. Optionally filter by year and region (noord, midden, zuid).", inputSchema: { year: z.number().int().min(2000).max(2100).optional(), region: z.string().optional() }, annotations: TOOL_ANNOTATIONS }, async ({ year, region }) => {
     try { const out = await rijksoverheid.schoolholidays({ year, region }); const records = out.items.map((x)=>record("rijksoverheid", String(x.title ?? x.name ?? x.region ?? x.id ?? "Schoolvakantie"), String(x.url ?? "https://www.rijksoverheid.nl"), x, String(x.region ?? ""), String(x.startdate ?? x.date ?? ""))); return toMcpToolPayload(successResponse({ summary: `${records.length} schoolvakantie records`, records, provenance: prov("rijksoverheid_schoolholidays", out.endpoint, out.params, records.length, records.length) })); } catch(e){ return toMcpToolPayload(mapSourceError(e, "Rijksoverheid", "https://www.rijksoverheid.nl")); }
   });
+
+  // The Rekenkamer and the SCP publish on the CMS of Rijksoverheid.nl: one RSS source
+  // (RijksoverheidSource.searchPublications), one tool per site.
+  const publicationSites = [
+    { tool: "rekenkamer_publicaties_search", site: "rekenkamer", name: "Algemene Rekenkamer", ref: "de Algemene Rekenkamer", host: "www.rekenkamer.nl", about: "audits of central government spending and policy: onderzoeksrapporten, verantwoordingsonderzoek, aandachtspunten bij begrotingen, brieven aan de Kamer", archive: "back to the 1990s", examples: "'asielprocedure', 'subsidies', 'verantwoordingsonderzoek'" },
+    { tool: "scp_publicaties_search", site: "scp", name: "Sociaal en Cultureel Planbureau (SCP)", ref: "het SCP", host: "www.scp.nl", about: "social and cultural research: rapporten, kerncijfers, Burgerperspectieven, beleidssignalementen", archive: "mostly from late 2019 on, a few older", examples: "'mantelzorg', 'eenzaamheid', 'participatiewet'" },
+  ] as const;
+  for (const p of publicationSites) {
+    server.registerTool(p.tool, { description: `Search the publications of the ${p.name} on ${p.host}: ${p.about}. Uses the site's own RSS search (the platform of Rijksoverheid.nl, which does not index ${p.host}). At most 20 results per query, ranked by relevance, no pagination; when the feed is full the real number of matches is unknown and total is left empty. Without query: the newest publications first, so date_from alone answers "what did they publish recently". date_from/date_to filter server-side, before the 20-cap, on date: the date the site shows (Amsterdam calendar day). Each record: title, url (the publication page with the full report/PDF), date, snippet (teaser only, no full text), url_date (date in the URL path: when the page was created) and type (from the URL path: document, video, file); no finer document type. Archive: ${p.archive}.`, inputSchema: { query: z.string().max(SEARCH_QUERY_MAX).optional().describe(`Topic keywords; leave empty for the newest publications. Examples: ${p.examples}. Do NOT pass full questions.`), top: z.number().int().min(1).max(config.limits.maxRows).default(20), date_from: z.string().optional().describe("Start of the period, inclusive: YYYY-MM-DD, or YYYY-MM / YYYY for the first day of that month or year (Amsterdam calendar days). An unreadable value is ignored with a warning in access_note."), date_to: z.string().optional().describe("End of the period, inclusive: YYYY-MM-DD, or YYYY-MM / YYYY for the last day of that month or year (Amsterdam calendar days). An unreadable value is ignored with a warning in access_note."), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) }, annotations: TOOL_ANNOTATIONS }, async ({ query, top, date_from, date_to, offset, limit, outputFormat, verbose, dryRun }) => {
+      const rw = rewriteQuery(query ?? "", "moderate");
+      const origin = `https://${p.host}`;
+      try {
+        const effectiveLimit = limit ?? top;
+        const fetchRows = Math.min(config.limits.maxRows, Math.max(top, offset + effectiveLimit));
+
+        if (dryRun) {
+          return dryRunPayload({
+            connector: p.site,
+            url: rijksoverheid.publicationsRequestUrl({ site: p.site, query: rw.rewritten, date_from, date_to }),
+            params: { query: rw.rewritten, top: fetchRows, date_from, date_to },
+          });
+        }
+
+        const started = Date.now();
+        const out = await rijksoverheid.searchPublications({ site: p.site, query: rw.rewritten, top: fetchRows, date_from, date_to });
+        const responseTimeMs = Date.now() - started;
+
+        const records = out.items.map((x)=>record(p.site, String(x.title || x.id || `${p.name} publicatie`), String(x.url || origin), x, String(x.snippet ?? ""), String(x.date ?? "")));
+        const response = buildFormattedResponse({
+          summary: pageSummary(records.length, offset, effectiveLimit, `publicaties van ${p.ref}`),
+          records,
+          provenance: prov(p.tool, out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), out.total),
+          outputFormat,
+          offset,
+          limit: effectiveLimit,
+          // null when the 20-item feed was full: the real number of matches is unknown.
+          total: out.total,
+          hasMore: offset + effectiveLimit < out.available,
+          access_note: mergeAccessNotes(rewriteNote(rw), out.access_note),
+          verbose: singleConnectorVerbose({ enabled: verbose, connector: p.site, endpoint: out.endpoint, responseTimeMs }),
+        });
+        return toMcpToolPayload(response);
+      } catch(e){ return toMcpToolPayload(mapSourceError(e, p.name, origin)); }
+    });
+  }
 
   server.registerTool("rijksbegroting_search", { description: "Search Dutch national budget (Rijksbegroting) datasets. Use budget/policy topic keywords.", inputSchema: { query: z.string().describe("Budget or policy topic keywords. Examples: 'defensie', 'infrastructuur', 'zorg uitgaven'. Do NOT pass full questions."), top: z.number().int().min(1).max(config.limits.maxRows).default(20), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) }, annotations: TOOL_ANNOTATIONS }, async ({ query, top, offset, limit, outputFormat, verbose, dryRun }) => {
     const rw = rewriteQuery(query, "moderate");
@@ -2609,7 +1225,7 @@ export function registerTools(server: McpServer): void {
 
   // A real calendar day: "2026-13-45" passes a pattern but makes ORI answer HTTP 400.
   const oriDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD").refine((v) => !Number.isNaN(Date.parse(`${v}T00:00:00Z`)) && new Date(`${v}T00:00:00Z`).toISOString().startsWith(v), "Use an existing date (YYYY-MM-DD)");
-  server.registerTool("ori_search", { inputSchema: { query: z.string().describe("Council topic keywords. Examples: 'parkeerbeleid', 'bestemmingsplan', 'raadsvergadering woningbouw'. Do NOT pass full questions. By default all words must occur (see 'match')."), sort: z.enum(["relevance", "date_newest"]).default("relevance").describe("'date_newest' sorts server-side by meeting date (last_discussed_at, the last meeting that discussed the record — not the publication date) and leaves out dates after today unless date_to is set. 'relevance' for general searches."), rows: z.number().int().min(1).max(config.limits.maxRows).default(20), bestuurslaag: z.string().optional().describe("Filter by government layer: 'gemeente', 'provincie' or 'waterschap'. Other values are not applied (reported in access_note)."), gemeente: z.string().optional().describe("Scope to one body, e.g. 'Delft', 'Den Haag', 'Leidschendam-Voorburg', 'Provincie Noord-Holland', 'Hoogheemraadschap van Delfland'. Matched exactly against the live ORI index list (gemeenten, provincies, waterschappen); a name without an ORI index returns no records and says so. Without it a search runs across all indices."), date_from: oriDate.optional().describe("Only records dated on or after this day (YYYY-MM-DD). Filters on the meeting date (last_discussed_at; start_date for reports)."), date_to: oriDate.optional().describe("Only records dated on or before this day (YYYY-MM-DD), same date field as date_from."), match: z.enum(["all", "any"]).default("all").describe("'all' (default): every word must occur. 'any': at least one word (broad, many more hits).") }, description: "Search Open Raadsinformatie (ORI) — council documents, agenda items, meetings and decisions of Dutch municipalities, provinces and water boards. Use policy topic keywords; set 'gemeente' to answer 'what did the council of X discuss', 'bestuurslaag' to restrict to a layer, 'date_from'/'date_to' for a period and 'sort' for recency. The query accepts \"phrases\", uppercase OR/AND/NOT, -term and prefix*; a lowercase or/and/not is searched as a word (e.g. OR = ondernemingsraad). Documents link to their file (data.original_url, also on each attachment, is the source system's own link if ORI's link fails; where ORI's link is known to fail the link already goes to the source system, see link_note); meetings and agenda items link to the meeting's page in the council information system (link_type 'meeting_page'; iBabs, Notubiz, Parlaeus or GemeenteOplossingen, see source_system; an agenda item to its meeting's page, anchored on the item where possible) when that page answered a check during the search, or where a page cannot be checked itself, when the system's own API confirmed the meeting (GemeenteOplossingen, whose API also names the page, and Haarlem's Notubiz site); else, also when the checks ran out of time (about 3 s per search), to their ORI API record, which is JSON and not a web page (link_type 'ori_record', reason in link_note); ori_record_url keeps the ORI record next to a meeting page, and their documents are under 'attachments'. data.date_type says what the date is (vergaderdatum, documentdatum, or an iBabs list date such as a deadline). Totals above 10000 are reported as a lower bound; access_note warns when the ORI index is stale.", annotations: TOOL_ANNOTATIONS }, async ({ query, sort, rows, bestuurslaag, gemeente, date_from, date_to, match }) => {
+  server.registerTool("ori_search", { inputSchema: { query: z.string().describe("Council topic keywords. Examples: 'parkeerbeleid', 'bestemmingsplan', 'raadsvergadering woningbouw'. Do NOT pass full questions. By default all words must occur (see 'match')."), sort: z.enum(["relevance", "date_newest"]).default("relevance").describe("'date_newest' sorts server-side by meeting date (last_discussed_at, the last meeting that discussed the record — not the publication date) and leaves out dates after today unless date_to is set. 'relevance' for general searches."), rows: z.number().int().min(1).max(config.limits.maxRows).default(20), bestuurslaag: z.string().optional().describe("Filter by government layer: 'gemeente', 'provincie' or 'waterschap'. Other values are not applied (reported in access_note)."), gemeente: z.string().optional().describe("Scope to one body, e.g. 'Delft', 'Den Haag', 'Leidschendam-Voorburg', 'Provincie Noord-Holland', 'Hoogheemraadschap van Delfland'. Matched exactly against the live ORI index list (gemeenten, provincies, waterschappen); a name without an ORI index returns no records and says so. Without it a search runs across all indices."), date_from: oriDate.optional().describe("Only records dated on or after this day (YYYY-MM-DD). Filters on the meeting date (last_discussed_at; start_date for reports)."), date_to: oriDate.optional().describe("Only records dated on or before this day (YYYY-MM-DD), same date field as date_from."), match: z.enum(["all", "any"]).default("all").describe("'all' (default): every word must occur. 'any': at least one word (broad, many more hits).") }, description: "Search Open Raadsinformatie (ORI) — council documents, agenda items, meetings and decisions of Dutch municipalities, provinces and water boards. Use policy topic keywords; set 'gemeente' to answer 'what did the council of X discuss', 'bestuurslaag' to restrict to a layer, 'date_from'/'date_to' for a period and 'sort' for recency. Results show a short passage; ori_document_get (data.index, data.id) reads a document's full text or only the pages with a term. The query accepts \"phrases\", uppercase OR/AND/NOT, -term and prefix*; a lowercase or/and/not is searched as a word (e.g. OR = ondernemingsraad). Documents link to their file (data.original_url, also on each attachment, is the source system's own link if ORI's link fails; where ORI's link is known to fail the link already goes to the source system, see link_note); meetings and agenda items link to the meeting's page in the council information system (link_type 'meeting_page'; iBabs, Notubiz, Parlaeus or GemeenteOplossingen, see source_system; an agenda item to its meeting's page, anchored on the item where possible) when that page answered a check during the search, or where a page cannot be checked itself, when the system's own API confirmed the meeting (GemeenteOplossingen, whose API also names the page, and Haarlem's Notubiz site); else, also when the checks ran out of time (about 3 s per search), to their ORI API record, which is JSON and not a web page (link_type 'ori_record', reason in link_note); ori_record_url keeps the ORI record next to a meeting page, and their documents are under 'attachments'. data.date_type says what the date is (vergaderdatum, documentdatum, or an iBabs list date such as a deadline). Totals above 10000 are reported as a lower bound; access_note warns when the ORI index is stale.", annotations: TOOL_ANNOTATIONS }, async ({ query, sort, rows, bestuurslaag, gemeente, date_from, date_to, match }) => {
     // The rewriter lowercases and drops symbols, so with every word required
     // "parkeren OR fietsen" became three required words. Search syntax goes through as typed.
     const rw = rewriteQuery(query, OriSource.hasQuerySyntax(query) ? "passthrough" : "moderate");
@@ -2624,6 +1240,49 @@ export function registerTools(server: McpServer): void {
     } catch (e) {
       const mapped = mapSourceError(e, "ORI", "https://www.openraadsinformatie.nl");
       return toMcpToolPayload({ ...mapped, suggestion: oriFailureHint(e) ?? mapped.suggestion });
+    }
+  });
+
+  server.registerTool("ori_document_get", {
+    description: "Read the text of one Open Raadsinformatie (ORI) document. index and id come from an ori_search record (data.index, data.id), or an attachments[].id with the same index. Returns ORI's extracted text page by page ('--- pagina N ---'), as Markdown where ORI has it, with the metadata (title, organisation, meeting date, file link, original_url). zoekterm returns only the pages holding a term (zoekterm_pages lists them; case and accents ignored); pagina ('3' or '3-5') reads a page range; max_chars caps the text (default 12000, max 50000) and next_pagina says where to continue. Agenda items and meetings have no text of their own (their documents are in attachment_ids). A document ORI extracted no text from (scans, audio) says so and links the file. The text is ORI's automatic extraction; the file at url is the source.",
+    inputSchema: {
+      index: z.string().regex(ORI_INDEX_RE, "Use the ORI index name from ori_search's data.index, e.g. 'ori_delft', 'osi_noord-holland', 'owi_limburg'.").describe("ORI index name from ori_search's data.index, e.g. 'ori_delft', 'ori_leidschendam-voorburg', 'osi_noord-holland'. Not a municipality name."),
+      id: z.string().regex(ORI_ID_RE, "Use the record id from ori_search's data.id, e.g. '1731608'.").describe("Record id from ori_search's data.id (or attachments[].id), e.g. '1731608'."),
+      zoekterm: z.string().max(200).optional().describe("Only the pages that contain this term (as written; else pages with all its words), e.g. 'parkeernorm'."),
+      pagina: z.union([z.number().int().min(1).max(99_999), z.string().regex(ORI_PAGINA_RE, "Use a page number or range, e.g. '3' or '3-5'.").refine((v) => parsePagina(v) !== undefined, "A range runs from a lower to a higher page, e.g. '3-5'.")]).optional().describe("Page or page range, e.g. 3 or '3-5'. Combines with zoekterm."),
+      max_chars: z.number().int().min(1).max(ORI_TEXT_MAX_CHARS).default(ORI_TEXT_DEFAULT_CHARS).describe(`Maximum characters of text (default ${ORI_TEXT_DEFAULT_CHARS}, max ${ORI_TEXT_MAX_CHARS}).`),
+    },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ index, id, zoekterm, pagina, max_chars }) => {
+    try {
+      const out = await ori.getDocument({ index, id, zoekterm, pagina, max_chars });
+      const r = out.item;
+      if (!r) {
+        return toMcpToolPayload(successResponse({
+          summary: out.not_found === "index" ? `ORI-index '${index}' bestaat niet` : `ORI-record ${index}/${id} niet gevonden`,
+          records: [],
+          provenance: prov("ori_document_get", out.endpoint, out.params, 0, 0),
+          access_note: out.access_note,
+        }));
+      }
+      const label = String(r.type_label ?? r.type);
+      const pages = r.text_available
+        ? r.pages_returned
+          ? `pagina ${String(r.pages_returned)} van ${String(r.page_count)}, ${String(r.text_chars)} tekens${r.text_truncated ? " (afgekapt)" : ""}`
+          : `geen pagina's geselecteerd (${String(r.page_count)} pagina's)`
+        : "geen tekst";
+      const snippet = [label, String(r.organization ?? ""), pages].filter(Boolean).join(" — ");
+      const records = [record("ori", String(r.title ?? id), String(r.url ?? out.endpoint), r, snippet, String(r.publishedAt ?? ""))];
+      return toMcpToolPayload(successResponse({
+        summary: `ORI ${label.toLowerCase()} '${String(r.title ?? id)}'${r.organization ? ` (${String(r.organization)})` : ""} — ${pages}`,
+        records,
+        provenance: prov("ori_document_get", out.endpoint, out.params, 1, 1),
+        access_note: out.access_note,
+      }));
+    } catch (e) {
+      logger.warn({ err: e, tool: "ori_document_get", index, id }, "Primary source failed");
+      const mapped = mapSourceError(e, "ORI", "https://www.openraadsinformatie.nl");
+      return toMcpToolPayload({ ...mapped, suggestion: oriDocumentFailureHint(e) });
     }
   });
 
@@ -2765,13 +1424,11 @@ export function registerTools(server: McpServer): void {
     "dso_omgevingsdocumenten_search",
     {
       description:
-        "Search the omgevingsdocumenten of the Omgevingswet in the DSO (Digitaal Stelsel Omgevingswet), at document level: omgevingsplannen, omgevingsvisies, programma's, omgevingsverordeningen, waterschapsverordeningen, voorbereidingsbesluiten (voorbeschermingsregels), projectbesluiten and the Rijk's AMvB's, and with soort 'ontwerpregelingen' the drafts, with their inzagetermijn where the DSO has one. " +
-        "Use 'locatie' (an address, postcode or place) for the documents whose werkingsgebied covers that point, gemeente first, then waterschap, provincie and Rijk. This does not check which individual articles apply there: an artikel can have a smaller werkingsgebied (Regels op de kaart shows rules per location). " +
-        "Use 'bevoegdGezag' for the documents one body issued itself: a TOOI code (gm0344 = gemeente Utrecht, pv26 = provincie Utrecht, ws0636 = Hoogheemraadschap De Stichtse Rijnlanden, mnre1034 = ministerie van BZK) or a name. A provincie as bevoegdGezag gives only the provincie's own documents; use 'provincie' for the area: the provincie's documents plus those of all its gemeenten. " +
-        "Without locatie, bevoegdGezag or provincie, 'query' and 'documentType' search the complete national catalogue. " +
-        "Returns metadata, most recently changed first (by the start of each document's current consolidated version, so a new version of an old plan counts as recent): title, type, bevoegd gezag (the issuing body), versie with the beginGeldigheid/eindGeldigheid of that version (eindGeldigheid is exclusive: on that day the next version applies, so this one holds through versieGeldigTotEnMet, the day before; it is not when the regeling ends), a link to the readable text (canonical_url: lokaleregelgeving.overheid.nl for gemeente, provincie and waterschap, wetten.overheid.nl for Rijk laws where known, else Regels op de kaart; the publication for an ontwerp), and identificatie/uriIdentificatie (technischId for an ontwerp). " +
-        "Two Rijk records at every location are no rule document: the Omgevingswet is only a pointer in the DSO (alleenVerwijzing) and 'Aansluitdocument Rijk' a technical record (technisch); both carry an opmerking and say so in their title. " +
-        "access_note says what was searched and, per bestuurslaag, what was found and what rows left out. The rule text itself comes from dso_omgevingsdocument_tekst with that identificatie. Requires DSO_API_KEY.",
+        "Search Omgevingswet documents in the DSO (Digitaal Stelsel Omgevingswet) at document level: omgevingsplannen, omgevingsvisies, programma's, omgevingsverordeningen, waterschapsverordeningen, voorbereidingsbesluiten (voorbeschermingsregels), projectbesluiten and the Rijk's AMvB's; soort 'ontwerpregelingen' gives the drafts, with their inzagetermijn where the DSO has one. Requires DSO_API_KEY. " +
+        "'locatie' (address, postcode or place): the documents whose werkingsgebied covers that point, all layers; not which artikelen apply there (an artikel can have a smaller werkingsgebied). " +
+        "'bevoegdGezag' (TOOI code such as gm0344, or a name): only the documents that body issued itself; 'provincie': the provincie's plus those of all its gemeenten. Without these, 'query' and 'documentType' search the national catalogue. " +
+        "Returns metadata, most recently changed first (by the start of the current version): title, type, bevoegd gezag, versie with beginGeldigheid and eindGeldigheid (exclusive; versieGeldigTotEnMet is the last day; not the end of the regeling), canonical_url to the readable text (for an ontwerp its publication) and identificatie (technischId for an ontwerp) for dso_omgevingsdocument_tekst, which returns the rule text. " +
+        "Two Rijk records at every location hold no rules (Omgevingswet: a pointer only; Aansluitdocument Rijk: technical); title and opmerking say so. access_note says what was searched and, per bestuurslaag, what was found and left out.",
       inputSchema: {
         query: z.string().max(200).optional().describe("Words that must all occur (whole words, case and accents ignored) in title, citeertitel, opschrift, bevoegd gezag or type, and for an ontwerp also its ontwerpbesluit's citeertitel (the project or street), e.g. 'omgevingsvisie Utrecht', 'geluid'. Without bevoegdGezag, provincie or locatie the whole catalogue is searched."),
         locatie: z.string().max(200).optional().describe("Address, postcode (with or without house number) or place, e.g. 'Brennerbaan 150, Utrecht', '3524 BN 150' or 'Lunetten, Utrecht'. Resolved via the PDOK Locatieserver to one point, within the gemeente or woonplaats the input names ('Den Haag' and 's-Gravenhage both work, also next to a postcode), never in another place; an unknown address or a name that fits several places is an error naming them. A missing house number or another street than the one named is stated in access_note. Returns the documents whose werkingsgebied covers the point, all layers. A place name becomes its centre point: use bevoegdGezag or provincie for all documents of a gemeente or provincie."),
@@ -2852,15 +1509,13 @@ export function registerTools(server: McpServer): void {
     "dso_omgevingsdocument_tekst",
     {
       description:
-        "Read the rule text (regeltekst) of one DSO omgevingsdocument as plain text (the whole document; it does not tell which artikelen apply at a particular location): hoofdstukken, afdelingen, paragrafen and artikelen with number and title, numbered leden and lists, begrippen as 'term: definitie', tables as rows. " +
-        "Pass the identificatie from dso_omgevingsdocumenten_search ('/akn/nl/act/gm0344/2020/omgevingsplan'; uriIdentificatie, an identifier.overheid.nl URL or an ontwerp's technischId also work). The Rijk's AMvB's are readable here article by article too (Bbl = '/akn/nl/act/mnre1034/2018/BWBR0041297'; dso_omgevingsdocumenten_search with typeBevoegdGezag 'ministerie' lists them). " +
-        "'zoekterm' returns only the artikelen, begrippen and toelichting parts holding every word, each with its heading path, the regels before bijlagen and toelichting; every hit gets at least its heading and the passage with the term, and a hit too long for max_tekens comes with only its passages (ingekort: true, eId for the rest). It finds the word only: a rule that applies through a general term or an afwijking ('In afwijking van artikel 9.3') may not repeat it, so also read the afdeling of the main hit. " +
-        "'onderdeel' returns one part by eId/wId or label ('Artikel 4.24', 'artikel 4.1 lid 2', 'artikel 4.1, tweede lid', 'Hoofdstuk 4', 'Bijlage II'). " +
-        "A part from the toelichting is titled 'Toelichting bij …' and has toelichting: true: it explains a rule and is not binding; the rule is the artikel itself. " +
-        "An omgevingsplan's voorbeschermingsregels (voorbereidingsbesluiten) are a tijdelijk deel of it and take precedence where they deviate: access_note lists them, and a zoekterm searches them too ('Voorbeschermingsregels: <titel> — Artikel …', tijdelijkDeel: true). " +
-        "An ontwerp reads as the regeling would after the change: added text in, deleted text out; with weergave 'wijzigingen' only what it changes, [+added+] and [-deleted-] text marked, parts only renumbered listed as such. " +
-        "Without zoekterm or onderdeel, a document longer than max_tekens comes back as its beginning plus a table of contents whose eIds a follow-up call can pass as onderdeel. Large documents (an omgevingsplan is several MB) are fetched once and kept for 15 minutes. " +
-        "For the Omgevingswet the DSO holds only a pointer, not the law: access_note then links the text on wetten.overheid.nl; the Aansluitdocument Rijk is a technical record without rules. Requires DSO_API_KEY.",
+        "Read the rule text (regeltekst) of one DSO omgevingsdocument as plain text, by hoofdstuk, afdeling and artikel, with leden, begrippen and tables. It does not tell which artikelen apply at a location. Requires DSO_API_KEY. " +
+        "Pass the identificatie from dso_omgevingsdocumenten_search (or uriIdentificatie, an identifier.overheid.nl URL, an ontwerp's technischId). The Rijk's AMvB's work too (Bbl = '/akn/nl/act/mnre1034/2018/BWBR0041297'; search with typeBevoegdGezag 'ministerie'). " +
+        "'zoekterm': only the artikelen, begrippen and toelichting parts holding every word, with heading path, regels first; a hit over max_tekens gives its passages (ingekort: true, eId for the rest). It finds the word only: a rule applying through a general term or an afwijking may not repeat it, so also read the main hit's afdeling. " +
+        "'onderdeel': one part by eId or label ('Artikel 4.24', 'artikel 4.1 lid 2'). " +
+        "Toelichting parts (toelichting: true) explain a rule and are not binding. An omgevingsplan's voorbeschermingsregels are a tijdelijk deel that prevails where it deviates: access_note lists them, zoekterm searches them (tijdelijkDeel: true). " +
+        "An ontwerp reads as the regeling after the change; weergave 'wijzigingen' shows only the changes. " +
+        "Without zoekterm or onderdeel a long document returns its beginning plus a table of contents whose eIds work as onderdeel. For the Omgevingswet the DSO holds only a pointer (access_note links wetten.overheid.nl); the Aansluitdocument Rijk has no rules.",
       inputSchema: {
         identificatie: z.string().min(1).max(500).describe("identificatie, uriIdentificatie or (ontwerp) technischId from dso_omgevingsdocumenten_search, e.g. '/akn/nl/act/gm0344/2020/omgevingsplan'."),
         zoekterm: z.string().max(200).optional().describe("Words that must all occur in a part, case and accents ignored, e.g. 'dakkapel' or 'dakkapel achterkant'. Plain text matching: a word also matches inside longer words ('dakkapel' finds 'dakkapellen'), and a plural of 7+ letters ending in -en or -s also matches its stem ('dakkapellen' finds 'dakkapel', 'windturbines' finds 'windturbine'). A plural that changes its vowel does not: 'zonnepanelen' misses 'zonnepaneel', so search 'zonnepan'. No synonyms."),
@@ -3145,7 +1800,7 @@ export function registerTools(server: McpServer): void {
     }
   });
 
-  server.registerTool("rechtspraak_search_ecli", { inputSchema: { query: z.string().describe("1-3 core legal topic keywords ONLY. Extract the subject from the user's question. Examples: 'waterschade', 'huurrecht ontbinding', 'arbeidsrecht ontslag'. NEVER include question words, verbs, articles, or full sentences. This API is extremely sensitive to extra words."), sort: z.enum(["relevance", "date_newest", "ruling_newest"]).default("relevance").describe("Use 'date_newest' when user asks for recent/latest/newest results (sorted by publication date). Use 'ruling_newest' to sort by ruling date. Use 'relevance' for general searches."), date_filter: z.enum(["week", "month", "year", "last_year"]).optional().describe("Optional publication date filter. Use 'week' for past 7 days, 'month' for past month, 'year' for this year, 'last_year' for previous year. Only set when user explicitly mentions a time period."), rows: z.number().int().min(1).max(config.limits.maxRows).default(20) }, description: "Search Dutch case law (Rechtspraak) for ECLI references. IMPORTANT: Pass only topic keywords in 'query', not full sentences. Use 'sort' and 'date_filter' parameters to control recency and time period — do NOT encode these in the query string.", annotations: TOOL_ANNOTATIONS }, async ({ query, sort, date_filter, rows }) => {
+  server.registerTool("rechtspraak_search_ecli", { inputSchema: { query: z.string().describe("1-3 core legal topic keywords ONLY. Extract the subject from the user's question. Examples: 'waterschade', 'huurrecht ontbinding', 'arbeidsrecht ontslag'. NEVER include question words, verbs, articles, or full sentences. This API is extremely sensitive to extra words."), sort: z.enum(["relevance", "date_newest", "ruling_newest"]).default("relevance").describe("Use 'date_newest' when user asks for recent/latest/newest results (sorted by publication date). Use 'ruling_newest' to sort by ruling date. Use 'relevance' for general searches."), date_filter: z.enum(["week", "month", "year", "last_year"]).optional().describe("Optional publication date filter. Use 'week' for past 7 days, 'month' for past month, 'year' for this year, 'last_year' for previous year. Only set when user explicitly mentions a time period."), rows: z.number().int().min(1).max(config.limits.maxRows).default(20) }, description: "Search Dutch case law (Rechtspraak) for ECLI references. IMPORTANT: Pass only topic keywords in 'query', not full sentences. Use 'sort' and 'date_filter' parameters to control recency and time period — do NOT encode these in the query string. For the text of a ruling (beslissing, overwegingen, full text) pass its ECLI to rechtspraak_uitspraak_get.", annotations: TOOL_ANNOTATIONS }, async ({ query, sort, date_filter, rows }) => {
     const rw = rewriteQuery(query, "strict");
     try {
       const out = await rechtspraak.searchEcli({ query: rw.rewritten, rows, sort, date_filter });
@@ -3158,6 +1813,146 @@ export function registerTools(server: McpServer): void {
       return toMcpToolPayload(successResponse({ summary: `${records.length} Rechtspraak fallback resultaten`, records, provenance: prov("rechtspraak_search_ecli", out.endpoint, out.params, records.length, out.total), access_note: mergeAccessNotes(rw.explanation, out.access_note) }));
     }
   });
+
+  /**
+   * rechtspraak_uitspraak_get as a result object; nl_gov_ask reads a ruling
+   * the question names by its ECLI through it as well.
+   */
+  async function uitspraakResult({ ecli: input, onderdeel, sectie, zoekterm, max_chars }: { ecli: string; onderdeel: "overzicht" | "beslissing" | "overwegingen" | "volledig"; sectie?: string; zoekterm?: string; max_chars: number }): Promise<ToolResult> {
+    const read = readEcliInput(input);
+    if ("invalid" in read) return errorResponse({ error: "unexpected", message: read.invalid, suggestion: read.suggestion });
+    const { ecli } = read;
+    if (sectie !== undefined && sectie.trim() && !sectieIsReadable(sectie)) {
+      return errorResponse({ error: "unexpected", message: `Sectie '${sectie.slice(0, 100)}' bevat geen nummer, sectie-id of woord om op te zoeken.`, suggestion: "Geef een sectie uit de inhoudsopgave ('4', '#2', 'kop'), een paragraafnummer ('4.3') of woorden uit een sectietitel ('beoordeling'); zonder sectie geeft onderdeel 'overzicht' de inhoudsopgave." });
+    }
+    if (!ecli.startsWith("ECLI:NL:")) {
+      return errorResponse({ error: "unexpected", message: `${ecli} is geen Nederlandse ECLI: Rechtspraak.nl publiceert alleen uitspraken met een ECLI:NL:…`, suggestion: "Geef een ECLI die begint met 'ECLI:NL:'." });
+    }
+    const url = uitspraakDetailsUrl(ecli);
+    const queryParams: Record<string, string> = { ecli, onderdeel, max_chars: String(max_chars), ...(sectie ? { sectie } : {}), ...(zoekterm ? { zoekterm } : {}) };
+    try {
+      const out = await rechtspraak.getUitspraak(ecli);
+      const doc = out.doc;
+      if (!doc) {
+        return successResponse({
+          summary: `${ecli} niet gevonden op Rechtspraak.nl`,
+          records: [],
+          provenance: prov("rechtspraak_uitspraak_get", out.endpoint, queryParams, 0, 0),
+          access_note: `data.rechtspraak.nl kent ${ecli} niet (HTTP 404): de ECLI bestaat niet of de uitspraak is niet gepubliceerd. Controleer de ECLI of zoek met rechtspraak_search_ecli.`,
+        });
+      }
+      const m = doc.meta;
+      const title = m.titel ?? [m.ecli, [m.instantie, m.uitspraakdatum].filter(Boolean).join(", ")].filter(Boolean).join(" ");
+      const tuchtrechtPagina = tuchtrechtUrl(m);
+      const pageUrl = tuchtrechtPagina ?? url;
+      const notes: string[] = [];
+      const metaFields: Record<string, unknown> = {
+        ecli: m.ecli,
+        documenttype: m.documenttype ?? (doc.soort === "conclusie" ? "Conclusie" : doc.soort === "uitspraak" ? "Uitspraak" : undefined),
+        instantie: m.instantie,
+        uitspraakdatum: m.uitspraakdatum,
+        publicatiedatum: m.publicatiedatum,
+        zaaknummer: m.zaaknummer,
+        ...(m.procedures.length ? { procedures: m.procedures } : {}),
+        ...(m.rechtsgebieden.length ? { rechtsgebieden: m.rechtsgebieden } : {}),
+        ...(m.zittingsplaats ? { zittingsplaats: m.zittingsplaats } : {}),
+        ...(m.vervangt ? { vervangt: m.vervangt } : {}),
+        relaties: m.relaties,
+        ...(m.wetsverwijzingen.length ? { wetsverwijzingen: m.wetsverwijzingen } : {}),
+        ...(m.vindplaatsen.length ? { vindplaatsen: m.vindplaatsen } : {}),
+        url: pageUrl,
+        data_url: uitspraakDataUrl(ecli),
+        ...(m.deeplink ? { deeplink: m.deeplink } : {}),
+        tekst_gepubliceerd: Boolean(doc.soort && doc.blocks.length),
+        ...(doc.inhoudsindicatie ? { inhoudsindicatie: doc.inhoudsindicatie } : {}),
+      };
+      const snippet = doc.inhoudsindicatie ? (doc.inhoudsindicatie.length > 300 ? `${doc.inhoudsindicatie.slice(0, 299)}…` : doc.inhoudsindicatie) : undefined;
+
+      if (!doc.soort || !doc.blocks.length) {
+        // Metadata only: Rechtspraak registered the ruling but published no text (yet).
+        const asked = sectie || zoekterm || onderdeel !== "overzicht";
+        return successResponse({
+          summary: tuchtrechtPagina ? `${ecli}: tuchtrechtuitspraak, tekst op tuchtrecht.overheid.nl` : `${ecli}: alleen metadata, geen tekst gepubliceerd`,
+          records: [record("rechtspraak", title, pageUrl, metaFields, snippet, m.uitspraakdatum)],
+          provenance: prov("rechtspraak_uitspraak_get", out.endpoint, queryParams, 1, 1),
+          access_note: tuchtrechtPagina
+            ? `${ecli} is een tuchtrechtuitspraak: Rechtspraak.nl heeft er alleen metadata van, de tekst staat op ${tuchtrechtPagina}${asked ? " (het gevraagde onderdeel of de zoekterm is hier dus niet te beantwoorden)" : ""}. Tuchtrechtuitspraken zoek je met tuchtrecht_search.`
+            : `Rechtspraak.nl heeft van ${ecli} alleen metadata gepubliceerd, geen tekst${doc.inhoudsindicatie ? "" : " en geen inhoudsindicatie"}${asked ? ", dus het gevraagde onderdeel of de zoekterm is niet te beantwoorden" : ""}. De tekst kan later alsnog verschijnen op ${url}.`,
+        });
+      }
+
+      const sel = selectUitspraakText(doc, { onderdeel, sectie, zoekterm, maxChars: max_chars });
+      const toc = uitspraakInhoudsopgave(doc);
+      const TOC_MAX = 60;
+      const isConclusie = doc.soort === "conclusie";
+      const partName = isConclusie ? "conclusie" : "beslissing";
+      if (sel.notFound) {
+        notes.push(`${sel.notFound.reason}${sel.notFound.suggestions.length ? ` Bestaande secties: ${sel.notFound.suggestions.join(", ")}.` : " De tekst heeft geen secties: vraag onderdeel 'volledig' of zoek met zoekterm."}`);
+      } else if (sel.modus === "zoekterm") {
+        const shown = sel.treffers?.length ?? 0;
+        const total = sel.treffersTotaal ?? 0;
+        const scope = sectie ? ` in sectie '${sectie}'` : onderdeel === "beslissing" || onderdeel === "overwegingen" ? ` in de ${onderdeel}${sel.label ? ` (${sel.label})` : ""}` : "";
+        const passagesOnly = sel.treffers?.some((t) => t.ingekort);
+        notes.push(total
+          ? `${total} ${total === 1 ? "alinea bevat" : "alinea's bevatten"} alle woorden van '${zoekterm}'${scope}${shown < total ? `; ${shown} getoond binnen max_chars (${max_chars})` : ""}.${passagesOnly ? " Lange alinea's zijn teruggebracht tot de passages met de zoekterm of afgekapt op max_chars (ingekort: true); vraag zo'n alinea helemaal op met sectie (het nummer)." : ""}`
+          : `Geen alinea${scope} bevat alle woorden van '${zoekterm}'. Probeer minder of andere woorden: geen synoniemen, een woord matcht ook binnen langere woorden, en wetsartikelen staan vaak als 'art. 13' in de tekst.`);
+      } else if (sel.modus === "overzicht" && !sel.methode) {
+        notes.push(`Geen ${partName} herkend (geen sectie met role="beslissing", geen sectie of kopregel 'Beslissing'/'Dictum', geen slotsom); zie de inhoudsopgave, vraag een sectie op of onderdeel 'volledig'.`);
+      }
+      if (sel.methode && (sel.modus === "overzicht" || sel.modus === "beslissing" || sel.modus === "overwegingen")) {
+        notes.push(`${sel.modus === "overwegingen" ? "Overwegingen" : isConclusie ? "Conclusie" : "Beslissing"} gevonden via ${sel.methode}.`);
+      }
+      if (sel.ingekort && sel.modus !== "zoekterm") {
+        notes.push(`Tekst ingekort: ${sel.tekst.length} van ${sel.tekensOnderdeel} tekens getoond (max_chars ${max_chars}, max ${UITSPRAAK_MAX_CHARS}); vraag een sectie op of zoek met zoekterm voor de rest.`);
+      }
+      if (isConclusie) notes.push("Dit is een conclusie van de Advocaat-Generaal (Parket bij de Hoge Raad): een advies aan de rechter, geen uitspraak. De uitspraak zelf staat bij relaties (latere aanleg).");
+      if (toc.length > TOC_MAX) notes.push(`Inhoudsopgave ingekort: ${TOC_MAX} van ${toc.length} secties getoond.`);
+
+      const data: Record<string, unknown> = {
+        ...metaFields,
+        soort: doc.soort,
+        inhoudsopgave: toc.slice(0, TOC_MAX),
+        onderdeel: sel.modus,
+        ...(sel.label ? { onderdeel_label: sel.label } : {}),
+        ...(sel.methode ? { methode: sel.methode } : {}),
+        ...(sel.treffers ? { treffers: sel.treffers, treffers_totaal: sel.treffersTotaal } : {}),
+        tekst: sel.tekst,
+        tekens_getoond: sel.tekst.length,
+        tekens_onderdeel: sel.tekensOnderdeel,
+        ingekort: sel.ingekort,
+      };
+      const summary = sel.notFound
+        ? `${title}: ${sel.modus === "sectie" ? `sectie '${sectie}'` : sel.modus} niet gevonden`
+        : sel.modus === "zoekterm"
+          ? `${title}: ${sel.treffersTotaal ?? 0} ${sel.treffersTotaal === 1 ? "alinea" : "alinea's"} met '${zoekterm}'`
+          : sel.modus === "overzicht"
+            ? `${title}: overzicht${sel.label ? ` met ${partName} (${sel.label})` : `, ${partName} niet herkend`}`
+            : `${title}: ${sel.modus === "sectie" ? "sectie" : sel.modus}${sel.label ? ` (${sel.label})` : ""}`;
+      return successResponse({
+        summary,
+        records: [record("rechtspraak", title, pageUrl, data, snippet ?? sel.tekst.slice(0, 300), m.uitspraakdatum)],
+        provenance: prov("rechtspraak_uitspraak_get", out.endpoint, queryParams, 1, 1),
+        access_note: notes.length ? notes.join(" ") : undefined,
+      });
+    } catch (e) {
+      return mapSourceError(e, "Rechtspraak (data.rechtspraak.nl)", url);
+    }
+  }
+
+  server.registerTool("rechtspraak_uitspraak_get", {
+    description:
+      "Read one Dutch court ruling (uitspraak) or Advocaat-Generaal conclusie by ECLI from Rechtspraak's open data (data.rechtspraak.nl): metadata (instantie, dates, zaaknummer, rechtsgebied, procedure), relations to other instances ('In cassatie op …', 'Conclusie: …, Gevolgd'), inhoudsindicatie, a table of contents (inhoudsopgave) and text. " +
+      "onderdeel 'overzicht' (default) adds the beslissing (dictum; in a conclusie the closing advice); 'beslissing', 'overwegingen' or 'volledig' return that part; sectie returns one section or numbered paragraph from the inhoudsopgave. zoekterm returns only the paragraphs holding every word, with section and paragraph number. " +
+      "The output says how the beslissing or overwegingen were found (marked section, section title, heading line in the text, or slotsom) and when text was cut at max_chars. Some rulings have metadata but no published text: tekst_gepubliceerd is then false. Text is as published (anonymised). Find ECLIs with rechtspraak_search_ecli.",
+    inputSchema: {
+      ecli: z.string().min(1).max(300).describe("ECLI of the ruling or conclusie, e.g. 'ECLI:NL:HR:2019:2006' (any case; a uitspraken.rechtspraak.nl link also works)."),
+      onderdeel: z.enum(["overzicht", "beslissing", "overwegingen", "volledig"]).default("overzicht").describe("'overzicht' (default): metadata, inhoudsindicatie, inhoudsopgave and the beslissing. 'beslissing': the dictum. 'overwegingen': the court's reasoning. 'volledig': the whole text with footnotes (long rulings exceed max_chars: use sectie or zoekterm)."),
+      sectie: z.string().max(200).optional().describe("One part instead of onderdeel: a sectie from the inhoudsopgave ('4', '#2', 'kop'), a paragraph number ('4.3', 'r.o. 4.3') or words of a section title ('beoordeling')."),
+      zoekterm: z.string().max(200).optional().describe("Words that must all occur in a paragraph, case and accents ignored, e.g. 'zorgplicht' or 'artikel 2 EVRM'. Searches the part chosen by onderdeel or sectie; with 'overzicht' the whole text and its footnotes."),
+      max_chars: z.number().int().min(500).max(UITSPRAAK_MAX_CHARS).default(UITSPRAAK_DEFAULT_CHARS).describe(`Maximum characters of text returned (default ${UITSPRAAK_DEFAULT_CHARS}, max ${UITSPRAAK_MAX_CHARS}).`),
+    },
+    annotations: TOOL_ANNOTATIONS,
+  }, async (args) => toMcpToolPayload(await uitspraakResult(args)));
 
   server.registerTool("rivm_discovery_search", { inputSchema: { query: z.string().describe("Public health topic keywords. Examples: 'vaccinatie', 'luchtkwaliteit gezondheid', 'PFAS', 'infectieziekten'. Do NOT pass full questions."), rows: z.number().int().min(1).max(config.limits.maxRows).default(20) }, description: "Search/discover RIVM (Dutch public health institute) datasets and API references. Use health/environment topic keywords.", annotations: TOOL_ANNOTATIONS }, async ({ query, rows }) => {
     const rw = rewriteQuery(query, "moderate");
@@ -3266,1854 +2061,7 @@ export function registerTools(server: McpServer): void {
     }
   });
 
-  server.registerTool("nl_gov_ask", { inputSchema: { question: z.string(), top: z.number().int().min(1).max(config.limits.maxRows).default(10), reference_now: z.string().optional(), timezone: z.string().optional(), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) }, description: "Smart router that interprets a natural-language question about Dutch government data and queries the most relevant source(s). Supports temporal expressions in Dutch and English (e.g. 'vorige week', 'since 2020'). Organisation and policy questions ('Wat doet de Belastingdienst met de BTW?', 'GGZ-beleid gemeente Utrecht') are searched in documents: the municipality's council records (Open Raadsinformatie), official publications, Tweede Kamer and Rijksoverheid. Case-law, API-register and budget questions keep their own routes. With DSO_API_KEY set, Omgevingswet document questions go to the DSO first: a question naming an omgevingsplan, omgevingsvisie, omgevingsverordening, waterschapsverordening, omgevingsprogramma, voorbereidingsbesluit, projectbesluit, ontwerpregeling or omgevingsdocument together with an address, a place, a gemeente, provincie or waterschap, or asking for a list, the newest or ontwerpen; 'welke regels gelden op <straat huisnummer, plaats>' or '<postcode>' (also 'mag ik een dakkapel plaatsen op ...'); and ontwerpen ter inzage of a named gemeente, provincie, waterschap or place. An address gives the documents of every bestuurslaag at that point, 'in de provincie X' (or 'in Noord-Holland') the provincie's and its gemeenten's, a named gemeente, provincie or waterschap its own; 'gelden op <dag>' asks for that day. Questions about the law itself, definitions, procedures, costs, participation, the council, Staten, parliament or ministers, and questions naming publications, case law, enforcement, permits, tenders, budgets, statistics or news keep their own route, as do questions longer than 500 characters. For a place, an address or ontwerpen the DSO's answer stands even when it is empty; when the DSO fails, gives no answer within 20 s or does not know the place, the other routes answer and access_note says why. Questions no route answers fall back to the data.overheid.nl dataset catalogue; access_note then names the routes that were tried and whether they found nothing or failed. The search terms derived from the question are reported in access_note. Use this when the best source is unclear.", annotations: TOOL_ANNOTATIONS }, async ({ question, top, reference_now, timezone, offset, limit, outputFormat, verbose, dryRun }) => {
-    const decodedQuestion = (() => {
-      try { return decodeURIComponent(question.replace(/\+/g, " ")); } catch { return question; }
-    })();
-    const temporal = parseTemporalRange(decodedQuestion, { now: reference_now, timeZone: timezone ?? config.temporal.defaultTimeZone });
-    const questionForSearch = temporal?.cleanedQuery?.trim() ? temporal.cleanedQuery : decodedQuestion;
-    const q = questionForSearch.toLowerCase();
-    const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    // Match intent terms op woordgrenzen i.p.v. naïeve substring-includes, zodat
-    // korte tokens (bv. "mp") niet binnen andere woorden matchen ("temperatuur",
-    // "lamp", "pomp"). Werkt met meerwoords-termen ("tweede kamer", "raad van
-    // state") en koppeltekens ("defensie-uitgaven").
-    const matchesTerm = (haystack: string, term: string): boolean => {
-      const t = term.trim();
-      if (!t) return false;
-      return new RegExp(`\\b${escapeRegExp(t)}\\b`).test(haystack);
-    };
-    const has = (terms: string[]) => terms.some((t) => matchesTerm(q, t));
-
-    // "Uitspraken van de minister over jeugdzorg": "uitspraken" means statements
-    // here and names the kind of answer, not its topic. As a search term it
-    // found Tweede Kamer papers with "uitspraken" in the title on any subject.
-    const uitspraken = uitsprakenSense(questionForSearch);
-    const answerKindWords = uitspraken === "statements" ? ["uitspraak", "uitspraken"] : [];
-    const keywords = (input: string, exclude: Iterable<string> = []): string[] =>
-      extractKeywords(input, { exclude: [...exclude, ...answerKindWords] });
-    // Runs of capitalised words the keywords grouped into one term ("Schiphol
-    // Geluidsoverlast"): no phrase the question holds, unlike a quoted term or
-    // "open data portaal". Tweede Kamer and Officiële Bekendmakingen get their
-    // words (toPhraseQuery); only the Tweede Kamer route tries the phrase first.
-    const nameTerms: ReadonlySet<string> = new Set(
-      extractKeywordTerms(questionForSearch).filter((term) => term.kind === "name").map((term) => term.text),
-    );
-
-    // Route-specific words that select the source and are no search topic there.
-    const tkRouteWords = ["tweede kamer", "parlement", "motie", "moties", "amendement", "amendementen", "kamerstuk", "kamerstukken", "kamervraag", "kamervragen", "debat", "debatten", "stemming", "stemmingen", "fractie", "fracties", "commissie", "commissies", "wetsvoorstel", "wetsvoorstellen", "kamerlid", "kamerleden", "minister-president", "premier", "aangenomen", "verworpen"];
-    // Officiële Bekendmakingen: a journal named in the question is the
-    // publicatieblad filter, not a word every publication must contain, and
-    // "bekendmakingen" only picks the route.
-    const obJournalWords: Record<string, string> = {
-      staatscourant: "Staatscourant",
-      stcrt: "Staatscourant",
-      gemeenteblad: "Gemeenteblad",
-      gmb: "Gemeenteblad",
-      staatsblad: "Staatsblad",
-      tractatenblad: "Tractatenblad",
-      "provinciaal blad": "Provinciaal blad",
-      waterschapsblad: "Waterschapsblad",
-    };
-    const obRouteWords = ["bekendmaking", "bekendmakingen", "officiele publicatie", "officiële publicatie", "officiele publicaties", "officiële publicaties", ...Object.keys(obJournalWords)];
-    // A question that names several sources ("Welke kamerstukken en
-    // publicaties in de Staatscourant gaan over parkeerbeleid?") carries the
-    // route words of all of them, and every source required the others'
-    // words: Officiële Bekendmakingen "kamerstukken", Tweede Kamer
-    // "staatscourant". The words that name a source or its kind of document,
-    // and that the question contains, are no topic for any source.
-    // Organisations that are also a source (CBS, DUO, Rijksoverheid) stay:
-    // "Wat doet DUO met …" is about them. "publicaties" alone is generic, but
-    // next to a journal ("publicaties in de Staatscourant") it names the
-    // official publications too.
-    const namesOfficialPublications = obRouteWords.some((word) => matchesTerm(q, word));
-    const namedDocumentWords = [...tkRouteWords, ...obRouteWords, ...(namesOfficialPublications ? ["publicatie", "publicaties"] : [])]
-      .filter((word) => matchesTerm(q, word));
-    // Court rulings are what Rechtspraak holds: next to another source's
-    // papers ("Welke uitspraken en kamervragen zijn er over huurbescherming?")
-    // "uitspraken" names that source too, and Tweede Kamer found nothing with
-    // it as a required word. On its own ("Uitspraak in de zaak tegen de
-    // minister") it is what government news and parliamentary papers
-    // respond to, and it stays.
-    const namedRulingWords = uitspraken === "rulings" && namedDocumentWords.length ? ["uitspraak", "uitspraken"].filter((word) => matchesTerm(q, word)) : [];
-    const namedRouteWords = [...namedDocumentWords, ...namedRulingWords];
-    // Council papers are motions, amendments and votes too, in committees and
-    // by fractions: in Open Raadsinformatie those words are no other source's.
-    const councilDocumentWords = new Set(["motie", "moties", "amendement", "amendementen", "debat", "debatten", "stemming", "stemmingen", "fractie", "fracties", "commissie", "commissies", "aangenomen", "verworpen"]);
-    const namedNationalRouteWords = namedRouteWords.filter((word) => !councilDocumentWords.has(word));
-    /**
-     * Topic keywords for one source: without its own route words (`own`) and
-     * without the route words the question names (`named`). When those are
-     * all the question has, they are its topic after all ("Welke kamerstukken
-     * gaan over de Staatscourant?"): then only the source's own words go, as
-     * before.
-     */
-    const topicTerms = (input: string, own: Iterable<string> = [], named: string[] = namedRouteWords): string[] => {
-      const ownWords = [...own];
-      const narrowed = keywords(input, [...ownWords, ...named]);
-      return narrowed.length ? narrowed : keywords(input, ownWords);
-    };
-
-    // Topic keywords of the question, minus words the route already acts on
-    // ("aanbestedingen" for TenderNed) and the route words of other sources.
-    // The moderate rewrite only strips the question frame and kept "welke …
-    // zijn er voor …", which OR-matching (TenderNed) and AND-matching (CKAN,
-    // SRU) sources both choke on.
-    const makeKeywordQuery = (input: string, exclude: Iterable<string> = []): string =>
-      topicTerms(input, exclude).join(" ") || rewriteQuery(input, "moderate").rewritten;
-
-    const makeStrictQuery = (input: string): string =>
-      rewriteQuery(input, "strict").rewritten;
-
-    // Rechtspraak gets the strict rewrite, not keywords; the route words the
-    // question names come out of it as well ("Welke uitspraken en kamervragen
-    // zijn er over huurbescherming?" made it require "kamervragen"). A word of
-    // a name the question capitalised ("Europees Parlement") stays, unless the
-    // name is a route word itself ("Tweede Kamer").
-    const namedRouteTokens = new Set(namedRouteWords.flatMap((word) => word.split(/\s+/)));
-    const makeRechtspraakQuery = (input: string): string => {
-      const strict = makeStrictQuery(input);
-      if (!namedRouteTokens.size) return strict;
-      const nameWords = new Set(
-        keywords(input)
-          .filter((term) => term.includes(" ") && !term.split(" ").every((word) => namedRouteTokens.has(word)))
-          .flatMap((term) => term.split(" ")),
-      );
-      const kept = strict.split(/\s+/).filter((word) => word && (!namedRouteTokens.has(word) || nameWords.has(word)));
-      // Only route words (or the recency marker) left: they are the topic.
-      return kept.some((word) => word !== "laatste") ? kept.join(" ") : strict;
-    };
-
-    // The question minus its frame ("Wat is het ..."), every other word kept.
-    const makeModerateQuery = (input: string): string => rewriteQuery(input, "moderate").rewritten;
-
-    // CBS keeps the moderate rewrite: its catalogue search is a case-sensitive
-    // substring match on table titles and its candidate cascade is tuned to it.
-    const makeCbsQuery = makeModerateQuery;
-
-    // Report the search terms a route derived from the question (access_note).
-    const queryNote = (used: string): string | undefined => rewriteNote({ original: decodedQuestion, rewritten: used });
-    const temporalNote = temporal
-      ? `Periode toegepast: ${temporal.from} t/m ${temporal.to} (${temporal.matchedPattern}).`
-      : undefined;
-
-    // The document type the Tweede Kamer route filters on, when the question names one.
-    const tkType = /\bmoties?\b/.test(q)
-      ? "Motie"
-      : /\bamendementen?\b/.test(q)
-        ? "Amendement"
-        : /\bkamervra(?:ag|gen)\b/.test(q)
-          ? "Schriftelijke vragen"
-          : undefined;
-    // The Tweede Kamer topic without the route words. parseTkQuery matches a
-    // quoted term as a whole phrase: a phrase the question holds goes quoted,
-    // a run of capitalised words as its words (nameTerms). The Tweede Kamer
-    // route tries such a name as a phrase first (tkNamedTopic: "Ring Utrecht"
-    // is not every paper with "ring" in a word and "utrecht"), then the same
-    // words loose (tkLooseTopic). When the phrase finds fewer papers than
-    // asked for, tkTopic fills the rest: only the names (tkNameTopicTerms) as
-    // their words. A phrase the question holds stays one: a quoted one, and a
-    // fixed word group ("open data", "medische gegevens"), whose words apart
-    // found papers on other subjects ("open" in "openbaar").
-    const tkTopicTerms = topicTerms(questionForSearch, tkRouteWords);
-    const tkTopic = toPhraseQuery(tkTopicTerms, nameTerms);
-    const tkNamedTopic = toPhraseQuery(tkTopicTerms);
-    const tkLooseTopic = tkTopicTerms.join(" ");
-    const tkNameTopicTerms = tkTopicTerms.filter((term) => nameTerms.has(term));
-    // In a multi-source answer Tweede Kamer gets one search, without a type
-    // filter, and without a topic the question minus its frame.
-    const tkMultiQuery = tkTopic || makeModerateQuery(questionForSearch) || questionForSearch;
-    const obJournals = [...new Set(Object.entries(obJournalWords).filter(([word]) => matchesTerm(q, word)).map(([, name]) => name))];
-    const obPublicatieblad = obJournals.length ? obJournals.join(", ") : undefined;
-    // The topic without the route words, a phrase the question holds as a
-    // phrase and a run of capitalised words as its words (the SRU search
-    // ranked "klimaatakkoord parijs" as a phrase below unrelated full texts);
-    // with only a journal and no topic, that journal's newest publications.
-    // Without either, the keywords as before. `looseQuery`: the same words
-    // without quotes, for when no publication holds the phrase.
-    const obSearch = (): { query: string; looseQuery?: string; publicatieblad?: string; sort?: "date_newest"; note?: string } => {
-      const terms = topicTerms(questionForSearch, obRouteWords);
-      const topic = toPhraseQuery(terms, nameTerms);
-      const looseQuery = terms.join(" ") !== topic ? terms.join(" ") : undefined;
-      if (!obPublicatieblad) return { query: topic || makeKeywordQuery(questionForSearch) || questionForSearch, looseQuery };
-      return {
-        query: topic,
-        looseQuery,
-        publicatieblad: obPublicatieblad,
-        ...(topic ? {} : { sort: "date_newest" as const }),
-        note: `Gefilterd op publicatieblad '${obPublicatieblad}'${topic ? "" : ", nieuwste eerst"}.`,
-      };
-    };
-    const tenderRouteWords = ["aanbesteding", "aanbestedingen", "tender", "tenders", "tenderned", "gunning", "gunningen", "gegund", "marktconsultatie", "offerteaanvraag", "overheidsopdracht", "overheidsopdrachten", "inkoop", "procurement", "opdrachten"];
-    // The catalogue holds nothing but data, so "data" is no search term there,
-    // unless it is part of a term: extractKeywords keeps "open data portaal"
-    // and "data strategie" whole.
-    const catalogRouteWords = ["data", "dataset", "datasets", "gegevens", "databestand", "databestanden"];
-    const effectiveLimit = limit ?? top;
-
-    const requestDebug: Array<{
-      connector: string;
-      request_url: string;
-      request_method: string;
-      response_time_ms: number;
-      cache_hit: boolean | null;
-      cache_ttl_remaining_s: number | null;
-    }> = [];
-    const fallbackSteps: string[] = [];
-    type AskFailures = NonNullable<ReturnType<typeof successResponse>["failures"]>;
-    // Routes that ran without an answer. The catalogue fallback names them, so
-    // that "Rechtspraak failed" no longer reads as "no source recognised"; a
-    // failed route is also reported in `failures` of whatever answers next.
-    const triedRoutes: string[] = [];
-    const routeFailures: AskFailures = [];
-    // Set when the DSO route ran without answering: whichever route answers
-    // says that the DSO was tried and why it did not answer.
-    let dsoNote: string | undefined;
-    let debatNote: string | undefined;
-    let algoritmeNote: string | undefined;
-    const routeEmpty = (label: string, step: string) => {
-      fallbackSteps.push(step);
-      triedRoutes.push(`${label} (0 resultaten)`);
-    };
-    const routeFailed = (label: string, connector: string, error: unknown, step = `${connector}:search_failed`) => {
-      const mapped = mapSourceError(error, label);
-      const refused = error instanceof BekendmakingenRefusedError;
-      fallbackSteps.push(refused ? `${connector}:query_refused` : step);
-      triedRoutes.push(refused ? `${label} (zoekvraag geweigerd, niet gezocht)` : `${label} (mislukt: ${mapped.error})`);
-      routeFailures.push({ connector, error_type: mapped.error, message: mapped.message });
-    };
-
-    const timed = async <T>(connector: string, fn: () => Promise<T>): Promise<T> => {
-      const started = Date.now();
-      const out = await fn();
-      const elapsed = Date.now() - started;
-
-      const endpoint =
-        out && typeof out === "object" && "endpoint" in (out as Record<string, unknown>)
-          ? String((out as Record<string, unknown>).endpoint ?? "")
-          : "";
-
-      requestDebug.push({
-        connector,
-        request_url: endpoint,
-        request_method: "GET",
-        response_time_ms: elapsed,
-        cache_hit: null,
-        cache_ttl_remaining_s: null,
-      });
-
-      return out;
-    };
-
-    /**
-     * Officiële Bekendmakingen with the query obSearch made, or the policy
-     * search's. A refused query is a failure (assertBekendmakingenSearched).
-     * When no publication holds a phrase of the question, the same words
-     * loose (`looseQuery`), as before phrases were sent; `query` is the one
-     * that answered.
-     */
-    const searchBekendmakingen = async (
-      query: string,
-      looseQuery: string | undefined,
-      args: Omit<Parameters<typeof bekend.search>[0], "query">,
-    ): Promise<{ out: Awaited<ReturnType<typeof bekend.search>>; query: string }> => {
-      const out = await timed("officiele_bekendmakingen", () => bekend.search({ ...args, query }));
-      assertBekendmakingenSearched(out);
-      if (out.items.length || !looseQuery || looseQuery === query) return { out, query };
-      fallbackSteps.push(`officiele_bekendmakingen:loose_words:${looseQuery}`);
-      const loose = await timed("officiele_bekendmakingen", () => bekend.search({ ...args, query: looseQuery }));
-      assertBekendmakingenSearched(loose);
-      return { out: loose, query: looseQuery };
-    };
-
-    const buildVerbose = () => {
-      if (!verbose) return undefined;
-      const health: Record<string, unknown> = {};
-      for (const req of requestDebug) {
-        if (!health[req.connector]) {
-          health[req.connector] = getConnectorHealth(req.connector);
-        }
-      }
-      return {
-        requests: requestDebug,
-        fallbacks_used: fallbackSteps,
-        connector_health: health,
-        temporal_context: temporal?.context,
-      } as Record<string, unknown>;
-    };
-
-    const askSuccess = (args: {
-      summary: string;
-      records: MCPRecord[];
-      provenance: ReturnType<typeof prov>;
-      access_note?: string;
-      failures?: AskFailures;
-      total?: number | null;
-    }) => {
-      // A source that failed in the multi-source step and again on its own
-      // route is one failure.
-      const failures = [...routeFailures, ...(args.failures ?? [])].filter(
-        (f, i, all) => all.findIndex((g) => g.error_type === f.error_type && g.message === f.message) === i,
-      );
-      // The router fetches up to `top` records and pages (offset/limit) within
-      // those: a later offset cannot reach the source's other hits. With the
-      // source's total as pagination total, has_more promised a next page
-      // that came back empty. The pagination counts the records held; the
-      // source's total stays in provenance.total_results and is named here.
-      const held = args.records.length;
-      const sourceTotal = typeof args.total === "number" && args.total > held ? args.total : undefined;
-      const pagingNote = sourceTotal === undefined
-        ? undefined
-        : `De bron meldt ${sourceTotal.toLocaleString("nl-NL")} treffers; nl_gov_ask haalt er ${held} op en bladert met offset/limit alleen daarbinnen. ` +
-          `Voor meer: ${top < config.limits.maxRows ? `verhoog 'top' (max ${config.limits.maxRows}) of ` : ""}gebruik de zoektool van de bron.`;
-      return toMcpToolPayload(
-        {
-          ...buildFormattedResponse({
-            summary: args.summary,
-            records: args.records,
-            provenance: args.provenance,
-            outputFormat,
-            offset,
-            limit: effectiveLimit,
-            total: held,
-            access_note: mergeAccessNotes(dsoNote, debatNote, algoritmeNote, args.access_note, pagingNote),
-            failures: failures.length ? failures : undefined,
-          }),
-          verbose: buildVerbose(),
-        },
-      );
-    };
-
-    const cbsTerms = ["cbs", "statistiek", "statistieken", "statistics", "bevolking", "population", "inwoner", "inwoners", "inflatie", "werkloos", "werkloosheid", "woning", "woningen", "inkomen", "inkomens", "economie", "bbp", "gdp", "import", "export", "geboorte", "geboortes", "sterfte", "opleidingsniveau", "opleiding", "onderwijsniveau", "emissie", "emissies"];
-    const tkTerms = ["tweede kamer", "parlement", "motie", "moties", "amendement", "amendementen", "kamerstuk", "kamerstukken", "kamervraag", "kamervragen", "debat", "debatten", "stemming", "stemmingen", "fractie", "fracties", "commissie", "commissies", "wetsvoorstel", "wetsvoorstellen", "kamerlid", "kamerleden", "minister-president", "premier"];
-    const obTerms = ["staatsblad", "staatscourant", "tractatenblad", "gemeenteblad", "provinciaal blad", "waterschapsblad", "bekendmaking", "bekendmakingen", "verordening", "verordeningen", "regeling", "regelingen", "officieel besluit", "officiele publicatie", "officiële publicatie", "stcrt", "gmb"];
-    const rijkTerms = ["rijksoverheid", "kabinet", "minister", "ministerie", "beleid", "toespraak", "schoolvakantie", "schoolvakanties", "school holiday", "school holidays", "vakantie regio"];
-    const budgetTerms = ["begroting", "begrotingen", "rijksbegroting", "budget", "uitgaven", "spending", "rijksfinanci", "begrotingsartikel", "defensie-uitgaven"];
-    const duoTerms = ["school", "scholen", "leerling", "leerlingen", "student", "studenten", "leraar", "leraren", "docent", "docenten", "teacher", "onderwijs", "education", "slagingspercentage", "slagingspercentages", "examen", "examens", "diploma", "diplomas", "duo", "basisschool", "basisscholen", "middelbare", "mbo", "hbo", "universiteit", "universiteiten"];
-    const weatherTerms = ["weer", "weather", "temperatuur", "rain", "regen", "wind", "storm", "klimaat", "earthquake", "aardbeving", "seismologie"];
-    const apiTerms = ["welke api", "which api", "is er een api", "data over", "api heeft"];
-    // Case-law words split in three: the first set always means rulings, the
-    // second also occurs in policy questions ("Wat doet de gemeente aan
-    // handhaving?", "mensen met een zwaar beroep"), and "uitspraak" /
-    // "uitspraken" are rulings only when no office holder is their subject
-    // ("Uitspraken van de minister over jeugdzorg" asks for statements, see
-    // uitsprakenSense).
-    const caseLawTerms = ["jurisprudentie", "rechtspraak", "rechtszaak", "rechtszaken", "rechterlijke uitspraak", "rechterlijk", "ecli", "vonnis", "vonnissen", "arrest", "arresten", "gerechtshof", "rechtbank", "raad van state", "hoge raad", "centrale raad van beroep", "college van beroep", "tuchtrecht", "bestuursrecht"];
-    const enforcementTerms = ["beschikking", "gesanctioneerd", "sanctie", "sancties", "handhaving", "boete", "overtreding", "beroep", "bezwaar"];
-    const caseLawAsked = has(caseLawTerms) || uitspraken === "rulings";
-    const rechtspraakAsked = caseLawAsked || has(enforcementTerms);
-    const verkiezingTerms = ["verkiezing", "verkiezingen", "verkiezingsuitslag", "verkiezingsuitslagen", "kiesraad", "opkomst", "opkomstpercentage", "gestemd", "stembureau", "stembureaus", "kiesgerechtigden", "election", "election results"];
-    const aanbestedingTerms = ["aanbesteding", "aanbestedingen", "tender", "tenders", "tenderned", "gunning", "gunningen", "gegund", "marktconsultatie", "offerteaanvraag", "overheidsopdracht", "overheidsopdrachten", "inkoop", "procurement"];
-    // Disciplinary law has its own collection; rechtspraak.nl does not carry it.
-    const tuchtrechtTerms = ["tuchtrecht", "tuchtcollege", "tuchtcolleges", "tuchtklacht", "tuchtklachten", "tuchtzaak", "tuchtzaken", "berisping", "doorhaling", "tuchtrechter"];
-    const gewasTerms = ["gewasperceel", "gewaspercelen", "landbouwperceel", "landbouwpercelen", "landbouwgrond", "akkerbouw", "gewas", "gewassen", "teelt", "grondgebruik", "agrarisch"];
-    const catalogiTerms = ["productbeschrijving", "productbeschrijvingen", "samenwerkende catalogi", "gemeentelijke dienstverlening", "welke gemeenten bieden", "loket"];
-    // Only unambiguous air-quality words: bare "stikstof" is a parliamentary and
-    // agricultural topic, so it must keep routing to Tweede Kamer / CBS.
-    const luchtTerms = ["luchtkwaliteit", "luchtvervuiling", "luchtverontreiniging", "fijnstof", "fijn stof", "smog", "stikstofdioxide", "no2", "pm10", "pm2.5", "pm25", "ozon", "luchtmeetnet", "air quality"];
-    const examTerms = ["examen", "examens", "eindexamen", "slagingspercentage", "geslaagd", "geslaagden", "gezakt", "examencijfer", "examencijfers", "examenresultaten"];
-    const schoolTerms = ["school", "scholen", "basisschool", "basisscholen", "middelbare school", "middelbare scholen", "onderwijsinstelling", "onderwijsinstellingen", "vestiging", "vestigingen", "schooladres", "schooladressen"];
-
-    const scoreCbsTable = (item: Record<string, unknown>): number => {
-      const title = String(item.Title ?? item.title ?? "").toLowerCase();
-      const summary = String(item.Summary ?? item.summary ?? "").toLowerCase();
-      const text = `${title} ${summary}`;
-      let score = 0;
-      if (q.includes("gemeente") && text.includes("gemeente")) score += 4;
-      if ((q.includes("opleidingsniveau") || q.includes("onderwijsniveau")) && (text.includes("opleiding") || text.includes("onderwijs"))) score += 5;
-      if ((q.includes("inwoner") || q.includes("bevolking")) && (text.includes("bevolking") || text.includes("inwoner"))) score += 4;
-      if (text.includes("regio")) score += 2;
-      if (text.includes("period")) score += 2;
-      const terms = makeCbsQuery(questionForSearch).split(/\s+/).filter(Boolean);
-      for (const t of terms) if (text.includes(t)) score += 1;
-      return score;
-    };
-
-    try {
-      const likelyBudget = has(budgetTerms) || ((q.includes("hoeveel geeft") || q.includes("how much does")) && q.includes("uit"));
-      // Detect multi-source intent: explicit signals OR implicit (question spans 2+ domain term lists, or uses "en ... ook/daarnaast/tevens")
-      const explicitMulti = /(combineer|gecombineerd|vergel(?:ijk|ijken)|verhoud|versus|\bvs\b|zowel|naast|cross\s*source|multi\s*source)/i.test(decodedQuestion);
-      const implicitMulti = /\b(?:en\s+(?:is\s+(?:er|daar)|zijn\s+er|ook|tevens|daarnaast|verder)|maar\s+ook|alsook|alsmede)\b/i.test(decodedQuestion);
-
-      const plannerCandidates: Array<"cbs" | "tk" | "ob" | "rijk" | "budget" | "duo" | "api" | "rechtspraak"> = [];
-      if (has(cbsTerms)) plannerCandidates.push("cbs");
-      if (has(tkTerms)) plannerCandidates.push("tk");
-      if (has(obTerms)) plannerCandidates.push("ob");
-      if (has(rijkTerms)) plannerCandidates.push("rijk");
-      if (likelyBudget) plannerCandidates.push("budget");
-      if (has(duoTerms)) plannerCandidates.push("duo");
-      if (has(apiTerms)) plannerCandidates.push("api");
-      if (rechtspraakAsked) plannerCandidates.push("rechtspraak");
-
-      const uniquePlannerCandidates = Array.from(new Set(plannerCandidates));
-      const multiIntentSignal = explicitMulti || implicitMulti || uniquePlannerCandidates.length >= 2;
-      // EU legislation goes first: "Verordening (EU) 2016/679" would otherwise hit obTerms.
-      const euIntent = detectEuIntent(decodedQuestion);
-      // Omgevingswet documents (an omgevingsplan, -visie or -verordening, the
-      // rules at an address, ontwerpen ter inzage) are in the DSO; see
-      // detectDsoIntent. Only with a DSO key: without one such a question takes
-      // the routes it took before.
-      const dsoKey = process.env[ENV_KEYS.DSO_API_KEY]?.trim();
-      const dsoIntent = dsoKey && !euIntent ? detectDsoIntent(decodedQuestion) : undefined;
-      // What was said in a Tweede Kamer debate is in the verslagen; see detectDebatIntent.
-      const debatIntent = !euIntent && !dsoIntent ? detectDebatIntent(decodedQuestion) : undefined;
-      const debatArgs = debatIntent ? { ...debatIntent, date_from: temporal?.from, date_to: temporal?.to } : undefined;
-      // The algorithms a government body uses are in the Algoritmeregister; see detectAlgoritmeIntent.
-      const algoritmeIntent = !euIntent && !dsoIntent && !debatArgs ? detectAlgoritmeIntent(decodedQuestion) : undefined;
-      // EUR-Lex looks up a document number ("2016/679") itself, which the
-      // keyword extractor would split into "2016 679": a bare number goes
-      // through as is, and other slashed tokens stay whole.
-      const euSearchQuery = euIntent?.kind !== "search"
-        ? ""
-        : parseDocumentNumber(euIntent.query)
-          ? euIntent.query
-          : rewriteKeepingSyntax(euIntent.query, (text) => ({ original: text, rewritten: makeKeywordQuery(text), changed: true })).rewritten || euIntent.query;
-      // Organisation/policy questions go to ORI, official publications,
-      // parliament and government news instead of the dataset catalogue.
-      const detectedPolicyIntent = detectPolicyIntent(decodedQuestion);
-      // Not for a question a more specific route answers: case law
-      // (Rechtspraak, also for "Uitspraken van de Raad van State" or "Beroep
-      // tegen een besluit van de gemeente") and the API register ("Welke API
-      // heeft de overheid voor adressen?"). Those routes run after the policy
-      // routes, so without this guard they never saw such questions.
-      const caseLawIntent = caseLawAsked || (has(enforcementTerms) && detectedPolicyIntent?.strength !== "strong");
-      const apiIntent = has(apiTerms.filter((t) => /\bapi\b/.test(t)));
-      const policyIntent = detectedPolicyIntent && !caseLawIntent && !apiIntent ? detectedPolicyIntent : undefined;
-      // Strong signals (policy word, activity, council) search documents before
-      // the national routes; a bare organisation noun ("uitgaven van de
-      // overheid aan defensie") or a budget question first gets the route its
-      // words picked, and documents only when that route has nothing.
-      const policyEarly = policyIntent?.strength === "strong" && !likelyBudget;
-      const policyExclusions = [...MUNICIPAL_SCOPE_WORDS, ...ORGANISATION_WORDS, ...obRouteWords];
-      const policyTerms = policyIntent ? topicTerms(questionForSearch, policyExclusions) : [];
-      // Open Raadsinformatie searched across all councils: council papers keep
-      // their own words ("moties"), and a named municipality goes as a phrase
-      // (oriPlacePhrase), not as a loose word every hit must contain.
-      const policyOriQuery = (() => {
-        if (!policyIntent) return "";
-        const terms = topicTerms(questionForSearch, policyExclusions, namedNationalRouteWords);
-        const place = policyIntent.gemeente;
-        if (!place) return toOriQuery(terms);
-        const withoutPlace = topicTerms(questionForSearch, [...policyExclusions, place], namedNationalRouteWords);
-        // The place is no term of the question (a name the keywords split up): as before.
-        if (withoutPlace.length === terms.length) return toOriQuery(terms);
-        return [toOriQuery(withoutPlace), oriPlacePhrase(place)].filter(Boolean).join(" ");
-      })();
-      // A question that names a national publication or parliament explicitly
-      // ("Verordening parkeren gemeente Utrecht" is in the gemeenteblad) is not
-      // handed to the municipality's council records first.
-      const namesNationalSource = has(obTerms) || /\b(?:tweede kamer|eerste kamer|kamerstuk(?:ken)?|kamervra(?:ag|gen)|kamerlid|kamerleden|provinciaal blad)\b/.test(q);
-      const gemeenteForOri = policyIntent?.gemeente && !namesNationalSource ? policyIntent.gemeente : undefined;
-      const gemeenteTerms = gemeenteForOri
-        ? // "de raad van Amsterdam": within Amsterdam's council records "raad" is in every document.
-          topicTerms(questionForSearch, [...MUNICIPAL_SCOPE_WORDS, ...ORGANISATION_WORDS, "raad", "college", gemeenteForOri], namedNationalRouteWords)
-        : [];
-
-      if (dryRun) {
-        const endpointByCandidate: Record<string, string> = {
-          cbs: config.endpoints.cbsV4,
-          tk: config.endpoints.tweedeKamer,
-          ob: config.endpoints.bekendmakingenSru,
-          rijk: config.endpoints.rijksoverheid,
-          budget: config.endpoints.rijksbegroting,
-          duo: config.endpoints.duoDatasets,
-          api: config.endpoints.apiRegister,
-          rechtspraak: "https://uitspraken.rechtspraak.nl/api/zoek",
-          eu_cellar: "https://publications.europa.eu/webapi/rdf/sparql",
-          ori: "https://api.openraadsinformatie.nl/v1/elastic/_search",
-        };
-
-        // Estimate only: the specific routes further down can still answer first.
-        const policySources = gemeenteTerms.length
-          ? ["ori"]
-          : policyIntent && policyTerms.length
-            ? [...(policyIntent.municipal ? ["ori"] : []), "ob", "tk", "rijk"]
-            : [];
-        // Follow the route order below: the multi-source planner runs first, the
-        // municipal ORI route after CBS, the early document search after CBS, TK
-        // and OB, the late one only after every route a question word picked.
-        const multiPlanned = multiIntentSignal && uniquePlannerCandidates.length >= 2;
-        const routedEarlier = gemeenteTerms.length
-          ? uniquePlannerCandidates.includes("cbs")
-          : policyEarly
-            ? uniquePlannerCandidates.some((c) => c === "cbs" || c === "tk" || c === "ob")
-            : uniquePlannerCandidates.length > 0;
-        const plannedPolicy = !euIntent && !multiPlanned && !routedEarlier && policySources.length > 0;
-        const estimatedSources: string[] = dsoIntent
-          ? ["dso_omgevingsdocumenten"]
-          : debatArgs
-            ? ["tweede_kamer_debatten"]
-            : algoritmeIntent
-              ? ["algoritmeregister"]
-          : euIntent
-            ? ["eu_cellar"]
-            : plannedPolicy
-              ? policySources
-              : uniquePlannerCandidates.length
-                ? uniquePlannerCandidates
-                : ["data_overheid"];
-
-        const policyQueryFor = (candidate: string): string =>
-          candidate === "ori"
-            ? gemeenteTerms.length ? toOriQuery(gemeenteTerms) : policyOriQuery
-            : candidate === "rijk"
-              ? policyTerms.join(" ")
-              : toPhraseQuery(policyTerms, nameTerms);
-
-        // The first query each route below sends, made with the same helper:
-        // CBS keeps the moderate rewrite, Rechtspraak the strict one, Tweede
-        // Kamer searches the topic without its route words and filters on the
-        // document type the question names.
-        const tkSingleType = !multiPlanned && tkType ? tkType : undefined;
-        const obPlanned = obSearch();
-        const routeQueryFor = (candidate: string): string => {
-          switch (candidate) {
-            case "data_overheid":
-              return makeKeywordQuery(questionForSearch, catalogRouteWords);
-            case "cbs":
-              return makeCbsQuery(questionForSearch);
-            case "tk":
-              return multiPlanned
-                ? tkMultiQuery
-                : tkNamedTopic || (tkType ? "" : makeModerateQuery(questionForSearch));
-            case "rechtspraak":
-              return makeRechtspraakQuery(questionForSearch);
-            case "ob":
-              return obPlanned.query;
-            case "eu_cellar":
-              return euIntent?.kind === "search" ? euSearchQuery : (euIntent?.celex ?? "");
-            default:
-              return makeKeywordQuery(questionForSearch);
-          }
-        };
-
-        const plannedRequests = estimatedSources.flatMap<{ connector: string; method: string; url: string; params: Record<string, unknown> }>((candidate) => candidate === "dso_omgevingsdocumenten" && dsoIntent ? dsoPlannedRequests(dsoIntent, decodedQuestion, top) : candidate === "tweede_kamer_debatten" && debatArgs ? [{
-          connector: "tweede_kamer",
-          method: "GET",
-          url: `${config.endpoints.tweedeKamer}/Vergadering`,
-          params: { ...Object.fromEntries(Object.entries(debatArgs).filter(([, v]) => v !== undefined)), question: decodedQuestion, top },
-        }] : candidate === "algoritmeregister" && algoritmeIntent ? [{
-          connector: "algoritmeregister",
-          method: "POST",
-          url: ALGORITMEREGISTER_SEARCH_ENDPOINT,
-          params: { ...algoritmeIntent, question: decodedQuestion, limit: top },
-        }] : [{
-          connector: candidate,
-          method: "GET",
-          url: endpointByCandidate[candidate] ?? config.endpoints.dataOverheid,
-          params: {
-            // The terms the routes derive from the question, not the sentence itself.
-            query: plannedPolicy && candidate !== "data_overheid" ? policyQueryFor(candidate) : routeQueryFor(candidate),
-            question: decodedQuestion,
-            ...(candidate === "tk" && !plannedPolicy && tkSingleType ? { type: tkSingleType } : {}),
-            ...(candidate === "ob" && !plannedPolicy && obPlanned.publicatieblad ? { publicatieblad: obPlanned.publicatieblad, ...(obPlanned.sort ? { sort: obPlanned.sort } : {}) } : {}),
-            ...(plannedPolicy && candidate === "ori" && gemeenteTerms.length ? { gemeente: gemeenteForOri } : {}),
-            top,
-            ...(temporal ? { date_from: temporal.from, date_to: temporal.to } : {}),
-          },
-        }]);
-
-        const cacheStatus = estimatedSources.map((candidate) => ({
-          connector: candidate,
-          cache_policy: "hardcoded-ttl",
-        }));
-
-        const dryRunPayload = {
-          dry_run: true,
-          planned_requests: plannedRequests,
-          estimated_sources: estimatedSources,
-          cache_status: cacheStatus,
-          ...(temporal
-            ? {
-                temporal: {
-                  from: temporal.from,
-                  to: temporal.to,
-                  matched_pattern: temporal.matchedPattern,
-                  reference_now: temporal.context.referenceNow,
-                  time_zone: temporal.context.timeZone,
-                  today: temporal.context.today,
-                },
-              }
-            : {}),
-        };
-
-        return {
-          content: [{ type: "text", text: JSON.stringify(dryRunPayload, null, 2) }],
-          structuredContent: dryRunPayload,
-        };
-      }
-
-      if (euIntent) try {
-        if (euIntent.kind === "search") {
-          const euQuery = euSearchQuery;
-          const out = await timed("eu_cellar", () => euCellar.search({ query: euQuery, limit: top }));
-          const records = out.items.map((x) => record("eu-cellar", String(x.title ?? x.celex ?? "EU-handeling"), String(x.eurlex_url ?? "https://eur-lex.europa.eu"), x, String(x.document_type_label ?? ""), String(x.date ?? "")));
-          if (records.length) {
-            return askSuccess({ summary: `Router: EUR-Lex (${records.length} EU-handelingen)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), access_note: mergeAccessNotes(queryNote(euQuery), out.access_note), total: out.total });
-          }
-        } else if (euIntent.kind === "transposition") {
-          const out = await timed("eu_cellar", () => euCellar.nlTransposition({ id: euIntent.celex, limit: top }));
-          const records = out.items.map((x) => record("eu-cellar", String(x.title ?? x.identifier ?? "Omzettingsmaatregel"), String(x.canonical_url ?? `https://eur-lex.europa.eu/legal-content/NL/TXT/?uri=CELEX:${euIntent.celex}`), x, [x.measure_type, x.official_journal].filter(Boolean).join(" — "), String(x.publication_date ?? "")));
-          if (records.length) {
-            return askSuccess({ summary: `Router: EUR-Lex NL-omzetting ${euIntent.celex} (${records.length} maatregelen)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), access_note: out.access_note, total: out.total });
-          }
-        } else {
-          const out = await timed("eu_cellar", () => euCellar.document({ id: euIntent.celex }));
-          const records = out.items.map((x) => record("eu-cellar", String(x.title ?? x.celex ?? "EU-handeling"), String(x.eurlex_url ?? "https://eur-lex.europa.eu"), x, String(x.document_type_label ?? ""), String(x.date ?? "")));
-          if (records.length) {
-            return askSuccess({ summary: `Router: EUR-Lex ${euIntent.celex}`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), access_note: out.access_note, total: out.total });
-          }
-        }
-        routeEmpty("EUR-Lex", `eu_cellar:${euIntent.kind}:no_results`);
-      } catch (e) {
-        routeFailed("EUR-Lex", "eu_cellar", e, `eu_cellar:${euIntent.kind}:failed`);
-      }
-
-      if (dsoIntent && dsoKey) {
-        const dsoLabel = "DSO Omgevingsdocumenten";
-        const derived = Object.entries(dsoPlannedRequests(dsoIntent, decodedQuestion, top)[0].params)
-          .filter(([key]) => !["question", "top", "rows", "soort"].includes(key))
-          .map(([key, value]) => `${key} '${String(value)}'`)
-          .join(", ");
-        // The DSO did not answer: the other routes get the question, and their
-        // answer says that the DSO was tried and why it did not answer.
-        const dsoNotAnswered = (step: string, why: string, failure?: AskFailures[number]) => {
-          fallbackSteps.push(step);
-          if (failure) routeFailures.push(failure);
-          dsoNote = `${dsoLabel} eerst geprobeerd${derived ? ` (${derived})` : ""}: ${why}. Dit antwoord komt van de andere routes van nl_gov_ask.`;
-        };
-        let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
-        try {
-          const source = new DsoOmgevingsdocumentenSource(config, dsoKey);
-          const search = timed("dso_omgevingsdocumenten", () => source.search({ ...dsoIntent, rows: dsoRows(dsoIntent, top) }));
-          const deadline = new Promise<"deadline">((resolve) => {
-            deadlineTimer = setTimeout(() => resolve("deadline"), DSO_ROUTE_DEADLINE_MS);
-          });
-          const out = await Promise.race([search, deadline]);
-          if (out === "deadline") {
-            // The search runs on in the background and fills the catalogue cache for the next question.
-            search.catch(() => undefined);
-            const seconds = Math.round(DSO_ROUTE_DEADLINE_MS / 1000);
-            dsoNotAnswered("dso_omgevingsdocumenten:timeout", `geen antwoord binnen ${seconds} s, niet op gewacht`, {
-              connector: "dso_omgevingsdocumenten",
-              error_type: "timeout",
-              message: `${dsoLabel} gaf binnen ${seconds} s geen antwoord; niet op gewacht.`,
-            });
-          } else {
-            const ordered = out.locatie ? dsoLayerFirstPage(out.items, effectiveLimit) : out.items;
-            const records = ordered.map(dsoRecord);
-            // A question that named its scope or asked for ontwerpen gets the
-            // DSO's answer, also when that is nothing; only a bare document
-            // type over the whole country falls through to the other routes.
-            const specific = Boolean(out.locatie || out.bevoegdGezag || dsoIntent.provincie || dsoIntent.soort === "ontwerpregelingen" || dsoIntent.alleenTerInzage);
-            if (records.length || specific) {
-              const ontwerp = dsoIntent.soort === "ontwerpregelingen" || Boolean(dsoIntent.alleenTerInzage);
-              const typePlural: Record<string, string> = { gemeente: "gemeenten", provincie: "provincies", waterschap: "waterschappen", ministerie: "ministeries" };
-              const scope = out.locatie
-                ? out.locatie.weergavenaam
-                : dsoIntent.provincie
-                  ? `gebied provincie ${dsoIntent.provincie} (provincie en gemeenten)`
-                  : out.bevoegdGezag
-                    ? (out.bevoegdGezag.naam ?? out.bevoegdGezag.code)
-                    : dsoIntent.typeBevoegdGezag
-                      ? `alle ${typePlural[dsoIntent.typeBevoegdGezag] ?? dsoIntent.typeBevoegdGezag}`
-                      : "heel Nederland";
-              // An ontwerp without an inzagetermijn in the DSO is only possibly ter inzage: counted apart.
-              const confirmed = out.items.filter((x) => x.terInzage === true).length;
-              const possibly = dsoIntent.alleenTerInzage ? out.items.filter((x) => x.terInzage !== true && x.mogelijkTerInzage).length : 0;
-              const counted = possibly
-                ? `${confirmed} ${confirmed === 1 ? "ontwerp" : "ontwerpen"} ter inzage, ${possibly} mogelijk ter inzage`
-                : ontwerp
-                  ? `${records.length} ${records.length === 1 ? "ontwerp" : "ontwerpen"}${dsoIntent.alleenTerInzage ? " ter inzage" : ""}`
-                  : `${records.length} ${records.length === 1 ? "document" : "documenten"}`;
-              const emptyNote = records.length
-                ? undefined
-                : dsoIntent.alleenTerInzage
-                  ? "Geen ontwerp waarvan de in het DSO geregistreerde inzagetermijn vandaag loopt. Niet elk ontwerp heeft zijn inzagetermijn in het DSO: de kennisgeving staat in het Gemeenteblad, Provinciaal blad of Waterschapsblad (officiele_bekendmakingen_search), net als ontwerpbesluiten buiten het DSO, zoals die voor een omgevingsvergunning. De recentste ontwerpen: dso_omgevingsdocumenten_search met soort 'ontwerpregelingen', zonder alleen_ter_inzage."
-                  : `Het DSO heeft voor deze zoekvraag geen ${ontwerp ? "ontwerpen" : "documenten"}. Besluiten van vóór de Omgevingswet en documenten buiten het DSO staan in de officiële bekendmakingen (officiele_bekendmakingen_search).`;
-              const layerNote = out.locatie && out.items.length ? dsoLayerNote(out.items, effectiveLimit) : undefined;
-              const used = [dsoIntent.locatie, dsoIntent.bevoegdGezag, dsoIntent.provincie, out.bevoegdGezag?.naam].filter((x): x is string => Boolean(x));
-              const topics = records.length ? dsoTopicWords(decodedQuestion, used) : [];
-              const topicNote = topics.length
-                ? `Onderwerp '${topics.join(" ")}' is niet in de documenten doorzocht: het DSO zoekt op titel en metadata. Zoek in de regeltekst met dso_omgevingsdocument_tekst (identificatie, zoekterm '${topics[0]}'; een kortere stam vindt ook samenstellingen).`
-                : undefined;
-              // A year that is part of a title ("Omgevingsvisie Amsterdam 2050") asks for no period.
-              const periodAsked = temporal && (temporal.matchedPattern !== "bare_year" || DSO_PERIOD_YEAR_RE.test(decodedQuestion));
-              const periodNote = periodAsked && !dsoIntent.geldigOp
-                ? `De periode uit de vraag (${temporal.from} t/m ${temporal.to}) is niet toegepast: dit zijn de ${ontwerp ? "ontwerpen die nu bekend zijn" : "documenten die vandaag gelden"}.${ontwerp ? "" : " Voor een andere dag: noem die dag ('gelden op 1 januari 2025') of gebruik dso_omgevingsdocumenten_search met geldigOp (JJJJ-MM-DD)."}`
-                : undefined;
-              return askSuccess({
-                summary: `Router: DSO Omgevingsdocumenten — ${scope} (${counted})`,
-                records,
-                provenance: prov("nl_gov_ask", out.endpoint, out.query, records.length, out.total),
-                access_note: mergeAccessNotes(
-                  `Vraag over omgevingsdocumenten onder de Omgevingswet: gezocht in het DSO${derived ? ` (${derived})` : ""}.`,
-                  emptyNote,
-                  layerNote,
-                  topicNote,
-                  periodNote,
-                  dsoRouterNote(out.access_note, out.bevoegdGezag?.naam),
-                ),
-                total: out.total,
-              });
-            }
-            dsoNotAnswered("dso_omgevingsdocumenten:no_results", "0 documenten");
-          }
-        } catch (e) {
-          if (e instanceof DsoInputError) {
-            // A name or address the DSO does not know: the other routes still get the question.
-            dsoNotAnswered("dso_omgevingsdocumenten:input_not_resolved", `${e.message} ${e.suggestion}`.trim().replace(/\.$/, ""));
-          } else {
-            // A failure of the PDOK Locatieserver, which finds the address, is PDOK's, not the DSO's.
-            const locatieserver = e instanceof SourceRequestError && /^https:\/\/api\.pdok\.nl\//.test(e.endpoint);
-            const mapped = mapSourceError(e, locatieserver ? "PDOK Locatieserver (locatie voor het DSO)" : dsoLabel);
-            dsoNotAnswered("dso_omgevingsdocumenten:search_failed", `mislukt (${mapped.error}: ${mapped.message.replace(/\.$/, "")})`, {
-              connector: "dso_omgevingsdocumenten",
-              error_type: mapped.error,
-              message: mapped.message,
-            });
-          }
-        } finally {
-          clearTimeout(deadlineTimer);
-        }
-      }
-
-      if (debatArgs) {
-        const described = Object.entries(debatArgs)
-          .filter(([, v]) => v !== undefined)
-          .map(([key, value]) => `${key} '${String(value)}'`)
-          .join(", ");
-        try {
-          const out = await timed("tweede_kamer", () => debatten.search(debatArgs));
-          if (out.hits.length) {
-            const records = await debatRecords(out.hits.slice(0, top), DEBAT_DEFAULT_CHARS);
-            return askSuccess({
-              summary: `Router: Tweede Kamer-debatten — ${debatSummary(out)}`,
-              records,
-              provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.hits.length),
-              access_note: mergeAccessNotes(
-                `Vraag over wat er in een Kamerdebat is gezegd: gezocht in de verslagen van de Tweede Kamer (${described}). Meer of andere fragmenten: tweede_kamer_debatten.`,
-                debatNotes(out, false),
-              ),
-              total: out.hits.length,
-            });
-          }
-          fallbackSteps.push("tweede_kamer_debatten:no_results");
-          debatNote = `Eerst gezocht in de verslagen van Kamerdebatten (${described}, ${out.searched.length} vergaderingen): niets gevonden. Dit antwoord komt van de andere routes van nl_gov_ask.`;
-        } catch (e) {
-          const mapped = mapTweedeKamerError(e);
-          fallbackSteps.push("tweede_kamer_debatten:search_failed");
-          routeFailures.push({ connector: "tweede_kamer", error_type: mapped.error, message: mapped.message });
-          debatNote = `Eerst gezocht in de verslagen van Kamerdebatten (${described}): mislukt. Dit antwoord komt van de andere routes van nl_gov_ask.`;
-        }
-      }
-
-      if (algoritmeIntent) {
-        const described = Object.entries(algoritmeIntent)
-          .map(([key, value]) => `${key} '${String(value)}'`)
-          .join(", ");
-        try {
-          const out = await timed("algoritmeregister", () => algoritmeregister.search({ ...algoritmeIntent, limit: clampAlgoritmeRows(top) }));
-          if (out.items.length) {
-            const records = out.items.map(algoritmeRecord);
-            return askSuccess({
-              summary: `Router: Algoritmeregister — ${summarizeAlgoritmeSearch(out)}`,
-              records,
-              provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total),
-              access_note: mergeAccessNotes(
-                `Vraag over algoritmes van de overheid: gezocht in het Algoritmeregister (${described}). Meer of filteren op status of categorie: algoritmeregister_search.`,
-                out.access_note,
-              ),
-              total: out.total,
-            });
-          }
-          fallbackSteps.push("algoritmeregister:no_results");
-          algoritmeNote = `Eerst gezocht in het Algoritmeregister (${described}): niets gevonden. Dit antwoord komt van de andere routes van nl_gov_ask.`;
-        } catch (e) {
-          const mapped = mapSourceError(e, "Algoritmeregister", "https://algoritmes.overheid.nl");
-          fallbackSteps.push("algoritmeregister:search_failed");
-          routeFailures.push({ connector: "algoritmeregister", error_type: mapped.error, message: mapped.message });
-          algoritmeNote = `Eerst gezocht in het Algoritmeregister (${described}): mislukt. Dit antwoord komt van de andere routes van nl_gov_ask.`;
-        }
-      }
-
-      if (multiIntentSignal && uniquePlannerCandidates.length >= 2) {
-        const failures: NonNullable<ReturnType<typeof successResponse>["failures"]> = [];
-
-        const runnableCandidates = uniquePlannerCandidates.filter((candidate) => {
-          if (candidate === "api" && !process.env[ENV_KEYS.OVERHEID_API_KEY]) {
-            failures.push({
-              connector: "api_register",
-              error_type: "not_configured",
-              message: "OVERHEID_API_KEY ontbreekt voor API-register queries",
-            });
-            return false;
-          }
-          return true;
-        });
-
-        const runCandidate = async (candidate: typeof runnableCandidates[number]) => {
-          switch (candidate) {
-            case "cbs": {
-              const candidates = [makeCbsQuery(questionForSearch), questionForSearch];
-              if (q.includes("inwoner") || q.includes("population")) candidates.push("bevolking");
-              if (q.includes("opleidingsniveau") || q.includes("opleiding")) candidates.push("opleidingsniveau gemeenten");
-              if (q.includes("werkloos")) candidates.push("werkloosheid");
-              if (q.includes("emissie")) candidates.push("emissie");
-
-              let query = candidates[0] || questionForSearch;
-              let out = await timed("cbs", () => cbs.searchTables(query, Math.max(top, 8)));
-              let items = out.items;
-
-              if (!items.length) {
-                for (const candidate of candidates.slice(1)) {
-                  if (!candidate || !candidate.trim()) continue;
-                  fallbackSteps.push(`cbs:fallback_candidate:${candidate}`);
-                  out = await timed("cbs", () => cbs.searchTables(candidate, Math.max(top, 8)));
-                  items = out.items;
-                  if (items.length) {
-                    query = candidate;
-                    break;
-                  }
-                }
-              }
-
-              const sorted = [...items].sort((a, b) => scoreCbsTable(b) - scoreCbsTable(a));
-              const records = sorted.slice(0, top).map((x) =>
-                record("cbs", String(x.Title ?? x.Identifier ?? "CBS"), "https://www.cbs.nl", x),
-              );
-              return { connector: "cbs", records, endpoint: out.endpoint, params: out.params, total: items.length, query };
-            }
-            case "tk": {
-              const query = tkMultiQuery;
-              const out = await timed("tweede_kamer", () => tk.searchDocuments({
-                query,
-                top,
-                date_from: temporal?.from,
-                date_to: temporal?.to,
-              }));
-              const records = out.items.map(tkDocumentRecord);
-              return { connector: "tweede_kamer", records, endpoint: out.endpoint, params: out.params, total: out.items.length, query };
-            }
-            case "ob": {
-              // Keywords, not the sentence: the SRU search ANDs every word. A
-              // journal the question names is a filter (obSearch). A refused
-              // query is a failure of this source, not 0 results.
-              const ob = obSearch();
-              const { out, query } = await searchBekendmakingen(ob.query, ob.looseQuery, {
-                maximumRecords: top,
-                publicatieblad: ob.publicatieblad,
-                sort: ob.sort,
-                date_from: temporal?.from,
-                date_to: temporal?.to,
-              });
-              const records = out.items.map((x) =>
-                record(
-                  "officielebekendmakingen",
-                  String(x.title ?? x.identifier ?? "Bekendmaking"),
-                  String(x.canonical_url ?? x.identifier ?? "https://zoek.officielebekendmakingen.nl"),
-                  x as Record<string, unknown>,
-                ),
-              );
-              return { connector: "officiele_bekendmakingen", records, endpoint: out.endpoint, params: out.params, total: out.total, query };
-            }
-            case "rijk": {
-              const query = makeKeywordQuery(questionForSearch) || questionForSearch;
-              const out = await timed("rijksoverheid", () => rijksoverheid.search({
-                query,
-                top,
-                date_from: temporal?.from,
-                date_to: temporal?.to,
-              }));
-              const records = out.items.map((x) =>
-                record("rijksoverheid", String(x.title ?? x.id ?? "Rijksoverheid"), String(x.canonical ?? x.url ?? "https://www.rijksoverheid.nl"), x),
-              );
-              return { connector: "rijksoverheid", records, endpoint: out.endpoint, params: out.params, total: out.total, query };
-            }
-            case "budget": {
-              const query = makeKeywordQuery(questionForSearch) || questionForSearch;
-              const out = await timed("rijksbegroting", () => rijksbegroting.search(query, top));
-              const records = out.items.map((x) =>
-                record("rijksbegroting", String(x.name ?? x.id ?? "Rijksbegroting"), String(x.url ?? "https://opendata.rijksbegroting.nl"), x),
-              );
-              return { connector: "rijksbegroting", records, endpoint: out.endpoint, params: out.params, total: out.total, query };
-            }
-            case "duo": {
-              const query = makeKeywordQuery(questionForSearch) || questionForSearch;
-              const out = await timed("duo", () => duo.datasetsCatalog(query, top));
-              const records = out.items.map((x) =>
-                record("duo", String(x.title ?? x.name ?? x.id ?? "DUO"), String(x.url ?? "https://onderwijsdata.duo.nl"), x),
-              );
-              return { connector: "duo", records, endpoint: out.endpoint, params: out.params, total: out.total, query };
-            }
-            case "api": {
-              const apiKey = process.env[ENV_KEYS.OVERHEID_API_KEY];
-              if (!apiKey) throw new Error("OVERHEID_API_KEY is not set");
-              const query = makeKeywordQuery(questionForSearch) || questionForSearch;
-              const out = await timed("api_register", () => new ApiRegisterSource(config, apiKey).search(query, top));
-              const records = out.items.map((x) =>
-                record("api-register", String(x.name ?? x.title ?? x.id ?? "API"), String(x.portalUrl ?? x.url ?? "https://apis.developer.overheid.nl"), x),
-              );
-              return { connector: "api_register", records, endpoint: out.endpoint, params: out.params, total: out.items.length, query };
-            }
-            case "rechtspraak": {
-              const query = makeRechtspraakQuery(questionForSearch) || questionForSearch;
-              const out = await timed("rechtspraak", () => rechtspraak.searchEcli({ query, rows: top, sort: "relevance" }));
-              const records = out.items
-                .filter((x) => Boolean(x.ecli))
-                .map((x) =>
-                  record("rechtspraak", String(x.title ?? x.ecli ?? x.id ?? "Rechtspraak uitspraak"), String(x.link ?? x.id ?? "https://data.rechtspraak.nl"), x as Record<string, unknown>, String(x.summary ?? x.ecli ?? ""), String(x.updated ?? "")),
-                );
-              return { connector: "rechtspraak", records, endpoint: out.endpoint, params: out.params, total: out.total, query };
-            }
-          }
-        };
-
-        const settled = await Promise.allSettled(runnableCandidates.map((c) => runCandidate(c)));
-
-        const mergedRecordsRaw: MCPRecord[] = [];
-        const successfulConnectors: string[] = [];
-        const connectorLabelMap: Record<string, string> = {
-          cbs: "CBS",
-          tk: "Tweede Kamer",
-          ob: "Officiële Bekendmakingen",
-          rijk: "Rijksoverheid",
-          budget: "Rijksbegroting",
-          duo: "DUO",
-          api: "API Register",
-          rechtspraak: "Rechtspraak",
-        };
-        // The search terms each source got, when they differ from the question.
-        const derivedQueries: string[] = [];
-
-        settled.forEach((result, idx) => {
-          const candidate = runnableCandidates[idx];
-
-          if (result.status === "fulfilled") {
-            const out = result.value;
-            successfulConnectors.push(out.connector);
-            if (queryNote(out.query)) derivedQueries.push(`${connectorLabelMap[candidate] ?? candidate} ${quotedQuery(out.query)}`);
-
-            const annotated = out.records.map((rec) => {
-              const data = { ...(rec.data ?? {}) };
-              data._provenance = {
-                connector: out.connector,
-                endpoint: out.endpoint,
-                query_params: out.params,
-                returned_results: out.records.length,
-                total_results: out.total,
-              };
-              return { ...rec, data };
-            });
-
-            mergedRecordsRaw.push(...annotated);
-            return;
-          }
-
-          const mapped = mapSourceError(result.reason, connectorLabelMap[candidate] ?? candidate);
-          failures.push({
-            connector: candidate === "api" ? "api_register" : candidate,
-            error_type: mapped.error,
-            message: mapped.message,
-          });
-          triedRoutes.push(
-            result.reason instanceof BekendmakingenRefusedError
-              ? `${connectorLabelMap[candidate] ?? candidate} (zoekvraag geweigerd, niet gezocht)`
-              : `${connectorLabelMap[candidate] ?? candidate} (mislukt: ${mapped.error})`,
-          );
-        });
-
-        const mergedRecords = dedupeMergedRecords(mergedRecordsRaw);
-        const dedupedCount = mergedRecordsRaw.length - mergedRecords.length;
-
-        if (mergedRecords.length) {
-          const notes: string[] = [];
-          if (derivedQueries.length) {
-            notes.push(`Zoektermen afgeleid uit de vraag: ${derivedQueries.join("; ")}.`);
-          }
-          if (obPublicatieblad && successfulConnectors.includes("officiele_bekendmakingen")) {
-            notes.push(`Officiële Bekendmakingen gefilterd op publicatieblad '${obPublicatieblad}'${obSearch().sort ? ", nieuwste eerst" : ""}.`);
-          }
-          if (temporal) {
-            notes.push(`Temporal range applied: ${temporal.from}..${temporal.to} (${temporal.matchedPattern}, ref=${temporal.context.referenceNow}, tz=${temporal.context.timeZone}).`);
-          }
-          if (failures.length) {
-            notes.push(`Partial failures: ${failures.map((f) => `${f.connector}(${f.error_type})`).join(", ")}`);
-          }
-          if (dedupedCount > 0) {
-            notes.push(`Deduplicated ${dedupedCount} duplicate records by identifier.`);
-          }
-
-          return askSuccess({
-            summary: `Router: multi-source (${mergedRecords.length} resultaten uit ${successfulConnectors.length} bronnen)`,
-            records: mergedRecords,
-            provenance: prov(
-              "nl_gov_ask",
-              "multi-source-planner",
-              {
-                question: decodedQuestion,
-                sources: successfulConnectors.join(","),
-              },
-              mergedRecords.length,
-              mergedRecords.length,
-            ),
-            access_note: notes.length ? notes.join(" ") : undefined,
-            failures: failures.length ? failures : undefined,
-            total: mergedRecords.length,
-          });
-        }
-
-        if (failures.length && !successfulConnectors.length) {
-          return toMcpToolPayload(errorResponse({
-            error: failures[0]?.error_type ?? "unexpected",
-            message: `Alle geselecteerde bronnen faalden: ${failures.map((f) => `${f.connector} (${f.error_type})`).join(", ")}`,
-            details: { failures },
-          }));
-        }
-        // Some sources answered with nothing and others failed (or refused
-        // the query): no "all sources failed", but on to the next routes,
-        // whose answer names the failures.
-        routeFailures.push(...failures);
-        routeEmpty(`Meerdere bronnen: ${successfulConnectors.join(", ")}`, "multi_source:no_results");
-      }
-
-      const isSchoolHolidayQuery = q.includes("schoolvakantie") || q.includes("schoolvakanties") || q.includes("school holiday") || q.includes("school holidays");
-      if (isSchoolHolidayQuery) {
-        const yearMatch = decodedQuestion.match(/\b(20\d{2})\b/);
-        const regionMatch = q.match(/\b(noord|midden|zuid)\b/);
-
-        let out = await timed("rijksoverheid", () => rijksoverheid.schoolholidays({
-          year: yearMatch ? Number(yearMatch[1]) : undefined,
-          region: regionMatch ? regionMatch[1] : undefined,
-        }));
-
-        if (!out.items.length && regionMatch) {
-          fallbackSteps.push("rijksoverheid:schoolholidays:no_region_match");
-          out = await timed("rijksoverheid", () => rijksoverheid.schoolholidays({ year: yearMatch ? Number(yearMatch[1]) : undefined }));
-        }
-        if (!out.items.length && yearMatch) {
-          fallbackSteps.push("rijksoverheid:schoolholidays:no_year_match");
-          out = await timed("rijksoverheid", () => rijksoverheid.schoolholidays({ region: regionMatch ? regionMatch[1] : undefined }));
-        }
-
-        const records = out.items.map((x)=>record("rijksoverheid", String(x.title ?? x.region ?? "Schoolvakantie"), String(x.canonical ?? "https://www.rijksoverheid.nl"), x, String(x.region ?? ""), String(x.startdate ?? "")));
-        if (records.length) {
-          return askSuccess({ summary: `Router: Rijksoverheid schoolvakanties (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, records.length), total: records.length });
-        }
-
-        fallbackSteps.push("rijksoverheid:schoolholidays:fallback_search");
-        const rijkOut = await timed("rijksoverheid", () => rijksoverheid.search({ query: "schoolvakantie", top }));
-        const rijkRecords = rijkOut.items.map((x)=>record("rijksoverheid", String(x.title ?? x.id ?? "Rijksoverheid"), String(x.canonical ?? x.url ?? "https://www.rijksoverheid.nl"), x));
-        if (rijkRecords.length) {
-          return askSuccess({ summary: `Router: Rijksoverheid (${rijkRecords.length} resultaten)`, records: rijkRecords, provenance: prov("nl_gov_ask", rijkOut.endpoint, rijkOut.params, rijkRecords.length, rijkOut.total), total: rijkOut.total });
-        }
-        routeEmpty("Rijksoverheid schoolvakanties", "rijksoverheid:schoolholidays:no_results");
-      }
-
-      // Specific-source routes run before the broad statistical/parliamentary
-      // ones: "verkiezingsuitslag in Tilburg" mentions a municipality, which the
-      // CBS branch would otherwise happily swallow.
-      if (has(verkiezingTerms)) try {
-        const gebied = extractPlaceName(decodedQuestion);
-        const out = await timed("verkiezingsuitslagen", () =>
-          verkiezingsuitslagen.uitslag({ verkiezing: extractVerkiezingHint(q), gebied }),
-        );
-        if (out.uitslag) {
-          const u = out.uitslag;
-          const records = u.partijen.slice(0, top).map((p) => record(
-            "verkiezingsuitslagen",
-            p.partij,
-            u.url,
-            { partij: p.partij, aantal_stemmen: p.aantalStemmen, percentage: p.percentage, aantal_zetels: p.aantalZetels, verkiezing: u.verkiezingCode, gebied: u.gebied, niveau: u.niveau, opkomst_percentage: u.opkomstPercentage },
-            `${p.aantalStemmen ?? "?"} stemmen (${p.percentage ?? "?"}%)`,
-            u.verkiezingDatum,
-          ));
-          if (records.length) {
-            return askSuccess({
-              summary: `Router: Verkiezingsuitslagen ${u.verkiezingNaam} — ${u.gebied} (${records.length} partijen)`,
-              records,
-              provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, u.partijen.length),
-              access_note: mergeAccessNotes(`Opkomst ${u.opkomstPercentage ?? "?"}%.`, out.access_note),
-              total: u.partijen.length,
-            });
-          }
-        }
-        routeEmpty("Verkiezingsuitslagen", "verkiezingsuitslagen:no_results");
-      } catch (e) {
-        // One dead upstream must not sink the router — fall through to the next source.
-        routeFailed("Verkiezingsuitslagen", "verkiezingsuitslagen", e);
-      }
-
-      if (has(aanbestedingTerms)) try {
-        // TenderNed ORs its search words, so every leftover "welke"/"zijn"/"voor"
-        // pulled in unrelated tenders; send the topic only.
-        const tenderQuery = makeKeywordQuery(questionForSearch, tenderRouteWords) || questionForSearch;
-        const out = await timed("tenderned", () =>
-          tenderned.search({ query: tenderQuery, rows: Math.min(top, 100), datumVanaf: temporal?.from, datumTot: temporal?.to }),
-        );
-        const records = out.items.map((x) => record(
-          "tenderned",
-          x.title,
-          x.url,
-          // As tenderned_aanbestedingen_search: a placeholder or unchecked closing date says so.
-          tenderNedRecordFields(x),
-          `${x.opdrachtgever}${x.typePublicatie ? ` — ${x.typePublicatie}` : ""}`.trim(),
-          x.publicatieDatum,
-        ));
-        if (records.length) {
-          return askSuccess({ summary: `Router: TenderNed (${records.length} publicaties)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), access_note: mergeAccessNotes(queryNote(tenderQuery), out.access_note), total: out.total });
-        }
-        routeEmpty("TenderNed", "tenderned:no_results");
-      } catch (e) {
-        routeFailed("TenderNed", "tenderned", e);
-      }
-
-      // Before the Rechtspraak route: disciplinary rulings are NOT on
-      // rechtspraak.nl, and "tuchtrecht" is one of its trigger words.
-      if (has(tuchtrechtTerms)) try {
-        const tuchtQuery = makeStrictQuery(questionForSearch) || questionForSearch;
-        const out = await timed("tuchtrecht", () =>
-          tuchtrecht.search({ query: tuchtQuery, date_from: temporal?.from, date_to: temporal?.to, maximumRecords: top }),
-        );
-        const records = out.items.map((raw) => {
-          const x = raw as import("./sources/koop-collecties.js").TuchtrechtItem;
-          return record(
-            "tuchtrecht",
-            x.title,
-            x.canonical_url,
-            { ecli: x.identifier, college: x.college, domein: x.domein, zaaknummer: x.zaaknummer, beslissing: x.beslissing, uitspraakdatum: x.uitspraakdatum, onderwerp: x.onderwerp },
-            [x.beslissing, x.onderwerp].filter(Boolean).join(" — ") || x.samenvatting,
-            x.uitspraakdatum,
-          );
-        });
-        if (records.length) {
-          return askSuccess({ summary: `Router: Tuchtrecht (${records.length} uitspraken)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), access_note: mergeAccessNotes(queryNote(tuchtQuery), out.access_note), total: out.total });
-        }
-        routeEmpty("Tuchtrecht", "tuchtrecht:no_results");
-      } catch (e) {
-        routeFailed("Tuchtrecht", "tuchtrecht", e);
-      }
-
-      if (has(gewasTerms)) try {
-        const gemeente = extractPlaceName(decodedQuestion);
-        if (gemeente) {
-          const out = await timed("brp_gewaspercelen", () =>
-            brpGewaspercelen.search({ gemeente, categorie: "all", includeGeometry: false, rows: top }),
-          );
-          const records = out.items.map((x) => record(
-            "brp_gewaspercelen",
-            x.title,
-            x.url,
-            { gewas: x.gewas, categorie: x.categorie, jaar: x.jaar, oppervlakte_ha: x.oppervlakteHa, centroid: x.centroid },
-            `${x.categorie}${x.oppervlakteHa !== null ? ` — ${x.oppervlakteHa} ha` : ""}`,
-            x.jaar,
-          ));
-          if (records.length) {
-            return askSuccess({ summary: `Router: BRP Gewaspercelen ${gemeente} (${records.length} percelen)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), access_note: out.access_note, total: out.total });
-          }
-          routeEmpty(`BRP Gewaspercelen ${gemeente}`, "brp_gewaspercelen:no_results");
-        }
-      } catch (e) {
-        routeFailed("BRP Gewaspercelen", "brp_gewaspercelen", e);
-      }
-
-      if (has(luchtTerms)) try {
-        const plaats = extractPlaceName(decodedQuestion);
-        const out = await timed("luchtmeetnet", () =>
-          luchtmeetnet.latest({ plaats, component: extractLuchtComponent(q), rows: top }),
-        );
-        const records = out.items.map((x) => record(
-          "luchtmeetnet",
-          `${String(x.formula ?? "component")}-${String(x.station_name ?? x.station_number ?? "station")}`,
-          "https://www.luchtmeetnet.nl",
-          x,
-          `${String(x.component ?? x.formula ?? "")}: ${String(x.value ?? "")} ${String(x.unit ?? "")}`.trim(),
-          String(x.timestamp ?? x.timestamp_measured ?? ""),
-        ));
-        if (records.length) {
-          // Without a recognised place these are stations from all over the
-          // country. Saying so beats letting "luchtkwaliteit Utrecht" read as if
-          // the returned Oude Meer station were Utrecht's.
-          const scopeNote = plaats
-            ? undefined
-            : "Geen plaatsnaam in de vraag herkend; dit zijn landelijke metingen. Noem de plaats expliciet (bijv. 'luchtkwaliteit in Utrecht') voor lokale waarden.";
-          return askSuccess({
-            summary: `Router: Luchtmeetnet${plaats ? ` ${plaats}` : " — landelijk"} (${records.length} metingen)`,
-            records,
-            provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total),
-            access_note:
-              [scopeNote, (out as { access_note?: string }).access_note].filter(Boolean).join(" ") ||
-              undefined,
-            total: out.total,
-          });
-        }
-        // A place without a measuring station is a real answer, not an empty one.
-        const note = (out as { access_note?: string }).access_note;
-        if (note && plaats) {
-          return askSuccess({
-            summary: `Router: Luchtmeetnet — geen meetstation voor ${plaats}`,
-            records: [],
-            provenance: prov("nl_gov_ask", out.endpoint, out.params, 0, 0),
-            access_note: note,
-            total: 0,
-          });
-        }
-        routeEmpty("Luchtmeetnet", "luchtmeetnet:no_results");
-      } catch (e) {
-        routeFailed("Luchtmeetnet", "luchtmeetnet", e);
-      }
-
-      if (has(catalogiTerms)) try {
-        const productQuery = makeStrictQuery(questionForSearch) || questionForSearch;
-        const out = await timed("samenwerkende_catalogi", () =>
-          samenwerkendeCatalogi.search({ query: productQuery, maximumRecords: top }),
-        );
-        const records = out.items.map((raw) => {
-          const x = raw as import("./sources/koop-collecties.js").SamenwerkendeCatalogiItem;
-          return record(
-            "samenwerkende_catalogi",
-            x.title,
-            x.canonical_url,
-            { organisatie: x.organisatie, organisatietype: x.organisatietype, gebied: x.gebied, doelgroep: x.doelgroep, samenvatting: x.samenvatting },
-            [x.organisatie, x.doelgroep].filter(Boolean).join(" — "),
-            x.gewijzigd,
-          );
-        });
-        if (records.length) {
-          return askSuccess({ summary: `Router: Samenwerkende Catalogi (${records.length} productbeschrijvingen)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), access_note: mergeAccessNotes(queryNote(productQuery), out.access_note), total: out.total });
-        }
-        routeEmpty("Samenwerkende Catalogi", "samenwerkende_catalogi:no_results");
-      } catch (e) {
-        routeFailed("Samenwerkende Catalogi", "samenwerkende_catalogi", e);
-      }
-
-      // Education: prefer real per-school records over the dataset catalogue when
-      // the question is about a concrete school, place or exam performance.
-      // schoolTerms/examTerms carry the plural forms duoTerms lacks ("basisscholen"),
-      // and word-boundary matching means those would otherwise miss entirely.
-      if (has(duoTerms) || has(schoolTerms) || has(examTerms)) try {
-        const gemeente = extractPlaceName(decodedQuestion);
-        const wantsExam = has(examTerms);
-        const wantsSchools = has(schoolTerms) || Boolean(gemeente);
-
-        if (wantsExam) {
-          const out = await timed("duo", () =>
-            duo.getExamResults({ municipality: gemeente, sortByScore: /best|hoogst|beste|top/.test(q), top }),
-          );
-          const records = out.items.map((x) => record(
-            "duo",
-            `${x.school}${x.onderwijstype ? ` — ${x.onderwijstype}` : ""}`,
-            x.url,
-            { school: x.school, brin: x.brin, gemeente: x.gemeente, onderwijstype: x.onderwijstype, schooljaar: x.schooljaar, examenkandidaten: x.examenkandidaten, geslaagden: x.geslaagden, slagingspercentage: x.slagingspercentage, gemiddeld_cijfer_centraal_examen: x.gemiddeldCentraalExamen },
-            `${x.slagingspercentage ?? "?"}% geslaagd`,
-            x.schooljaar ? String(x.schooljaar) : undefined,
-          ));
-          if (records.length) {
-            return askSuccess({ summary: `Router: DUO examenresultaten (${records.length} vestigingen)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), access_note: out.access_note, total: out.total });
-          }
-        }
-
-        if (wantsSchools) {
-          const sector = /middelbare|voortgezet|havo|vwo|vmbo|middelbaar/.test(q)
-            ? "vo"
-            : /\bmbo\b|beroepsonderwijs/.test(q)
-              ? "mbo"
-              : /\bhbo\b|universiteit|hogeschool|hoger onderwijs/.test(q)
-                ? "ho"
-                : "po";
-          const out = await timed("duo", () =>
-            duo.getSchools({ municipality: gemeente, sector, top }),
-          );
-          const records = out.items.map((x) => record(
-            "duo",
-            x.naam,
-            x.url,
-            { naam: x.naam, instellingscode: x.instellingscode, vestigingscode: x.vestigingscode, onderwijstype: x.onderwijstype, straat: x.straat, postcode: x.postcode, plaats: x.plaats, gemeente: x.gemeente, denominatie: x.denominatie, website: x.website },
-            [x.straat, x.postcode, x.plaats].filter(Boolean).join(", "),
-          ));
-          if (records.length) {
-            return askSuccess({ summary: `Router: DUO onderwijsvestigingen (${records.length} scholen, ${sector})`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), access_note: out.access_note, total: out.total });
-          }
-        }
-        if (wantsExam || wantsSchools) routeEmpty("DUO scholen/examens", "duo:per_school_no_results");
-      } catch (e) {
-        // Falls through to the DUO dataset-catalogue branch further down.
-        routeFailed("DUO scholen/examens", "duo", e, "duo:per_school_search_failed");
-      }
-
-      if (has(cbsTerms)) {
-        const candidates = [makeCbsQuery(questionForSearch), questionForSearch];
-        if (q.includes("inwoner") || q.includes("population")) candidates.push("bevolking");
-        if (q.includes("opleidingsniveau") || q.includes("opleiding")) candidates.push("opleidingsniveau gemeenten");
-        if (q.includes("werkloos")) candidates.push("werkloosheid");
-        // Appended last: progressively narrower topic terms for questions the
-        // full-sentence candidates cannot match (see cbsNarrowingCandidates).
-        candidates.push(
-          ...cbsNarrowingCandidates(makeStrictQuery(questionForSearch), extractPlaceName(decodedQuestion)),
-        );
-
-        let usedCbsQuery = candidates[0] || questionForSearch;
-        let out = await timed("cbs", () => cbs.searchTables(usedCbsQuery, Math.max(top, 8)));
-        let items = out.items;
-
-        if (!items.length) {
-          for (const candidate of candidates.slice(1)) {
-            if (!candidate || !candidate.trim()) continue;
-            fallbackSteps.push(`cbs:fallback_candidate:${candidate}`);
-            out = await timed("cbs", () => cbs.searchTables(candidate, Math.max(top, 8)));
-            items = out.items;
-            usedCbsQuery = candidate;
-            if (items.length) break;
-          }
-        }
-
-        if (items.length) {
-          const sorted = [...items].sort((a, b) => scoreCbsTable(b) - scoreCbsTable(a));
-          const municipalityEducation = (q.includes("gemeente") || q.includes("municipality")) && (q.includes("opleidingsniveau") || q.includes("opleiding") || q.includes("education"));
-
-          if (municipalityEducation) {
-            const best = sorted[0];
-            const bestTableId = String(best.Identifier ?? best.id ?? "");
-            if (bestTableId) {
-              try {
-                const obsOut = await timed("cbs", () => cbs.getObservations({ tableId: bestTableId, top }));
-                const obsRecords = obsOut.items.map((x) => record("cbs", `Observatie ${bestTableId}`, `https://opendata.cbs.nl/#/CBS/nl/dataset/${bestTableId}`, x));
-                if (obsRecords.length) {
-                  const trendMeasure = obsOut.items.find((x) => typeof x.trend_measure === "string")?.trend_measure as string | undefined;
-                  return askSuccess({
-                    summary: `Router: CBS observaties (${obsRecords.length} resultaten)`,
-                    records: obsRecords,
-                    provenance: prov("nl_gov_ask", obsOut.endpoint, obsOut.params, obsRecords.length, obsRecords.length),
-                    total: obsRecords.length,
-                    access_note: mergeAccessNotes(queryNote(usedCbsQuery), trendMeasure ? `CBS trend enrichment applied for measure ${trendMeasure} (previous_period, previous_value, delta, delta_pct).` : undefined),
-                  });
-                }
-              } catch {
-                // fall through to table-level response
-              }
-            }
-          }
-
-          const records = sorted.slice(0, top).map((x) => record("cbs", String(x.Title ?? x.Identifier ?? "CBS"), "https://www.cbs.nl", x));
-          // items.length is de gefetchte buffer, niet de echte upstream-total, en kan
-          // groter zijn dan de teruggegeven records (sorted.slice(0, top)); null zodat
-          // has_more niet onterecht true wordt buiten de beschikbare records.
-          return askSuccess({ summary: `Router: CBS (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, items.length), access_note: queryNote(usedCbsQuery), total: null });
-        }
-        routeEmpty("CBS", "cbs:no_results");
-      }
-
-      // A named municipality plus a policy or council question: its council
-      // documents in Open Raadsinformatie answer it ("GGZ-beleid gemeente
-      // Utrecht"); national sources would return other places' news.
-      // ORI's explanation when it has no index for the municipality: that is
-      // not an empty result, and the answer given instead says so.
-      let oriScopeNote: string | undefined;
-      if (gemeenteForOri) try {
-        const gemeente = gemeenteForOri;
-        if (gemeenteTerms.length) {
-          const oriQuery = toOriQuery(gemeenteTerms);
-          const out = await timed("ori", () => ori.search({ query: oriQuery, rows: top, gemeente }));
-          const records = out.items.map(oriRecord);
-          if (records.length) {
-            return askSuccess({
-              summary: `Router: Open Raadsinformatie ${gemeente} (${records.length} resultaten)`,
-              records,
-              provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total),
-              access_note: mergeAccessNotes(
-                queryNote(oriQuery),
-                `Vraag over gemeente ${gemeente}: gezocht in de raadsinformatie van die gemeente (Open Raadsinformatie).`,
-                temporal ? "De periode uit de vraag is niet toegepast: deze ORI-zoekopdracht heeft geen datumfilter." : undefined,
-                out.access_note,
-              ),
-              total: out.total,
-            });
-          }
-          if (out.no_index) {
-            // Nothing was searched: ORI holds no council records under this name.
-            fallbackSteps.push(`ori:${gemeente}:no_index`);
-            triedRoutes.push(`Open Raadsinformatie ${gemeente} (geen ORI-index, niet gezocht)`);
-            oriScopeNote = out.access_note;
-          } else {
-            routeEmpty(`Open Raadsinformatie ${gemeente}`, `ori:${gemeente}:no_results`);
-          }
-        }
-      } catch (e) {
-        routeFailed(`Open Raadsinformatie ${gemeenteForOri}`, "ori", e);
-      }
-
-      if (has(tkTerms)) {
-        // Topic words first, without the words that picked this route: every
-        // term must occur in the title or subject, so "moties over stikstof"
-        // found nothing and fell through to the bare candidate "motie" - the
-        // latest motions on any subject. A multi-word term goes as a phrase
-        // first ("Ring Utrecht", "Belastingdienst Toeslagen"), then as loose
-        // words: a run of capitalised words is often no phrase in the papers
-        // ("Schiphol Geluidsoverlast", "Wet Kwaliteitsborging Bouwen" for the
-        // "Wet kwaliteitsborging voor het bouwen"), and as a phrase alone it
-        // found nothing where the words found the papers. Both with the
-        // document type the question names first.
-        const tkCandidates: Array<{ query: string; type?: string }> = [];
-        if (tkTopic) {
-          const topicForms = [tkNamedTopic, tkLooseTopic];
-          if (tkType) for (const query of topicForms) tkCandidates.push({ query, type: tkType });
-          for (const query of topicForms) tkCandidates.push({ query });
-          // Several topic terms rarely all stand in one title or subject
-          // ("stikstof landbouw"): try the most specific ones on their own,
-          // with the document type the question names. Never the bare type:
-          // "motie" returns the latest motions on any subject, which read as an
-          // answer about the topic.
-          for (const term of [...tkTopicTerms].sort((a, b) => b.length - a.length).slice(0, tkTopicTerms.length > 1 ? 3 : 0)) {
-            tkCandidates.push({ query: toPhraseQuery([term], nameTerms), ...(tkType ? { type: tkType } : {}) });
-          }
-        } else {
-          // No topic ("Welke moties zijn er deze week ingediend?"): the latest
-          // papers of the kind asked for are the answer.
-          if (tkType) tkCandidates.push({ query: "", type: tkType });
-          tkCandidates.push({ query: makeModerateQuery(questionForSearch) }, { query: questionForSearch });
-        }
-        const seenTk = new Set<string>();
-        const uniqueTkCandidates = tkCandidates.filter((c) => {
-          const key = `${c.query.trim().toLowerCase()}|${c.type ?? ""}`;
-          if ((!c.query.trim() && !c.type) || seenTk.has(key)) return false;
-          seenTk.add(key);
-          return true;
-        });
-
-        // Without $count (count: false): this route reports the records it
-        // holds, not the source's total, and the count made every search take
-        // about twice as long (a phrase and then its words: 10-12 s, 5-7 s
-        // without). The searches go one after the other, not side by side:
-        // two at once each took as long as both in a row (October 2026), so
-        // a phrase that answers alone would only have waited for the other.
-        const searchTk = (candidate: { query: string; type?: string }) =>
-          timed("tweede_kamer", () => tk.searchDocuments({ query: candidate.query, type: candidate.type, top, date_from: temporal?.from, date_to: temporal?.to, count: false }));
-
-        let usedTk = uniqueTkCandidates[0] ?? { query: questionForSearch };
-        let out = await searchTk(usedTk);
-        let records = out.items.map(tkDocumentRecord);
-
-        if (!records.length) {
-          for (const candidate of uniqueTkCandidates.slice(1)) {
-            fallbackSteps.push(`tweede_kamer:fallback_candidate:${candidate.query}${candidate.type ? ` (type ${candidate.type})` : ""}`);
-            out = await searchTk(candidate);
-            records = out.items.map(tkDocumentRecord);
-            usedTk = candidate;
-            if (records.length) break;
-          }
-        }
-
-        // A name that few papers hold as a phrase hid the many that hold its
-        // words apart: it can stand as a phrase in one motion's title, while
-        // dozens of motions have its first word as their dossier title and
-        // the other in their subject. When the phrase finds fewer papers than
-        // asked for, the names as their words (tkTopic, with the same type)
-        // fill the rest, after the phrase hits and marked in data.match. A
-        // phrase that fills the page needs no second search; a phrase the
-        // question holds (quoted, or a fixed word group) is not taken apart.
-        let tkItems = out.items;
-        let tkSourceNotes = out.notes;
-        let tkSupplementNote: string | undefined;
-        let tkParams = out.params;
-        if (tkItems.length && tkItems.length < top && usedTk.query === tkNamedTopic && tkTopic !== tkNamedTopic) {
-          const supplementType = usedTk.type;
-          fallbackSteps.push(`tweede_kamer:loose_supplement:${tkTopic}${supplementType ? ` (type ${supplementType})` : ""}`);
-          const phrases = tkNameTopicTerms.map((term) => `"${term}"`).join(" en ");
-          const phraseCount = `${tkItems.length} ${tkItems.length === 1 ? "document bevat" : "documenten bevatten"} ${phrases} als woordgroep`;
-          // "Afzonderlijk", not "los": the term notes say "los woord" for a whole word.
-          const apart = `dezelfde woorden afzonderlijk (${tkTopic})`;
-          try {
-            const extra = await searchTk({ query: tkTopic, type: supplementType });
-            const idOf = (item: Record<string, unknown>) => (typeof item.Id === "string" ? item.Id.trim() : "");
-            const seen = new Set(tkItems.map(idOf).filter(Boolean));
-            const added = extra.items
-              .filter((item) => !idOf(item) || !seen.has(idOf(item)))
-              .slice(0, top - tkItems.length)
-              .map((item) => ({ ...item, match: TK_WORDS_APART }));
-            if (added.length) {
-              tkItems = [...tkItems, ...added];
-              tkSourceNotes = [...new Set([...tkSourceNotes, ...extra.notes])];
-              tkParams = { ...tkParams, supplement_query: tkTopic };
-              tkSupplementNote = `${phraseCount}; aangevuld met ${added.length} ${added.length === 1 ? "document" : "documenten"} met ${apart}, gemarkeerd met data.match '${TK_WORDS_APART}'.`;
-            } else {
-              tkSupplementNote = `${phraseCount}; geen andere documenten met ${apart}.`;
-            }
-          } catch {
-            fallbackSteps.push("tweede_kamer:loose_supplement_failed");
-            tkSupplementNote = `${phraseCount}; aanvullen met documenten met ${apart} is mislukt.`;
-          }
-          records = tkItems.map(tkDocumentRecord);
-        }
-        // "deze week", "onlangs": left out of the search terms, but no date
-        // filter either; say so, so the newest papers do not read as filtered.
-        const tkTimePhrases = looseTimePhrases(questionForSearch);
-        const tkNote = mergeAccessNotes(
-          queryNote(usedTk.query),
-          usedTk.type ? `Gefilterd op documentsoort '${usedTk.type}'.` : undefined,
-          tkSupplementNote,
-          // How Tweede Kamer matched the terms: a term of up to three letters
-          // ("woz", "ov") only as a whole word, in which spellings, and any
-          // term it could not apply. Its advice to quote a longer term is for
-          // tweede_kamer_documents: quotes in a question do not reach it.
-          ...tkSourceNotes.map((note) => note.replace(/ Alleen het losse woord: .*$/, "")),
-          tkTimePhrases.length
-            ? `Tijdsaanduiding ${tkTimePhrases.map((p) => `'${p}'`).join(", ")} is niet als datumfilter toegepast; de nieuwste documenten staan bovenaan.`
-            : undefined,
-        );
-
-        if (records.length) {
-          const shouldDeepen = shouldDeepenTweedeKamerQuery(decodedQuestion);
-          if (shouldDeepen) {
-            const topMatch = tkItems.find((item) => typeof item.Id === "string" && item.Id.trim()) as Record<string, unknown> | undefined;
-            const topMatchId = typeof topMatch?.Id === "string" ? topMatch.Id.trim() : "";
-
-            if (topMatchId) {
-              try {
-                const deepOut = await timed("tweede_kamer", () => tk.getDocument({
-                  id: topMatchId,
-                  resolve_resource: true,
-                  include_text: true,
-                  max_chars: 4000,
-                }));
-                const deepRecordData = deepOut.item as Record<string, unknown>;
-                const deepSnippet = typeof deepRecordData.text_preview === "string"
-                  ? deepRecordData.text_preview
-                  : String(deepRecordData.Onderwerp ?? "");
-                const deepRecord = record(
-                  "tweedekamer",
-                  tkSubjectTitle(deepRecordData, topMatchId),
-                  String(deepRecordData.resolved_resource_url ?? deepRecordData.resource_url ?? "https://www.tweedekamer.nl"),
-                  deepRecordData,
-                  deepSnippet,
-                  String(deepRecordData.Datum ?? ""),
-                );
-
-                const remainingRecords = records.filter((candidate) => {
-                  const id = (candidate.data ?? {}) as Record<string, unknown>;
-                  return String(id.Id ?? id.id ?? "") !== topMatchId;
-                });
-
-                const deepAccessNotes: string[] = [
-                  "Top Tweede Kamer match was verdiept because the question asked for content/summary rather than only discovery.",
-                ];
-
-                if (typeof deepRecordData.text_preview === "string") {
-                  deepAccessNotes.push(`Included capped text preview for top match (${deepRecordData.text_preview.length} chars${deepRecordData.text_preview_truncated ? ", truncated" : ""}).`);
-                } else if (deepRecordData.text_preview_unavailable_reason === "pdf_not_extracted_in_lean_mode") {
-                  deepAccessNotes.push("Top match is a PDF; lean mode resolves the resource URL but skips built-in PDF text extraction.");
-                }
-
-                return askSuccess({
-                  summary: `Router: Tweede Kamer (${records.length} resultaten, top match verdiept)`,
-                  records: [deepRecord, ...remainingRecords],
-                  provenance: prov("nl_gov_ask", deepOut.endpoint, { ...tkParams, deep_document_id: topMatchId }, records.length, records.length),
-                  total: records.length,
-                  access_note: mergeAccessNotes(tkNote, deepAccessNotes.join(" ")),
-                });
-              } catch {
-                fallbackSteps.push(`tweede_kamer:deep_fetch_failed:${topMatchId}`);
-              }
-            }
-          }
-
-          return askSuccess({ summary: `Router: Tweede Kamer (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, tkParams, records.length, records.length), access_note: tkNote, total: records.length });
-        }
-        // An honest 0 beats the latest papers on another subject.
-        routeEmpty("Tweede Kamer", "tweede_kamer:no_results");
-      }
-
-      if (has(obTerms)) try {
-        // Keywords, not the sentence: the SRU search ANDs every word, so "Wat
-        // staat er in ..." made each of those words mandatory. A journal the
-        // question names ("in de Staatscourant") is a filter, not a word.
-        // A refused query was not searched; that is no "0 resultaten".
-        const ob = obSearch();
-        const { out, query: obQuery } = await searchBekendmakingen(ob.query, ob.looseQuery, { maximumRecords: top, publicatieblad: ob.publicatieblad, sort: ob.sort, date_from: temporal?.from, date_to: temporal?.to });
-        const records = out.items.map((x)=>record("officielebekendmakingen", String(x.title ?? x.identifier ?? "Bekendmaking"), String(x.canonical_url ?? x.identifier ?? "https://zoek.officielebekendmakingen.nl"), x as Record<string, unknown>));
-        if (records.length) {
-          const looseNote = obQuery !== ob.query ? `Met woordgroep niets gevonden voor ${ob.query}; daarom gezocht op de losse woorden.` : undefined;
-          return askSuccess({ summary: `Router: Bekendmakingen (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), access_note: mergeAccessNotes(queryNote(obQuery), looseNote, ob.note), total: out.total });
-        }
-        routeEmpty("Officiële Bekendmakingen", "officiele_bekendmakingen:no_results");
-      } catch (e) {
-        // As the other routes: a failing source does not sink the router.
-        routeFailed("Officiële Bekendmakingen", "officiele_bekendmakingen", e);
-      }
-
-      // Organisation and policy questions ("Wat doet de Belastingdienst met
-      // de BTW?", "Wat is het kabinetsbeleid over stikstof?") are answered by
-      // documents, not datasets: search official publications, parliament,
-      // government news and, for municipal questions, council documents in
-      // parallel. With a strong signal this runs here, before the Rijksoverheid
-      // route, which would answer any question containing "beleid" with national
-      // news only; otherwise it runs after the remaining routes (below).
-      let policyNote: string | undefined;
-      let policySearched = false;
-      const runPolicySearch = async () => {
-        policySearched = true;
-        const plainQuery = policyTerms.join(" ");
-        // Officiële Bekendmakingen and Tweede Kamer read a quoted phrase, as
-        // ORI does: a phrase the question holds ("open data portaal", a
-        // quoted term) is one phrase for each of them. A run of capitalised
-        // words goes as its words (nameTerms): one search each, and such a
-        // name is often no phrase in the documents. Rijksoverheid gets the
-        // words.
-        const phraseQuery = toPhraseQuery(policyTerms, nameTerms);
-        const oriQuery = policyOriQuery;
-        const oriPlaceNote = policyIntent?.municipal && policyIntent.gemeente && oriQuery.includes(oriPlacePhrase(policyIntent.gemeente))
-          ? `Open Raadsinformatie is in alle raden doorzocht met de gemeente als woordgroep (${oriPlacePhrase(policyIntent.gemeente)}), niet als los woord.`
-          : undefined;
-        // ORI gives a lower bound instead of a total above 10,000 hits.
-        type PolicyHit = { connector: string; label: string; records: MCPRecord[]; endpoint: string; params: Record<string, string>; total: number | null | undefined; totalLowerBound?: number };
-        const jobs: Array<{ connector: string; label: string; run: () => Promise<PolicyHit> }> = [];
-        if (policyIntent?.municipal) {
-          jobs.push({
-            connector: "ori",
-            label: "Open Raadsinformatie",
-            run: async () => {
-              const out = await timed("ori", () => ori.search({ query: oriQuery, rows: top }));
-              const records = out.items.map(oriRecord);
-              return { connector: "ori", label: "Open Raadsinformatie", records, endpoint: out.endpoint, params: out.params, total: out.total, totalLowerBound: out.total_lower_bound };
-            },
-          });
-        }
-        jobs.push({
-          connector: "officiele_bekendmakingen",
-          label: "Officiële Bekendmakingen",
-          run: async () => {
-            const { out } = await searchBekendmakingen(phraseQuery, plainQuery, { maximumRecords: top, date_from: temporal?.from, date_to: temporal?.to });
-            const records = out.items.map((x) => record("officielebekendmakingen", String(x.title ?? x.identifier ?? "Bekendmaking"), String(x.canonical_url ?? x.identifier ?? "https://zoek.officielebekendmakingen.nl"), x as Record<string, unknown>, String(x.authority ?? ""), String(x.date ?? "")));
-            return { connector: "officiele_bekendmakingen", label: "Officiële Bekendmakingen", records, endpoint: out.endpoint, params: out.params, total: out.total };
-          },
-        });
-        // Tweede Kamer requires every term in the title or subject, as the
-        // other sources do, so it joins for any number of terms.
-        jobs.push({
-          connector: "tweede_kamer",
-          label: "Tweede Kamer",
-          run: async () => {
-            const out = await timed("tweede_kamer", () => tk.searchDocuments({ query: phraseQuery, top, date_from: temporal?.from, date_to: temporal?.to }));
-            const records = out.items.map(tkDocumentRecord);
-            return { connector: "tweede_kamer", label: "Tweede Kamer", records, endpoint: out.endpoint, params: out.params, total: out.total };
-          },
-        });
-        jobs.push({
-          connector: "rijksoverheid",
-          label: "Rijksoverheid",
-          run: async () => {
-            const out = await timed("rijksoverheid", () => rijksoverheid.search({ query: plainQuery, top, date_from: temporal?.from, date_to: temporal?.to }));
-            const records = out.items.map((x) => record("rijksoverheid", String(x.title ?? x.id ?? "Rijksoverheid"), String(x.canonical ?? x.url ?? "https://www.rijksoverheid.nl"), x, String(x.snippet ?? ""), String(x.date ?? "")));
-            return { connector: "rijksoverheid", label: "Rijksoverheid", records, endpoint: out.endpoint, params: out.params, total: out.total };
-          },
-        });
-
-        // One slow source (Tweede Kamer often needs 30 s) must not hold up the
-        // others: after the deadline the answer goes out without it, and says so.
-        let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
-        const deadline = new Promise<"deadline">((resolve) => {
-          deadlineTimer = setTimeout(() => resolve("deadline"), POLICY_SEARCH_DEADLINE_MS);
-        });
-        const settled = await Promise.allSettled(jobs.map((job) => Promise.race([job.run(), deadline])));
-        clearTimeout(deadlineTimer);
-
-        const policyFailures: AskFailures = [];
-        const hits: PolicyHit[] = [];
-        const sourceNotes: string[] = [];
-        settled.forEach((result, idx) => {
-          const job = jobs[idx];
-          if (result.status === "fulfilled" && result.value !== "deadline") {
-            hits.push(result.value);
-            sourceNotes.push(`${job.label} ${result.value.records.length}`);
-            return;
-          }
-          if (result.status === "fulfilled") {
-            const seconds = Math.round(POLICY_SEARCH_DEADLINE_MS / 1000);
-            policyFailures.push({ connector: job.connector, error_type: "timeout", message: `${job.label} gaf binnen ${seconds} s geen antwoord; niet op gewacht.` });
-            sourceNotes.push(`${job.label} niet afgewacht (geen antwoord binnen ${seconds} s)`);
-            return;
-          }
-          const mapped = mapSourceError(result.reason, job.label);
-          policyFailures.push({ connector: job.connector, error_type: mapped.error, message: mapped.message });
-          sourceNotes.push(result.reason instanceof BekendmakingenRefusedError ? `${job.label} weigerde de zoekvraag (niet gezocht)` : `${job.label} mislukt (${mapped.error})`);
-        });
-        const perSource = sourceNotes.join(", ");
-
-        // Interleave the sources so the first page shows each of them, rather
-        // than `top` records of whichever source happened to come first.
-        const interleaved: MCPRecord[] = [];
-        const longest = Math.max(0, ...hits.map((h) => h.records.length));
-        for (let i = 0; i < longest; i++) {
-          for (const hit of hits) {
-            const rec = hit.records[i];
-            if (!rec) continue;
-            interleaved.push({
-              ...rec,
-              data: {
-                ...(rec.data ?? {}),
-                _provenance: {
-                  connector: hit.connector,
-                  endpoint: hit.endpoint,
-                  query_params: hit.params,
-                  returned_results: hit.records.length,
-                  total_results: hit.total ?? null,
-                  ...(hit.totalLowerBound !== undefined ? { total_lower_bound: hit.totalLowerBound } : {}),
-                },
-              },
-            });
-          }
-        }
-        const merged = dedupeMergedRecords(interleaved);
-
-        if (merged.length) {
-          const sources = hits.filter((h) => h.records.length).map((h) => h.connector);
-          return askSuccess({
-            summary: `Router: organisatie/beleid (${merged.length} resultaten uit ${sources.length} bronnen)`,
-            records: merged,
-            provenance: prov("nl_gov_ask", "policy-router", { question: decodedQuestion, query: plainQuery, sources: sources.join(",") }, merged.length, merged.length),
-            access_note: mergeAccessNotes(
-              queryNote(plainQuery),
-              oriScopeNote,
-              `Vraag behandeld als organisatie- of beleidsvraag: gezocht in documenten in plaats van in de datasetcatalogus. Resultaten per bron: ${perSource}.`,
-              temporalNote,
-              policyIntent?.municipal && temporal ? "Open Raadsinformatie is zonder datumfilter doorzocht." : undefined,
-              oriPlaceNote,
-            ),
-            failures: policyFailures.length ? policyFailures : undefined,
-            total: merged.length,
-          });
-        }
-
-        fallbackSteps.push("policy:no_results");
-        routeFailures.push(...policyFailures);
-        policyNote = `Ook als organisatie- of beleidsvraag niets gevonden (${perSource}).`;
-        return undefined;
-      };
-
-      if (policyIntent && policyTerms.length && policyEarly) {
-        const answered = await runPolicySearch();
-        if (answered) return answered;
-      }
-
-      if (has(rijkTerms)) {
-        const rijkQuery = makeKeywordQuery(questionForSearch) || questionForSearch;
-        let out = await timed("rijksoverheid", () => rijksoverheid.search({ query: rijkQuery, top, date_from: temporal?.from, date_to: temporal?.to }));
-        let records = out.items.map((x)=>record("rijksoverheid", String(x.title ?? x.id ?? "Rijksoverheid"), String(x.canonical ?? x.url ?? "https://www.rijksoverheid.nl"), x));
-
-        if (!records.length && (q.includes("schoolvakantie") || q.includes("schoolvakanties"))) {
-          fallbackSteps.push("rijksoverheid:search:fallback_schoolvakantie");
-          out = await timed("rijksoverheid", () => rijksoverheid.search({ query: "schoolvakantie", top }));
-          records = out.items.map((x)=>record("rijksoverheid", String(x.title ?? x.id ?? "Rijksoverheid"), String(x.canonical ?? x.url ?? "https://www.rijksoverheid.nl"), x));
-        }
-
-        if (records.length) {
-          return askSuccess({ summary: `Router: Rijksoverheid (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), access_note: queryNote(String(out.params.query ?? rijkQuery)), total: out.total });
-        }
-        routeEmpty("Rijksoverheid", "rijksoverheid:no_results");
-      }
-
-      if (likelyBudget) {
-        const budgetQuery = makeKeywordQuery(questionForSearch) || questionForSearch;
-        const out = await timed("rijksbegroting", () => rijksbegroting.search(budgetQuery, top));
-        const records = out.items.map((x)=>record("rijksbegroting", String(x.name ?? x.id ?? "Rijksbegroting"), String(x.url ?? "https://opendata.rijksbegroting.nl"), x));
-        if (records.length) {
-          return askSuccess({ summary: `Router: Rijksbegroting (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), access_note: queryNote(budgetQuery), total: out.total });
-        }
-        routeEmpty("Rijksbegroting", "rijksbegroting:no_results");
-      }
-
-      if (has(duoTerms)) {
-        const duoQuery = makeKeywordQuery(questionForSearch) || questionForSearch;
-        const out = await timed("duo", () => duo.datasetsCatalog(duoQuery, top));
-        const records = out.items.map((x)=>record("duo", String(x.title ?? x.name ?? x.id ?? "DUO"), String(x.url ?? "https://onderwijsdata.duo.nl"), x));
-        if (records.length) {
-          return askSuccess({ summary: `Router: DUO (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), access_note: queryNote(duoQuery), total: out.total });
-        }
-        routeEmpty("DUO-datasets", "duo:catalog_no_results");
-      }
-
-      if (has(weatherTerms)) {
-        return toMcpToolPayload(errorResponse({ error: "not_configured", message: "KNMI route vereist KNMI_API_KEY", suggestion: "Set KNMI_API_KEY and use knmi_* tools" }));
-      }
-
-      if (has(apiTerms)) {
-        const apiKey = process.env[ENV_KEYS.OVERHEID_API_KEY];
-        if (!apiKey) {
-          return toMcpToolPayload(errorResponse({ error: "not_configured", message: "OVERHEID_API_KEY ontbreekt voor API-register queries", suggestion: "Set OVERHEID_API_KEY" }));
-        }
-        const apiQuery = makeKeywordQuery(questionForSearch) || questionForSearch;
-        try {
-          const out = await timed("api_register", () => new ApiRegisterSource(config, apiKey).search(apiQuery, top));
-          const records = out.items.map((x)=>record("api-register", String(x.name ?? x.title ?? x.id ?? "API"), String(x.portalUrl ?? x.url ?? "https://apis.developer.overheid.nl"), x));
-          if (records.length) {
-            return askSuccess({ summary: `Router: API Register (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, records.length), access_note: mergeAccessNotes(queryNote(apiQuery), "Requires OVERHEID_API_KEY"), total: records.length });
-          }
-          routeEmpty("API-register", "api_register:no_results");
-        } catch (apiError) {
-          const mapped = mapSourceError(apiError, "API Register", "https://apis.developer.overheid.nl");
-          return toMcpToolPayload(errorResponse({
-            error: mapped.error,
-            message: mapped.message,
-            suggestion: mapped.suggestion,
-            retry_after: mapped.retry_after,
-            details: {
-              ...(mapped.details ?? {}),
-              connector: "api_register",
-              route: "nl_gov_ask",
-            },
-          }));
-        }
-      }
-
-      if (rechtspraakAsked) {
-        const rq = makeRechtspraakQuery(questionForSearch) || questionForSearch;
-        try {
-          const out = await timed("rechtspraak", () => rechtspraak.searchEcli({ query: rq, rows: top, sort: "relevance" }));
-          const records = out.items
-            .filter((x) => Boolean(x.ecli))
-            .map((x) => record("rechtspraak", String(x.title ?? x.ecli ?? x.id ?? "Rechtspraak uitspraak"), String(x.link ?? x.id ?? "https://data.rechtspraak.nl"), x as Record<string, unknown>, String(x.summary ?? x.ecli ?? ""), String(x.updated ?? "")));
-          if (records.length) {
-            return askSuccess({ summary: `Router: Rechtspraak (${records.length} resultaten)`, records, provenance: prov("nl_gov_ask", out.endpoint, out.params, records.length, out.total), access_note: mergeAccessNotes(queryNote(rq), (out as { access_note?: string }).access_note), total: out.total });
-          }
-          routeEmpty("Rechtspraak", "rechtspraak:no_results");
-        } catch (e) {
-          routeFailed("Rechtspraak", "rechtspraak", e);
-        }
-      }
-
-      // A weak signal (only an organisation noun or a named municipality), or a
-      // strong one on a budget question: documents after every route its
-      // words picked, before the catalogue.
-      if (policyIntent && policyTerms.length && !policySearched) {
-        const answered = await runPolicySearch();
-        if (answered) return answered;
-      }
-
-      // Last resort: the dataset catalogue. It ANDs every word against dataset
-      // metadata, so the full sentence ("Wat doet de Belastingdienst met de BTW?")
-      // matched nothing; search the topic words instead.
-      const catalogQuery = makeKeywordQuery(questionForSearch, catalogRouteWords) || questionForSearch;
-      const out = await timed("data_overheid", () => dataOverheid.datasetsSearch({ query: catalogQuery, rows: top }));
-      const records = out.items.map((d) => record("data.overheid.nl", String(d.title ?? d.id), `https://data.overheid.nl/dataset/${d.id}`, d as unknown as Record<string, unknown>, d.notes, d.metadata_modified));
-      // Name the routes that ran: "no source recognised" is only true when
-      // none did, and a failed source must not read as an empty one.
-      const recognised = triedRoutes.length > 0 || policyNote !== undefined || dsoNote !== undefined || debatNote !== undefined || algoritmeNote !== undefined;
-      const triedNote = triedRoutes.length ? `Eerst geprobeerd, zonder resultaat: ${[...new Set(triedRoutes)].join(", ")}.` : undefined;
-      const catalogNote = records.length
-        ? recognised
-          ? "Daarom teruggevallen op de datasetcatalogus van data.overheid.nl; dit zijn datasets, geen antwoord van de herkende bron."
-          : "Geen specifieke bron herkend voor deze vraag; dit zijn datasets uit de catalogus van data.overheid.nl."
-        : `${recognised ? "Ook in de datasetcatalogus van data.overheid.nl zijn geen datasets gevonden." : "Geen specifieke bron herkend en geen datasets gevonden in data.overheid.nl."} Gebruik voor documenten een gerichte tool, zoals officiele_bekendmakingen_search, tweede_kamer_documents of ori_search (met 'gemeente').`;
-      return askSuccess({
-        summary: `Router fallback: data.overheid (${records.length} resultaten)`,
-        records,
-        provenance: prov("nl_gov_ask", out.endpoint, out.query, records.length, out.total),
-        access_note: mergeAccessNotes(queryNote(catalogQuery), triedNote, oriScopeNote, policyNote, catalogNote),
-        total: out.total,
-      });
-    } catch (e) {
-      return toMcpToolPayload(mapSourceError(e, "nl_gov_ask"));
-    }
-  });
+  registerNlGovAsk(server, { config, TOOL_ANNOTATIONS, dataOverheid, cbs, tk, debatten, bekend, rijksoverheid, rijksbegroting, duo, ori, luchtmeetnet, rechtspraak, tenderned, tuchtrecht, samenwerkendeCatalogi, brpGewaspercelen, verkiezingsuitslagen, euCellar, algoritmeregister, record, algoritmeRecord, wodc, wodcRecord, uitspraakResult, wettenTekstResult, debatRecords, debatSummary, debatNotes, dsoRecord, prov, outputFormatSchema, paginationInputSchema });
 
   server.registerTool("data_politie_search", {
     description: "Search Dutch registered crime statistics (data.politie.nl / CBS dataderden OData). Filter by region (RegioS gemeente/wijk/buurt code or name), crime type (SoortMisdrijf code or name) and period. Set 'dimension' to explore valid filter values.",
@@ -5219,22 +2167,243 @@ export function registerTools(server: McpServer): void {
   });
 
   server.registerTool("wetten_bwb_search", {
-    description: "Search Dutch consolidated national legislation (BWB, wetten.overheid.nl) via KOOP SRU. Keywords are matched against the law title index (overheidbwb.titel). Returns BWBR id, title, competent authority, date and a wetten.overheid.nl link. Pass title keywords only, not full sentences.",
-    inputSchema: { query: z.string().describe("Law/regulation title keywords, e.g. 'arbeid vreemdelingen', 'wegenverkeerswet', 'omgevingswet'. Matched against the BWB title index (overheidbwb.titel), not full text."), top: z.number().int().min(1).max(config.limits.maxRows).default(20), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) },
+    description: "Search Dutch consolidated national legislation (BWB, wetten.overheid.nl) via KOOP SRU. Keywords are matched against the law title index (overheidbwb.titel). Returns one record per regeling: the version (toestand) geldig today, or on peildatum, with BWBR id, title, type, competent authority, that version's validity period (geldig_vanaf/geldig_tot) and a wetten.overheid.nl link. Regelingen without a version geldig that day (repealed, or not yet in force) are left out; find them with a peildatum inside their period. Pass title keywords only, not full sentences. For the text of a law or an artikel use wetten_bwb_tekst.",
+    inputSchema: { query: z.string().max(SEARCH_QUERY_MAX).describe("Law/regulation title keywords, e.g. 'arbeid vreemdelingen', 'wegenverkeerswet', 'omgevingswet'. Matched against the BWB title index (overheidbwb.titel), not full text."), peildatum: oriDate.optional().describe("YYYY-MM-DD: the versions geldig on this day instead of today (Dutch local date); also finds regelingen repealed since."), top: z.number().int().min(1).max(config.limits.maxRows).default(20), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) },
     annotations: TOOL_ANNOTATIONS,
-  }, async ({ query, top, offset, limit, outputFormat, verbose, dryRun }) => {
+  }, async ({ query, peildatum, top, offset, limit, outputFormat, verbose, dryRun }) => {
     try {
       const effectiveLimit = limit ?? top;
       const fetchRows = Math.min(config.limits.maxRows, Math.max(top, offset + effectiveLimit));
-      if (dryRun) return dryRunPayload({ connector: "wetten_bwb", url: "https://zoekservice.overheid.nl/sru/Search", params: { "x-connection": "BWB", operation: "searchRetrieve", version: "1.2", query, maximumRecords: fetchRows } });
+      if (dryRun) return dryRunPayload({ connector: "wetten_bwb", url: "https://zoekservice.overheid.nl/sru/Search", params: { "x-connection": "BWB", operation: "searchRetrieve", version: "1.2", query: bwbSearchCql(query, peildatum ?? todayAmsterdam()), maximumRecords: fetchRows } });
       const started = Date.now();
-      const out = await wettenBwb.search({ query, maximumRecords: fetchRows });
+      const out = await wettenBwb.search({ query, maximumRecords: fetchRows, peildatum });
       const responseTimeMs = Date.now() - started;
-      const records = out.items.map((x) => record("wetten-bwb", String(x.title ?? x.identifier ?? "BWB regeling"), String(x.canonical_url ?? "https://wetten.overheid.nl"), x as Record<string, unknown>, String(x.authority ?? ""), String(x.date ?? "")));
-      const response = buildFormattedResponse({ summary: `${records.length} BWB wetten`, records, provenance: prov("wetten_bwb_search", out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), out.total), outputFormat, offset, limit: effectiveLimit, total: out.total, access_note: out.access_note, verbose: singleConnectorVerbose({ enabled: verbose, connector: "wetten_bwb", endpoint: out.endpoint, responseTimeMs }) });
+      const records = out.items.map((x) => record("wetten-bwb", String(x.title ?? x.identifier ?? "BWB regeling"), String(x.canonical_url ?? "https://wetten.overheid.nl"), x as Record<string, unknown>, [x.type, x.authority, x.geldig_vanaf ? `versie geldig vanaf ${String(x.geldig_vanaf)}` : undefined].filter(Boolean).join(" · "), x.geldig_vanaf ? String(x.geldig_vanaf) : undefined));
+      const response = buildFormattedResponse({ summary: pageSummary(records.length, offset, effectiveLimit, "BWB wetten"), records, provenance: prov("wetten_bwb_search", out.endpoint, out.params, Math.min(effectiveLimit, Math.max(0, records.length - offset)), out.total), outputFormat, offset, limit: effectiveLimit, total: out.total, access_note: out.access_note, verbose: singleConnectorVerbose({ enabled: verbose, connector: "wetten_bwb", endpoint: out.endpoint, responseTimeMs }) });
       return toMcpToolPayload(response);
-    } catch (e) { return toMcpToolPayload(mapSourceError(e, "BWB wetgeving", "https://wetten.overheid.nl")); }
+    } catch (e) {
+      if (e instanceof BwbTekstError) return toMcpToolPayload(errorResponse({ error: e.kind === "upstream" ? "malformed_response" : "unexpected", message: e.message, suggestion: e.suggestion, details: e.details }));
+      return toMcpToolPayload(mapSourceError(e, "BWB wetgeving", "https://wetten.overheid.nl"));
+    }
   });
+
+  /** A regeling as wetten_bwb_tekst lists it among candidates. */
+  const bwbCandidate = (r: BwbRegeling) =>
+    record("wetten-bwb", r.title ?? r.identifier, bwbVersieUrl(r), { bwb_id: r.identifier, title: r.title, type: r.type, authority: r.authority, geldig_vanaf: r.geldig_vanaf, geldig_tot: r.geldig_tot, versie_url: bwbVersieUrl(r) }, [r.identifier, r.type, r.authority].filter(Boolean).join(" · "), r.geldig_vanaf);
+  const BWB_STATUS: Record<string, string> = { goed: "geldend", vervallen: "vervallen", nogniet: "nog niet in werking" };
+
+  /**
+   * wetten_bwb_tekst as a result object; nl_gov_ask reads an artikel of a law
+   * the question names through it as well.
+   */
+  async function wettenTekstResult({ bwb_id, wet, artikel, peildatum, zoekterm, max_chars }: { bwb_id?: string; wet?: string; artikel?: string; peildatum?: string; zoekterm?: string; max_chars: number }): Promise<ToolResult> {
+    const searching = Boolean(zoekterm?.trim()) && !artikel?.trim();
+    const asked: Record<string, string> = Object.fromEntries(
+      Object.entries({ bwb_id, wet, artikel, peildatum, zoekterm: searching ? zoekterm : undefined, max_chars: String(max_chars) }).filter((kv): kv is [string, string] => typeof kv[1] === "string" && kv[1] !== ""),
+    );
+    try {
+      const out = await wettenBwb.tekst({ bwb_id, wet, artikel, peildatum, zoekterm: searching ? zoekterm : undefined, max_chars });
+      if (out.kind === "kandidaten") {
+        const records = out.candidates.map(bwbCandidate);
+        const shownOf = out.total > records.length ? ` (${records.length} van ${out.total} getoond)` : "";
+        return successResponse({
+          summary: out.basis === "titelwoorden"
+            ? `'${out.wet}' is geen titel of afkorting; ${out.total} ${out.total === 1 ? "regeling heeft" : "regelingen hebben"} die woorden in de titel; kies met bwb_id`
+            : `'${out.wet}' is niet eenduidig: ${out.total} regelingen${out.basis === "andere_data" ? `, geen geldt op ${out.peildatum}` : ""}; kies er een met bwb_id`,
+          records,
+          provenance: prov("wetten_bwb_tekst", out.endpoint, out.params, records.length, out.total),
+          access_note: out.basis === "titelwoorden"
+            ? `Geen tekst opgehaald: geen regeling heeft '${out.wet}' als titel of afkorting; wel staan die woorden in de titel van deze regelingen die gelden op ${out.peildatum}${shownOf}. Roep wetten_bwb_tekst opnieuw aan met het bwb_id van de bedoelde regeling, of zoek met wetten_bwb_search.`
+            : out.basis === "andere_data"
+            ? `Geen tekst opgehaald: '${out.wet}' is de afkorting van meer dan één regeling, en geen daarvan geldt op ${out.peildatum} (ingetrokken, of nog niet in werking); geldig_vanaf/geldig_tot is die van één versie. Roep wetten_bwb_tekst opnieuw aan met het bwb_id van de bedoelde regeling en een peildatum binnen haar looptijd.`
+            : `Geen tekst opgehaald: '${out.wet}' past bij meer dan één regeling die geldt op ${out.peildatum}${shownOf}. Roep wetten_bwb_tekst opnieuw aan met het bwb_id van de bedoelde regeling.`,
+        });
+      }
+
+      const { regeling, doc, selection: sel, peildatum: dag, vandaag } = out;
+      const title = doc.citeertitel ?? regeling.title ?? regeling.identifier;
+      const versieUrl = bwbVersieUrl(regeling);
+      const regelingFields = {
+        bwb_id: regeling.identifier,
+        regeling: title,
+        type: regeling.type,
+        peildatum: dag,
+        versie_geldig_vanaf: regeling.geldig_vanaf,
+        versie_geldig_tot: regeling.geldig_tot,
+        versie_url: versieUrl,
+        xml_url: out.xmlUrl,
+      };
+      const params: Record<string, string> = { bwb_id: regeling.identifier, peildatum: dag, max_chars: String(max_chars), sru: out.sruEndpoint };
+      if (wet) params.wet = wet;
+      if (artikel) params.artikel = artikel;
+      if (searching && zoekterm) params.zoekterm = zoekterm;
+
+      if (sel.notFound) {
+        // Not found is an answer, as in rechtspraak_uitspraak_get: no records, and why, with what there is.
+        const suggestions = sel.notFound.suggestions;
+        const existing = suggestions.length ? (suggestions.every((s) => /^Artikel /i.test(s)) ? ` Bestaande artikelen: ${suggestions.join(", ")}.` : ` Probeer: ${suggestions.join(", ")}.`) : "";
+        return successResponse({
+          summary: `Artikel '${artikel}' niet gevonden in ${title} (versie geldig vanaf ${regeling.geldig_vanaf ?? "onbekend"})`,
+          records: [],
+          provenance: prov("wetten_bwb_tekst", out.xmlUrl, { ...params, niet_gevonden: "artikel" }, 0, 0),
+          access_note: `Geen tekst opgehaald: ${sel.notFound.reason}${existing} Roep de tool zonder artikel aan voor de inhoudsopgave, of zoek met zoekterm. Versie (toestand) van ${title} (${regeling.identifier}) die geldig is op ${dag}: geldig vanaf ${regeling.geldig_vanaf ?? "onbekend"}${regeling.geldig_tot ? ` t/m ${regeling.geldig_tot}` : ", zonder bekende einddatum"}; ${versieUrl}.`,
+        });
+      }
+
+      const deepLink = (a: BwbArtikel) => (a.jci ? `https://wetten.overheid.nl/${a.jci}${vandaag ? "" : `&g=${dag}`}` : versieUrl);
+      const artikelFields = (a: BwbArtikel) => ({
+        artikel: a.label,
+        ...(a.titel ? { titel: a.titel } : {}),
+        ...(a.pad.length ? { pad: a.pad.join(" › ") } : {}),
+        ...(a.bijlage ? { in_bijlage: true } : {}),
+        status: a.status ? (BWB_STATUS[a.status] ?? a.status) : undefined,
+        in_werking_sinds: a.inwerking,
+        gewijzigd_bij: a.bron,
+        gewijzigd_bij_url: a.bronUrl,
+        url: deepLink(a),
+      });
+
+      const notes: string[] = [
+        `Versie (toestand) van ${title} (${regeling.identifier}) die geldig is op ${dag}${vandaag ? " (vandaag)" : ""}: geldig vanaf ${regeling.geldig_vanaf ?? "onbekend"}${regeling.geldig_tot ? ` t/m ${regeling.geldig_tot}` : ", zonder bekende einddatum"}.`,
+      ];
+      if (out.resolved) notes.push(`Regeling bepaald uit wet: ${out.resolved}.`);
+      if (dag > todayAmsterdam()) notes.push("Peildatum in de toekomst: deze versie bevat alleen wijzigingen die nu al vastgesteld zijn.");
+
+      let records: MCPRecord[];
+      let summary: string;
+      if (sel.mode === "artikel" || sel.mode === "zoekterm") {
+        records = sel.parts.map((p) => {
+          const a = p.artikel as BwbArtikel;
+          const label = `${a.label}${p.lid ? ` lid ${p.lid}` : ""}${p.onderdeel && !p.onderdeelNietGevonden ? ` onder ${p.onderdeel}` : ""}`;
+          if (sel.mode === "zoekterm") {
+            // Many hits: per artikel only what tells them apart; the regeling and its version are in access_note.
+            return record(
+              "wetten-bwb",
+              `${label}${a.titel ? ` ${a.titel}` : ""}`,
+              deepLink(a),
+              {
+                bwb_id: regeling.identifier,
+                artikel: a.label,
+                ...(a.titel ? { titel: a.titel } : {}),
+                ...(a.status && a.status !== "goed" ? { status: BWB_STATUS[a.status] ?? a.status } : {}),
+                ...(p.ingekort ? { ingekort: true, tekens_volledig: p.tekensVolledig } : {}),
+                tekst: p.tekst,
+              },
+              undefined,
+              a.inwerking,
+            );
+          }
+          return record(
+            "wetten-bwb",
+            `${label}${a.titel ? ` ${a.titel}` : ""} — ${title}`,
+            deepLink(a),
+            {
+              ...regelingFields,
+              ...artikelFields(a),
+              ...(p.lid ? { lid: p.lid } : {}),
+              ...(p.onderdeel ? { onderdeel: p.onderdeel } : {}),
+              ...(p.ingekort ? { ingekort: true, tekens_volledig: p.tekensVolledig } : {}),
+              tekst: p.tekst,
+            },
+            p.tekst.slice(0, 300),
+            a.inwerking,
+          );
+        });
+        const shown = sel.parts.length;
+        if (sel.mode === "artikel") {
+          const first = sel.parts[0]?.artikel;
+          const part = sel.parts[0];
+          if (part?.onderdeel) {
+            notes.push(part.onderdeelNietGevonden
+              ? `Onderdeel ${part.onderdeel} niet gevonden als genummerd onderdeel van ${first?.label ?? artikel}${part.lid ? ` lid ${part.lid}` : ""}: ${part.lid ? "het hele lid" : "het hele artikel"} is getoond.`
+              : `Getoond: de aanhef en onderdeel ${part.onderdeel} van ${first?.label ?? artikel}${part.lid ? ` lid ${part.lid}` : ""}.`);
+          }
+          summary = `${first?.label ?? artikel}${part?.lid ? ` lid ${part.lid}` : ""}${part?.onderdeel && !part.onderdeelNietGevonden ? ` onder ${part.onderdeel}` : ""} ${title} (versie geldig vanaf ${regeling.geldig_vanaf ?? "onbekend"})${first?.status && first.status !== "goed" ? ` — ${BWB_STATUS[first.status] ?? first.status}` : ""}`;
+          if ((sel.matches ?? 0) > 1) notes.push(`'${artikel}' komt ${sel.matches} keer voor in deze regeling (ook in een bijlage); ${shown === sel.matches ? "alle getoond" : `${shown} getoond`}.`);
+          for (const p of sel.parts) {
+            const a = p.artikel as BwbArtikel;
+            if (a.status === "vervallen") notes.push(`${a.label} is vervallen${a.inwerking ? ` sinds ${a.inwerking}` : ""}${a.bron ? ` (${a.bron})` : ""}: de tekst zegt alleen dat het vervallen is.${a.inwerking ? ` De tekst van daarvoor: peildatum vóór ${a.inwerking}.` : ""}`);
+            if (a.status === "nogniet") notes.push(`${a.label} is nog niet in werking getreden: de tekst staat al in de geconsolideerde versie, maar geldt (nog) niet.`);
+            if (p.ingekort) notes.push(`${a.label} afgekapt op ${p.tekst.length} van ${p.tekensVolledig} tekens; vraag een lid op ('${a.label} lid 1') of verhoog max_chars (max ${BWB_TEXT_MAX_CHARS}).`);
+          }
+        } else {
+          const matches = sel.matches ?? 0;
+          summary = matches
+            ? `${matches} ${matches === 1 ? "artikel" : "artikelen"} met '${zoekterm}' in ${title}${shown < matches ? ` (${shown} getoond)` : ""}`
+            : `Geen artikelen met '${zoekterm}' in ${title}`;
+          if (!matches) notes.push(`Geen artikel bevat alle woorden van '${zoekterm}'. Probeer een kortere of andere zoekterm, of vraag de inhoudsopgave op (zonder zoekterm).`);
+          const shortened = sel.parts.filter((p) => p.ingekort).map((p) => (p.artikel as BwbArtikel).label);
+          if (shortened.length) notes.push(`Ingekort wegens max_chars (${max_chars}): ${shortened.join(", ")}; tekst geeft de kop en de regels met de zoekterm (ingekort: true). Vraag het hele artikel op met artikel.`);
+          if (sel.omitted?.length) notes.push(`Niet getoond wegens max_chars (${max_chars}): ${sel.omitted.slice(0, 30).join(", ")}${sel.omitted.length > 30 ? ` en ${sel.omitted.length - 30} meer` : ""}. Vraag ze op met artikel, of verhoog max_chars (max ${BWB_TEXT_MAX_CHARS}).`);
+          notes.push("Zoekterm: alle woorden moeten in het artikel (met kop) voorkomen; hoofdletters en accenten tellen niet, een woord matcht ook binnen langere woorden.");
+        }
+      } else {
+        const tekst = sel.parts[0]?.tekst ?? "";
+        const vervallen = doc.artikelen.filter((a) => a.status === "vervallen").length;
+        records = [record(
+          "wetten-bwb",
+          title,
+          versieUrl,
+          {
+            ...regelingFields,
+            authority: regeling.authority,
+            artikelen: doc.artikelen.length,
+            ...(vervallen ? { artikelen_vervallen: vervallen } : {}),
+            ...(sel.inhoudsopgave !== undefined ? { inhoudsopgave: sel.inhoudsopgave } : {}),
+            tekst,
+            tekens_regeling: sel.totalChars,
+            afgekapt: sel.truncated,
+          },
+          tekst.slice(0, 300),
+          regeling.geldig_vanaf,
+        )];
+        summary = sel.mode === "volledig" ? `Tekst ${title} (${sel.totalChars} tekens)` : `Begin van ${title} met inhoudsopgave (${sel.totalChars} tekens in totaal)`;
+        if (sel.mode === "begin_met_inhoudsopgave") {
+          notes.push(`De regeling is ${sel.totalChars} tekens; getoond: de inhoudsopgave${sel.inhoudsopgaveVolledig ? "" : sel.inhoudsopgaveNiveaus ? ` (alleen ${sel.inhoudsopgaveNiveaus === 1 ? "het bovenste niveau" : `de bovenste ${sel.inhoudsopgaveNiveaus} niveaus`} koppen${sel.inhoudsopgaveAfgekapt ? ", afgekapt" : ""})` : " (afgekapt)"} en de eerste ${tekst.length} tekens van de tekst. Vraag een artikel op met artikel, of zoek met zoekterm.`);
+        }
+      }
+      notes.push(`Bron: geconsolideerde tekst uit de BWB (KOOP); XML van deze versie: ${out.xmlUrl}. Alleen de publicatie in Staatsblad of Staatscourant is authentiek.`);
+
+      return successResponse({
+        summary,
+        records,
+        provenance: prov("wetten_bwb_tekst", out.xmlUrl, params, records.length, sel.mode === "zoekterm" ? (sel.matches ?? 0) : records.length),
+        access_note: notes.join(" "),
+      });
+    } catch (e) {
+      if (!(e instanceof BwbTekstError)) return mapSourceError(e, "BWB wetgeving", "https://wetten.overheid.nl");
+      if (e.kind === "input") return errorResponse({ error: "unexpected", message: e.message, suggestion: e.suggestion, details: e.details });
+      if (e.kind === "upstream") return errorResponse({ error: "malformed_response", message: e.message, suggestion: e.suggestion, details: e.details });
+      // An unknown regeling, or none geldig on the peildatum: an answer without records, as in
+      // rechtspraak_uitspraak_get and wodc_document_get. niet_gevonden says what was not found:
+      // 'wet' (no regeling has that name), 'bwb_id' (no regeling has that id) or 'versie'
+      // (the regeling exists, but has no version geldig on the peildatum).
+      const knownId = typeof e.details?.bwb_id === "string" ? e.details.bwb_id : undefined;
+      const nietGevonden = knownId ? (e.kind === "no_version" ? "versie" : "bwb_id") : "wet";
+      return successResponse({
+        summary: e.message,
+        records: [],
+        provenance: prov("wetten_bwb_tekst", BWB_SRU_ENDPOINT, { ...asked, ...(knownId ? { bwb_id: knownId } : {}), niet_gevonden: nietGevonden }, 0, 0),
+        access_note: `Geen tekst opgehaald: ${e.message} ${e.suggestion}`,
+      });
+    }
+  }
+
+  server.registerTool("wetten_bwb_tekst", {
+    description:
+      "Read the text of a Dutch national law or regulation (BWB, wetten.overheid.nl) as geldig on a day: one artikel (or lid), the artikelen containing a zoekterm, or the table of contents with the beginning of the text. Name it by bwb_id (from wetten_bwb_search) or wet (title or official afkorting: 'Awb', 'Sr', 'Gemeentewet', 'BW boek 6'); an ambiguous wet ('Ow'), or one that only matches words of titles, returns candidates, never a guess. " +
+      "peildatum (default today) picks the version (toestand) geldig that day. Each artikel comes with its status (geldend, vervallen, nog niet in werking), the date its text took effect, the publication that last changed it and a wetten.overheid.nl deep link. " +
+      "An unknown law or id, a day without a geldige version, or a missing artikel returns no records and says so in access_note, with suggestions (provenance.query_params.niet_gevonden: wet, bwb_id, versie or artikel); shortened text is always marked. The text is the consolidated text from the KOOP BWB repository, not the authentic Staatsblad publication.",
+    inputSchema: {
+      bwb_id: z.string().max(20).optional().describe("BWB id, e.g. 'BWBR0005537' (Awb), 'BWBR0037885' (Omgevingswet), 'BWBR0005289' (BW Boek 6). Give this or wet."),
+      wet: z.string().max(200).optional().describe("Title or official afkorting, e.g. 'Awb', 'Algemene wet bestuursrecht', 'Sr', 'Gemeentewet', 'Woo', 'BW boek 6'."),
+      artikel: z.string().max(100).optional().describe("Artikel label: '3:4', 'art. 3:4', 'Artikel 2.1', '162', optionally with a lid ('3:4 lid 2') and onderdeel ('6:162 lid 2 sub b'); a BW book also takes '6:162'. Case and spaces are ignored, punctuation is not: '3.4' never matches '3:4' (the error names the existing one)."),
+      peildatum: oriDate.optional().describe("YYYY-MM-DD: the version geldig on this day instead of today (Dutch local date)."),
+      zoekterm: z.string().max(200).optional().describe("Words that must all occur in an artikel, case and accents ignored; a word also matches inside longer words. Ignored when artikel is given."),
+      max_chars: z.number().int().min(500).max(BWB_TEXT_MAX_CHARS).default(BWB_TEXT_DEFAULT_CHARS).describe(`Maximum characters of text returned (default ${BWB_TEXT_DEFAULT_CHARS}, max ${BWB_TEXT_MAX_CHARS}).`),
+    },
+    annotations: TOOL_ANNOTATIONS,
+  }, async (args) => toMcpToolPayload(await wettenTekstResult(args)));
 
   server.registerTool("cvdr_search", {
     description: "Search Dutch decentralised/local regulations (CVDR: municipal, provincial and water-authority bylaws) via KOOP SRU. All query words must occur (AND) somewhere in a regulation's title or text (uppercase OR and NOT between words work as operators), so a place name in the query also finds other authorities' regulations that merely mention that place: use 'organization' (and/or 'organization_type') to restrict to the issuing body. Returns CVDR id, title, issuer (organization, organization_type; the older 'gemeente' field holds the same issuer, which may also be a province or water authority), date and a lokaleregelgeving.overheid.nl link. offset/limit page server-side through the whole result set; total is the real hit count. Pass topic keywords only.",
@@ -6029,7 +3198,7 @@ server.registerTool(
 
 
   server.registerTool("tenderned_aanbestedingen_search", {
-    description: "Search Dutch public procurement notices and awards (TenderNed) — every tender published by Rijk, provincies, gemeenten, waterschappen, zorg- and onderwijsinstellingen. Returns contracting authority, tender name, publication type (aankondiging/gunning/marktconsultatie/vroegtijdige beëindiging), procedure, contract type, closing date and description. Use for 'welke aanbestedingen', 'wat besteedt gemeente X aan', 'wie won opdracht Y' (winner and award value: tenderned_aanbesteding_get). Search syntax is TenderNed's own: several words are combined with OR (a notice matching any one word counts), so to require an exact phrase wrap the WHOLE query in double quotes, e.g. '\"openbare verlichting\"'. Only one phrase per query works: two quoted phrases return nothing, and a phrase plus loose words is searched as plain OR. AND/OR/NOT, + and - are not operators. To limit results to one contracting authority use opdrachtgever instead of putting its name in the query. Only the first 10,000 results of any query are reachable. Closing dates: TenderNed's search index keeps the deadline of the original notice, even after a rectification moved it. For notices whose indexed deadline is in the future or at most 180 days old (up to 50 per call, latest deadlines first, within about 3 seconds; the check stops early when TenderNed's detail records answer slowly or not at all) the tool re-reads the detail record, so sluitings_datum is the current deadline (sluitings_datum_gecontroleerd: true; sluitings_datum_oorspronkelijk holds the index date when it differed). Other closing dates come unchecked from the index (sluitings_datum_gecontroleerd: false); tenderned_aanbesteding_get gives the current deadline.",
+    description: "Search Dutch public procurement notices and awards (TenderNed) — every tender published by Rijk, provincies, gemeenten, waterschappen, zorg- and onderwijsinstellingen. Returns contracting authority, tender name, publication type (aankondiging/gunning/marktconsultatie/vroegtijdige beëindiging), procedure, contract type, closing date and description. Use for 'welke aanbestedingen', 'wat besteedt gemeente X aan', 'wie won opdracht Y' (winner and award value: tenderned_aanbesteding_get). Search syntax is TenderNed's own: several words are combined with OR (a notice matching any one word counts), so to require an exact phrase wrap the WHOLE query in double quotes, e.g. '\"openbare verlichting\"'. Only one phrase per query works: two quoted phrases return nothing, and a phrase plus loose words is searched as plain OR. AND/OR/NOT, + and - are not operators. To limit results to one contracting authority use opdrachtgever instead of putting its name in the query. Only the first 10,000 results of any query are reachable. Closing dates: TenderNed's search index keeps the deadline of the original notice, even after a rectification moved it. For notices whose indexed deadline is in the future or at most 180 days old (up to 50 per call, latest first, within about 3 seconds) the tool re-reads the detail record, so sluitings_datum is the current deadline (sluitings_datum_gecontroleerd: true; sluitings_datum_oorspronkelijk holds the index date when it differed). Other closing dates come unchecked from the index (sluitings_datum_gecontroleerd: false); tenderned_aanbesteding_get gives the current deadline. Market consultations (MAC): the deadline in the notice itself ('Termijn ontvangst antwoorden', with time) is the closing date, as TenderNed's own field often differs (mostly later); recent ones are checked against their notice (sluitings_datum_bron 'aankondiging'; sluitings_datum_oorspronkelijk is TenderNed's field when it differed; sluitings_datum_opmerking explains).",
     inputSchema: {
       query: z.string().optional().describe("Free-text search over tender name, description and contracting authority. Several words = OR; wrap the whole query in double quotes for an exact phrase. Examples: 'fietsbrug', 'jeugdzorg', '\"openbare verlichting\"'. Keywords only, not full questions."),
       opdrachtgever: z.string().optional().describe("Contracting authority (aanbestedende dienst), e.g. 'Gemeente Utrecht', 'Omgevingsdienst Rivierenland', 'Ministerie van Defensie'. Looked up in TenderNed's register of contracting authorities and applied server-side: every registered authority whose name contains this text as whole words is included ('Ministerie van Defensie' covers all its units; 'Gemeente Utrecht' does not include 'Gemeente Utrechtse Heuvelrug'). Case, accents, apostrophe style and punctuation are ignored ('Gemeente Noardeast Fryslan' finds 'Gemeente Noardeast-Fryslân'). access_note lists the matched authorities; a name matching too many authorities (e.g. just 'Gemeente') is rejected as too broad."),
@@ -6086,7 +3255,7 @@ server.registerTool(
   });
 
   server.registerTool("tenderned_aanbesteding_get", {
-    description: "Get the full detail of one TenderNed procurement notice by publicatieId (publicatie_id from tenderned_aanbestedingen_search; either name is accepted): CPV codes, NUTS region, legal framework, procedure, contract start/end dates, award status and the related publications of the same procedure. Returns the same snake_case fields as the search tool (publicatie_datum, sluitings_datum, type_publicatie, ...) next to the original camelCase ones. By default also reads TenderNed's HTML rendering of the notice (Dutch or English) for the estimated value (geraamdeWaarde) and, for award notices, the winner(s), awarded values and contract dates (gunning): gunning.totaleWaarde is the value of all contracts awarded, winnaars[].waarde a winner's own value; for framework agreements gunning.raamovereenkomstMaximum (and per lot gunning.percelen[].raamovereenkomstMaximum) is a ceiling, not an awarded amount; a value shared by several winners of one lot is in gunning.percelen[].waarde, not per winner. Amounts under € 1,000 (e.g. '1 Euro') and closing dates in 2090 or later are flagged as placeholders. The closing date comes from TenderNed's metadata (sluitings_datum_bron names the field) and is the current deadline after any rectification (laatsteRectificatieId); it can differ from the deadline printed in the notice PDF and from the original deadline TenderNed's search index keeps; for a dynamic purchasing system (DAS) it may be the end date of the system. Set include_text to also extract the text of the official notice PDF (capped by max_chars).",
+    description: "Get the full detail of one TenderNed procurement notice by publicatieId (publicatie_id from tenderned_aanbestedingen_search; either name is accepted): CPV codes, NUTS region, legal framework, procedure, contract start/end dates, award status and the related publications of the same procedure. Returns the same snake_case fields as the search tool (publicatie_datum, sluitings_datum, type_publicatie, ...) next to the original camelCase ones. By default also reads TenderNed's HTML rendering of the notice (Dutch or English) for the estimated value (geraamdeWaarde) and, for award notices, the winner(s), awarded values and contract dates (gunning): gunning.totaleWaarde is the value of all contracts awarded, winnaars[].waarde a winner's own value; for framework agreements gunning.raamovereenkomstMaximum (and per lot gunning.percelen[].raamovereenkomstMaximum) is a ceiling, not an awarded amount; a value shared by several winners of one lot is in gunning.percelen[].waarde, not per winner. Amounts under € 1,000 (e.g. '1 Euro') and closing dates in 2090 or later are flagged as placeholders. The closing date comes from TenderNed's metadata (sluitings_datum_bron names the field) and is the current deadline after any rectification (laatsteRectificatieId); for a market consultation (MAC) it is the deadline in the notice itself ('Termijn ontvangst antwoorden', read from the HTML rendering, else the PDF text, of the latest rectification when there is one; sluitings_datum_bron 'aankondiging', with time and UTC offset), and sluitings_datum_gecontroleerd is true only when the notice confirmed it; TenderNed's own field, which often differs, is kept in sluitings_datum_oorspronkelijk and sluitings_datum_opmerking names both. Otherwise it can differ from the deadline printed in the notice PDF and from the original deadline TenderNed's search index keeps; for a dynamic purchasing system (DAS) it may be the end date of the system. Set include_text to also extract the text of the official notice PDF (capped by max_chars).",
     inputSchema: {
       publicatieId: z.union([z.string(), z.number().int()]).optional().describe("TenderNed publication id, e.g. '437355'."),
       publicatie_id: z.union([z.string(), z.number().int()]).optional().describe("Alias of publicatieId, as returned by tenderned_aanbestedingen_search."),
@@ -6369,6 +3538,117 @@ server.registerTool(
       }));
     } catch (e) {
       return toMcpToolPayload(mapSourceError(e, "Algoritmeregister", "https://algoritmes.overheid.nl"));
+    }
+  });
+
+  server.registerTool("wodc_search", {
+    description: "Search the WODC Repository (repository.wodc.nl): research reports of the Wetenschappelijk Onderzoek- en Datacentrum (Ministry of Justice and Security) since 1974, on crime, recidivism, the justice system, migration and evaluations of laws. Keywords are searched in the metadata and in the full text of the reports, all words required; \"quoted phrases\", OR and -word work. Filter by publication date (date_from/date_to: YYYY, YYYY-MM or YYYY-MM-DD), series ('Cahier', 'WODC Rapport', 'Factsheet', 'Justitiële verkenningen', or one number like 'Cahier 2026-12'), WODC project number or author. Returns per report: title, authors, issue date, series, project number, subjects, abstract (shortened), news link on wodc.nl and the persistent handle URL, plus the uuid for wodc_document_get (full abstract, files and text). sort: relevance (default with keywords), newest (default without) or oldest. At most 100 per call.",
+    inputSchema: {
+      query: z.string().max(SEARCH_QUERY_MAX).optional().describe("Keywords, e.g. 'recidive', 'ondermijning', '\"huiselijk geweld\"', 'cybercrime -fraude'. All words must occur (metadata or full text). Empty lists everything matching the filters."),
+      date_from: z.string().optional().describe("Published on or after: YYYY, YYYY-MM or YYYY-MM-DD."),
+      date_to: z.string().optional().describe("Published on or before: YYYY, YYYY-MM or YYYY-MM-DD."),
+      series: z.string().optional().describe("Report series, matched as part of the series name: 'Cahier', 'WODC Rapport', 'Factsheet', 'Memorandum', 'Justitiële verkenningen', or one number, e.g. 'Cahier 2026-12'."),
+      project: z.string().optional().describe("WODC project number, matched as part of the number and case-insensitive: '3606', or '3105' for 3105a-3105g."),
+      author: z.string().optional().describe("Author, matched as part of the name ('Lastname, Initials' in the repository), e.g. 'Wartna'."),
+      sort: z.enum(["relevance", "newest", "oldest"]).optional().describe("Default: relevance with keywords, newest without."),
+      top: z.number().int().min(1).max(WODC_MAX_ROWS).default(20),
+      ...paginationInputSchema,
+      offset: z.number().int().min(0).max(WODC_MAX_OFFSET).default(0).describe(`Skip this many reports (at most ${WODC_MAX_OFFSET}).`),
+      outputFormat: outputFormatSchema,
+      verbose: z.boolean().default(false),
+      dryRun: z.boolean().default(false),
+    },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ query, date_from, date_to, series, project, author, sort, top, offset, limit, outputFormat, verbose, dryRun }) => {
+    try {
+      // The repository pages itself (page/size), so records are not sliced locally again.
+      const rows = clampWodcRows(limit ?? top);
+      const args = { query, date_from, date_to, series, project, author, sort, offset, limit: rows };
+      if (dryRun) {
+        const plan = planWodcWindow(offset, rows);
+        const { params } = wodc.buildSearchParams(args, plan.pages[0], plan.size);
+        return dryRunPayload({ connector: "wodc", url: WODC_SEARCH_ENDPOINT, params: { ...params, page: plan.pages.join(",") } });
+      }
+      const started = Date.now();
+      const out = await wodc.search(args);
+      const responseTimeMs = Date.now() - started;
+      const records = out.items.map(wodcRecord);
+      const formatted = applyOutputFormat({ records, outputFormat });
+      const order = out.sort === "relevance" ? "meest relevant eerst" : out.sort === "newest" ? "nieuwste eerst" : "oudste eerst";
+      const shown = records.length ? `, ${out.offset + 1}-${out.offset + records.length} getoond` : ", geen op deze pagina";
+      return toMcpToolPayload(successResponse({
+        summary: out.total === 0 ? "Geen WODC-rapporten gevonden" : out.total === null ? `${records.length} WODC-rapporten (${order})` : `${out.total} WODC-rapporten gevonden${shown} (${order})`,
+        records,
+        provenance: prov("wodc_search", out.endpoint, out.params, records.length, out.total),
+        pagination: {
+          offset: out.offset,
+          limit: out.limit,
+          total: out.total,
+          has_more: typeof out.total === "number" ? out.offset + records.length < out.total : false,
+        },
+        output_format: formatted.output_format,
+        formatted_output: formatted.formatted_output,
+        access_note: mergeAccessNotes(out.access_note, formatted.access_note),
+        verbose: singleConnectorVerbose({ enabled: verbose, connector: "wodc", endpoint: out.endpoint, responseTimeMs }),
+      }));
+    } catch (e) {
+      return toMcpToolPayload(mapWodcError(e));
+    }
+  });
+
+  server.registerTool("wodc_document_get", {
+    description: `Get one WODC report (repository.wodc.nl) by the uuid or handle URL from wodc_search: full metadata (abstract, authors, series, project number, subjects), the item's files (rapport, aanbiedingsbrief, samenvatting, summary, ...: name, size, download URL) and the text of the report. The text is the repository's own extraction, which stops after 100,000 characters; when more is needed (zoekterm, a larger max_chars) the PDF itself is read (text_source 'auto'), up to 200,000 characters. zoekterm returns the passages holding all its words (at most ${WODC_MAX_PASSAGES}) instead of the beginning. bestand picks another file ('samenvatting', 'summary', a file uuid). Some items hold no files (published elsewhere): their link is given. Truncation is always stated.`,
+    inputSchema: {
+      id: z.string().max(300).describe("uuid or handle URL from wodc_search, e.g. 'cee6220c-e1b7-4507-a313-8891c35e77e4' or 'https://repository.wodc.nl/handle/20.500.12832/3576'."),
+      max_chars: z.number().int().min(0).max(WODC_MAX_CHARS).default(WODC_DEFAULT_CHARS).describe("Characters of text (with zoekterm: of all passages together). 0: metadata and files only."),
+      zoekterm: z.string().optional().describe("Words to find in the text, all required near each other; \"quoted phrase\" for exact words. Returns the passages around them."),
+      bestand: z.string().optional().describe("Which file to read instead of the main report: 'samenvatting', 'summary', 'aanbiedingsbrief', 'factsheet', part of a file name, or a file uuid."),
+      text_source: z.enum(["auto", "repository", "pdf"]).default("auto").describe("'auto': the repository's text, the PDF when that is missing or too short; 'repository': only the repository's text (fast); 'pdf': always the PDF."),
+    },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ id, max_chars, zoekterm, bestand, text_source }) => {
+    try {
+      const out = await wodc.getDocument({ id, max_chars, zoekterm, bestand, text_source });
+      if ("notFound" in out) {
+        return toMcpToolPayload(successResponse({
+          summary: `WODC-item ${id} niet gevonden`,
+          records: [],
+          provenance: prov("wodc_document_get", out.endpoint, out.params, 0, 0),
+          access_note: `${out.message} Zoek het rapport met wodc_search.`,
+        }));
+      }
+      const x = out.item;
+      const textInfo = out.passages
+        ? `${out.passages_totaal} passage${out.passages_totaal === 1 ? "" : "s"} met '${zoekterm?.trim()}'`
+        : out.tekst !== undefined
+          ? `tekst ${out.tekst_ingekort ? `${max_chars} van ` : ""}${out.tekst_lengte} tekens uit ${out.tekst_bron === "pdf" ? "de PDF" : "de repository"}${out.tekst_onvolledig ? " (niet de hele tekst)" : ""}`
+          : max_chars === 0 ? "alleen metadata en bestanden" : "geen tekst";
+      const data = {
+        ...x,
+        files: out.files,
+        bestand: out.bestand?.name,
+        bestand_url: out.bestand?.url,
+        tekst_bron: out.tekst_bron,
+        tekst: out.tekst,
+        tekst_lengte: out.tekst_lengte,
+        tekst_ingekort: out.tekst_ingekort,
+        tekst_onvolledig: out.tekst_onvolledig,
+        pdf_tekst_lengte: out.pdf_tekst_lengte,
+        pdf_paginas: out.pdf_paginas,
+        zoekterm: zoekterm?.trim() || undefined,
+        passages: out.passages,
+        passages_totaal: out.passages_totaal,
+        woord_treffers: out.woord_treffers,
+      };
+      const snippet = out.passages?.[0]?.tekst ?? shortAbstract(x.abstract, 240).text;
+      return toMcpToolPayload(successResponse({
+        summary: `WODC-rapport ${x.title}${x.issued ? ` (${[x.issued, ...x.series].join(", ")})` : ""}: ${textInfo}`,
+        records: [record("wodc", x.subtitle ? `${x.title}: ${x.subtitle}` : x.title, x.url, data, snippet, x.issued)],
+        provenance: prov("wodc_document_get", out.endpoint, out.params, 1, 1),
+        access_note: mergeAccessNotes(...out.notes, "De repository vermeldt bij de rapporten geen licentie; neem voor hergebruik de voorwaarden van het WODC in acht."),
+      }));
+    } catch (e) {
+      return toMcpToolPayload(mapWodcError(e));
     }
   });
 }

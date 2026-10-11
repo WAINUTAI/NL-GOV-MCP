@@ -6,8 +6,10 @@
 
 ## CBS
 - Primary: `https://datasets.cbs.nl/odata/v1/CBS`
-- Fallback: `https://opendata.cbs.nl/ODataApi/OData`
-- Second fallback: `data.overheid.nl` (CBS organization filter)
+- Fallback: `https://opendata.cbs.nl/ODataApi/OData`; the v3 table catalogue is `https://opendata.cbs.nl/ODataCatalog/Tables`
+- Second fallback: `data.overheid.nl` (organization `centraal-bureau-voor-de-statistiek`; without that filter only datasets CBS published are kept)
+- Table links: `https://opendata.cbs.nl/#/CBS/nl/dataset/<id>` (StatLine page of the table)
+- Population route of `nl_gov_ask`: table `03759ned` (bevolking op 1 januari), `RegioS` GM (gemeenten, also former ones), PV (provincies) and NL01 (Nederland); the NL01 row gives the table's newest year
 
 ## Tweede Kamer
 - `https://gegevensmagazijn.tweedekamer.nl/OData/v4/2.0`
@@ -25,6 +27,7 @@
 ## Rijksoverheid
 - News/document search: `https://www.rijksoverheid.nl/api/rss?query=<JSON>` — the RSS platform that replaced the retired `opendata.rijksoverheid.nl/v1/documents` API (migration 2 June 2026). `query` carries `filters` (content_type, and `sort_date` for date_from/date_to, the field the site's own period filter uses) + `resultSearchTerm` (server-side keyword). Keyless, returns RSS 2.0 XML, at most 20 items per query.
 - School holidays: `https://opendata.rijksoverheid.nl/v1/infotypes/schoolholidays` — still live on the old host; queried per schoolyear.
+- The same platform serves the Algemene Rekenkamer (`https://www.rekenkamer.nl/api/rss`) and the SCP (`https://www.scp.nl/api/rss`); see "Algemene Rekenkamer en SCP" below. The platform has been verified live on www.government.nl, www.ilent.nl and www.nvwa.nl as well (not built; adding a site is one entry in `RSS_SITES`).
 
 ## Rijksbegroting
 - CKAN-compatible search adapter at `/api/3/action/package_search`
@@ -43,6 +46,9 @@
 
 ## KNMI
 - `https://api.dataplatform.knmi.nl/open-data/v1` (requires `KNMI_API_KEY`)
+- File lists: `/datasets/{name}/versions/{version}/files` with `orderBy=created&sorting=desc` (newest first; without them the API lists by filename, oldest first)
+- Observations: `10-minute-in-situ-meteorological-observations` v1.0; `Actuele10mindataKNMIstations` v2 has had no new files since 2025-10-02
+- Warnings and earthquakes try dataset candidates in turn; only a 404 moves on, any other failure (e.g. 429) is an error, never 0 files
 
 ## Ruimtelijkeplannen.nl (Wro/Bro)
 - WMS GetFeatureInfo on `https://service.pdok.nl/kadaster/ruimtelijke-plannen/wms/v1_0` (`plangebied` layer, EPSG:28992, keyless, CC-0)
@@ -92,7 +98,11 @@
 - Auth: geen (keyless).
 - Categorie: static.
 - Bron: geconsolideerde nationale wet- en regelgeving (Basiswettenbestand) zoals ontsloten via wetten.overheid.nl.
-- Gedrag: BWB gebruikt eigen SRU-indexen; generieke indexen (cql.textAndIndexes, dcterms.title) worden geweigerd. De vrije zoekterm wordt op de titel-index `overheidbwb.titel` gematcht (meerwoords termen als CQL-phrase gequote). Records worden genarmaliseerd naar BWBR-identifier, titel, bevoegd gezag (authority), datum en een canonieke `https://wetten.overheid.nl/{BWBR}`-link.
+- Gedrag: BWB gebruikt eigen SRU-indexen; generieke indexen (cql.textAndIndexes, dcterms.title) worden geweigerd. De vrije zoekterm wordt op de titel-index `overheidbwb.titel` gematcht (meerwoords termen als CQL-phrase gequote).
+- Versies: elk SRU-record is één toestand (versie) van een regeling. `wetten_bwb_search` voegt `and overheidbwb.geldigheidsdatum=<peildatum>` toe (standaard vandaag, Europe/Amsterdam) en houdt per regeling één record; van twee versies op dezelfde dag de latere (`zichtperiode_startdatum`, dan het versienummer van de toestand). Velden uit `bwbipm`: `geldigheidsperiode_startdatum`/`_einddatum` (→ `geldig_vanaf`/`geldig_tot`; einddatum 9999-12-31 betekent geen einde), `toestand`, `rechtsgebied`; uit `enrichedData`: `locatie_toestand` (→ `xml_url`); `owmskern.modified` is `metadata_gewijzigd`, de wijziging van het metadatarecord, niet van de wet.
+- Afkortingen: `wetten_bwb_tekst` zoekt een `wet` eerst in een kleine vaste lijst (de boeken van het BW en namen waarvan de officiële afkorting ontbreekt of gedeeld wordt; elk id gecontroleerd tegen de SRU, 11 okt 2026), dan in de index `overheidbwb.afkorting` op de peildatum, dan exact op titel (`overheidbwb.titel`), en ten slotte op andere data. Een afkorting die meerdere regelingen delen geeft kandidaten.
+- Tekst: de XML van de versie (`https://repository.officiele-overheidspublicaties.nl/bwb/…`, uit `locatie_toestand`), tot 25 MiB met een timeout van 60 s, niet in de gedeelde HTTP-cache; de geparste versie blijft 24 uur bewaard (hooguit vier). Een download die geen toestand is (een HTML-onderhoudspagina, een lege of afgebroken XML; de repository geeft dan toch 200) is een `malformed_response` en wordt niet bewaard. Deeplinks per artikel komen uit de JCI van het artikel (`https://wetten.overheid.nl/jci1.3:c:BWBR0005537&artikel=3:4`, met `&g=<peildatum>` voor een andere dag dan vandaag).
+- Licentie/authenticiteit: geconsolideerde tekst van KOOP; alleen de publicatie in Staatsblad of Staatscourant is authentiek.
 
 ## CVDR lokale regelgeving (cvdr)
 
@@ -203,6 +213,7 @@
 - **Belangrijk**: onbekende parameters worden stil genegeerd (geen 400). Een niet-ondersteund filter lijkt dus te werken terwijl het álles teruggeeft — daarom stuurt de connector uitsluitend bovenstaande, live geverifieerde parameters mee.
 - **Detail**: CPV-codes, NUTS-regio, juridisch kader, procedure, aanvang/voltooiing opdracht, gunningsstatus en gerelateerde publicaties. Met `include_text` wordt de tekstlaag van de aankondigings-PDF geëxtraheerd (`utils/pdf-text.ts`).
 - **Sortering**: `sort=relevantie` of `sort=tappublicatiedatum` (nieuwste eerst); de tool kiest relevantie bij een zoekterm en anders nieuwste eerst.
+- **Sluitingsdatum marktconsultaties (MAC)**: TenderNed's veld `sluitingsDatumMarktconsultatie` wordt los van de aankondiging ingevoerd en wijkt er vaak van af: bij 24 van de 40 nieuwste marktconsultaties verschilde het van de termijn in de aankondiging, 19 keer later (gecontroleerd 11 okt 2026). Daarom is de termijn uit de aankondiging zelf leidend: het eForms-veld 'Termijn ontvangst antwoorden' ('Deadline for receipt of answers'), met tijd en UTC-offset, uit `/publicaties/{id}/html`, anders uit de PDF-tekst, van de laatste rectificatie als die er is (`sluitings_datum_bron: "aankondiging"`). Het TenderNed-veld blijft in `sluitings_datum_oorspronkelijk`, `sluitings_datum_opmerking` legt het verschil uit, en `sluitings_datum_gecontroleerd` is alleen `true` als de aankondiging de datum bevestigt. De zoektool controleert recente marktconsultaties binnen dezelfde limieten als de andere sluitingsdata (max. 50 per aanroep, ongeveer 3 seconden), met één extra request voor de HTML-weergave (en één voor de rectificatie).
 
 ## Tuchtrecht (KOOP SRU)
 
@@ -275,3 +286,42 @@ Meerdere woorden vrije tekst moeten als losse termen met `AND` worden verbonden:
 - **Endpoints**: `POST https://algoritmes.overheid.nl/api/algoritme/NLD` (zoeken, JSON-body met `searchtext`, `organisation`, `include_children`, `status`, `publicationcategory`, `category`, `organisationtype`, `page`, `limit`), `/api/organisation/NLD` (organisaties op naam), `/api/organisation-relation/{org_id}` en `/api/organisation/{code}`, `/api/suggestion/NLD/{tekst}` (exacte treffers, om fuzzy resultaten te herkennen)
 - **Auth**: geen (open API van het ministerie van BZK; OpenAPI op `https://algoritmes.overheid.nl/api/openapi.json`)
 - **Gedrag**: het `organisation`-filter accepteert alleen het eigen `org_id` van het register (`gm0344`), dus een organisatienaam wordt eerst opgezocht; een niet-eenduidige naam levert kandidaten in plaats van resultaten. `limit` is maximaal 100 (hoger geeft HTTP 422). Zonder exacte treffers antwoordt het register met een fuzzy zoekopdracht die dat niet aangeeft; de connector stelt dat vast met de suggestie-endpoint en meldt het. Het register bevat alleen wat organisaties zelf publiceren.
+
+
+## Nieuwe bronnen en tools (v0.4)
+
+## Rechtspraak open data (uitspraak op ECLI)
+
+- **Connector**: `rechtspraak` (category `semi_live`), dezelfde als `rechtspraak_search_ecli`
+- **Tool**: `rechtspraak_uitspraak_get`
+- **Endpoint**: `GET https://data.rechtspraak.nl/uitspraken/content?id=<ECLI>` (`Accept: application/xml`): één open-data-document met de metadata (RDF: instantie, data, zaaknummer, procedures, rechtsgebieden, relaties, wetsverwijzingen, vindplaatsen) en de tekst (`uitspraak` of `conclusie`, met secties, `role="beslissing"` waar Rechtspraak die markeert, en voetnoten). Tot ongeveer 1 MB voor een lange conclusie; timeout 30 s, één retry. Leesbare pagina: `https://uitspraken.rechtspraak.nl/details?id=<ECLI>`
+- **Auth**: geen. **Limiet**: Rechtspraak vraagt de open-data-dienst met hooguit 10 verzoeken per seconde te bevragen; de tool doet één verzoek per aanroep en de connector-limiter houdt er hooguit drie tegelijk open
+- **Gedrag**: een ECLI die Rechtspraak niet kent geeft HTTP 404 (leeg resultaat met uitleg). Een uitspraak kan geregistreerd zijn zonder gepubliceerde tekst (alleen metadata); tuchtrechtuitspraken staan er alleen met metadata in, met een deeplink naar tuchtrecht.overheid.nl. De tekst is zoals gepubliceerd (geanonimiseerd)
+
+## ORI documenttekst
+
+- **Connector**: `ori` (category `discovery`)
+- **Tool**: `ori_document_get`
+- **Endpoint**: `GET https://api.openraadsinformatie.nl/v1/elastic/<index>/_doc/<id>?_source_includes=…` (alleen de benodigde velden), timeout 20 s, één retry. ORI bewaart de tekst van een document drie keer (`text`, `md_text`, `text_pages`); de tool haalt `md_text` (Markdown, één entry per pagina) en valt voor de zeldzame documenten zonder `md_text` terug op de platte paginatekst
+- **Auth**: geen
+- **Gedrag**: een tekst boven de responslimiet van 12 MB wordt zonder tekst opnieuw opgehaald, zodat de metadata en de bestandslink er toch zijn (gemeld). De ORI-indexlijst (al geladen voor `ori_search`) noemt de organisatie en onderscheidt een onbekende index van een onbekend id. De tekst is ORI's automatische extractie; het bestand zelf is de bron
+
+## WODC Repository (repository.wodc.nl)
+
+- **Connector**: `wodc` (category `discovery`, 30 minuten cache)
+- **Tools**: `wodc_search`, `wodc_document_get`
+- **Platform**: DSpace 7 met open REST-API (`https://repository.wodc.nl/server/api`), geen key
+- **Endpoints**: `GET /discover/search/objects` (zoeken: `query`, `dsoType=ITEM`, `f.dateIssued=[van TO tot],equals`, `f.series`, `f.project` en `f.author` met `,contains`, `sort` op `score` of `dc.date.issued`, `page` vanaf 0 en `size`), `GET /core/items/{uuid}` (met bundles en bitstreams), `GET /pid/find?id=hdl:<handle>` (handle → item), `GET /core/bitstreams/{uuid}/content` (bestanden en de tekstextractie)
+- **Zoeken**: DSpace discovery (Solr) over de metadata én de volledige tekst; geen markeringen, dus een treffer kan overal in een rapport staan. Een `date_to` als maand wordt als laatste dag van die maand verstuurd (de repository leest een maand als de eerste dag)
+- **Limieten**: hooguit 100 per pagina (DSpace-maximum); een pagina van 100 kost de repository enkele seconden, dus de tool vraagt nooit meer dan drie opeenvolgende pagina's en kiest de paginagrootte die het minste ophaalt. Timeout 15 s (tekst 20 s)
+- **Tekst**: een item heeft een bundle ORIGINAL (de PDF's) en meestal een bundle TEXT met DSpace's eigen extractie per PDF (`<naam>.pdf.txt`), die stopt na 100.000 tekens. Voor meer leest de tool de PDF zelf (`utils/pdf-text.ts`, tot 200.000 tekens). Sommige items hebben geen bestanden (elders gepubliceerd) en linken naar de publicatie
+- **Licentie**: de copyrightpagina van de WODC-website noemt CC0 voor de website; de items zelf hebben geen licentie (`dc.rights` ontbreekt), dus de tool claimt er geen en vermeldt dat in `access_note`
+
+## Algemene Rekenkamer en SCP
+
+- **Connectors**: `rekenkamer` en `scp` (category `semi_live`), elk een eigen circuit, los van `rijksoverheid`
+- **Tools**: `rekenkamer_publicaties_search`, `scp_publicaties_search`
+- **Endpoints**: `https://www.rekenkamer.nl/api/rss?query=<JSON>` en `https://www.scp.nl/api/rss?query=<JSON>`: hetzelfde RSS-platform als Rijksoverheid.nl (dat deze sites niet indexeert), met `resultSearchTerm` (server-side trefwoorden), het filter `content_type` = `pro:downloadDocument` (de documentpagina's: rapporten, brieven, studies; zonder dat filter komen vacatures, foutpagina's en de homepage mee) en `sort_date` voor de periode
+- **Auth**: geen
+- **Limieten**: hooguit 20 items per zoekvraag (RSS 20-cap), gerangschikt op relevantie, geen paginering; een volle feed betekent een onbekend totaal. Per item alleen titel, link, datum en teaser
+- **Archief**: Rekenkamer tot in de jaren negentig; SCP vooral vanaf eind 2019

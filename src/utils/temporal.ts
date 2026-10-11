@@ -207,7 +207,8 @@ export function parseTemporalRange(input: string, nowOrOptions: Date | TemporalP
   }
 
   // bare year: "in 2024", "uit 2024", "from 2024", or standalone "2024"
-  const bareYearMatch = query.match(/\b(?:in|uit|from|van|over)?\s*(20\d{2})\b/i);
+  // Not a number inside an identifier: "ECLI:NL:HR:2019:2006", "Verordening (EU) 2016/679".
+  const bareYearMatch = query.match(/\b(?:in|uit|from|van|over)?\s*(?<![:/])(20\d{2})(?![:/]\w)\b/i);
   if (bareYearMatch) {
     const year = Number(bareYearMatch[1]);
     const currentYear = today.getUTCFullYear();

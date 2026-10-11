@@ -1,5 +1,4 @@
 import type { AppConfig } from "../types.js";
-import { loadConfig } from "../config.js";
 import { getJson } from "../utils/http.js";
 
 interface RdwRecord {
@@ -146,66 +145,6 @@ export class RdwSource {
       endpoint: RDW_ENDPOINT,
       params: { $limit: String(args.rows) },
       access_note: "Geen live match in RDW dataset voor deze zoekterm.",
-    };
-  }
-}
-
-export async function search(query: string): Promise<{
-  data: unknown;
-  citations: Array<{
-    source: "rdw";
-    title: string;
-    url: string;
-    retrievedAt: string;
-    excerpt?: string;
-  }>;
-}> {
-  const cfg = loadConfig();
-  const src = new RdwSource(cfg);
-
-  try {
-    const out = await src.search({ query, rows: 5 });
-    if (Array.isArray(out.items) && out.items.length > 0) {
-      return {
-        data: out.items,
-        citations: [
-          {
-            source: "rdw",
-            title: "RDW Open Data",
-            url: out.endpoint || "https://opendata.rdw.nl",
-            retrievedAt: new Date().toISOString(),
-            ...(out.access_note ? { excerpt: out.access_note } : {}),
-          },
-        ],
-      };
-    }
-
-    const fb = src.fallback({ query, rows: 5 });
-    return {
-      data: fb.items,
-      citations: [
-        {
-          source: "rdw",
-          title: "RDW Open Data (fallback)",
-          url: "https://opendata.rdw.nl",
-          retrievedAt: new Date().toISOString(),
-          excerpt: fb.access_note,
-        },
-      ],
-    };
-  } catch {
-    const out = src.fallback({ query, rows: 5 });
-    return {
-      data: out.items,
-      citations: [
-        {
-          source: "rdw",
-          title: "RDW Open Data (fallback)",
-          url: "https://opendata.rdw.nl",
-          retrievedAt: new Date().toISOString(),
-          excerpt: out.access_note,
-        },
-      ],
     };
   }
 }
