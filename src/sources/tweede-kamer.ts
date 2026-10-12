@@ -820,14 +820,25 @@ function assertOrderedRange(from: string | undefined, to: string | undefined): v
   }
 }
 
+/**
+ * Before 16 May 1940 Amsterdam kept local mean time, and time-zone databases
+ * disagree about it (+00:19:32, or Brussels' +00:00 since tzdata 2022b), so the
+ * offset there depended on the machine. Nothing in the Gegevensmagazijn is that
+ * old; such days get CET's +01:00.
+ */
+const FIRST_CET_DAY = "1940-05-16";
+
 /** UTC offset of Europe/Amsterdam at local midnight of `day` ("+01:00" or "+02:00"). */
 function amsterdamOffset(day: string): string {
+  if (day < FIRST_CET_DAY) return "+01:00";
   try {
     const probe = new Date(`${day}T00:00:00+01:00`);
     const name =
       new Intl.DateTimeFormat("en-US", { timeZone: "Europe/Amsterdam", timeZoneName: "longOffset" })
         .formatToParts(probe)
         .find((p) => p.type === "timeZoneName")?.value ?? "";
+    // A zero offset is written as a bare "GMT".
+    if (name === "GMT") return "+00:00";
     const m = /GMT([+-]\d{2}:\d{2})/.exec(name);
     return m ? m[1] : "+01:00";
   } catch {
