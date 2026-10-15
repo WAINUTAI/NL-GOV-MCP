@@ -325,3 +325,40 @@ Meerdere woorden vrije tekst moeten als losse termen met `AND` worden verbonden:
 - **Auth**: geen
 - **Limieten**: hooguit 20 items per zoekvraag (RSS 20-cap), gerangschikt op relevantie, geen paginering; een volle feed betekent een onbekend totaal. Per item alleen titel, link, datum en teaser
 - **Archief**: Rekenkamer tot in de jaren negentig; SCP vooral vanaf eind 2019
+
+## Nieuwe bronnen: subsidies en financiering (oktober 2026)
+
+De loketlaag van regelingen: welke er zijn, of ze open zijn, deadline, budget en doelgroep. De juridische tekst van een regeling staat al in CVDR, Officiële Bekendmakingen, BWB en EUR-Lex. Alle drie live geverifieerd op 15 oktober 2026.
+
+## RVO — Subsidies en financiering (rvo.nl)
+
+- **Connectors**: `rvo_subsidies` (open-data-API, category `discovery`) en `rvo_subsidies_pages` (de openbare pagina's voor status, periode en budget, category `semi_live`), elk een eigen circuit, zodat trage pagina's de API niet blokkeren
+- **Tools**: `rvo_subsidies_search`, `rvo_subsidie_get`
+- **Endpoints**: `GET https://www.rvo.nl/api/v1/opendata/subsidies?page=N` (kale JSON-array van 50, een lege array na de laatste pagina; HTTP 500 bij een negatieve pagina), `GET /api/v1/opendata/subsidies/<uuid>` (met `body`: de rich-text-blokken als HTML; een slug geeft 404), en de openbare pagina `https://www.rvo.nl/subsidies-financiering/<slug>`
+- **Auth**: geen. De dataset 'subsidies-en-financiering-rvo-nl' is CC0; robots.txt staat `/subsidies-financiering` toe (op enkele TVL-`/aanvraag`-paden na)
+- **Zoeken**: de API negeert elke zoek-, filter-, sorteer- en paginagrootteparameter (ruim 30 geprobeerd); de bron leest daarom de hele catalogus (28 pagina's, ongeveer 1.370 regels, waarvan ongeveer 1.095 subpagina's) en zoekt lokaal, 3 uur in het geheugen
+- **Status, periode, budget**: niet in de API. Ze komen uit de paginagegevens die rvo.nl zelf in de HTML meestuurt (de Next.js flight payload: `subsidyStatus`, `startDate`, `endDate`, `budget`): officieel en openbaar, zonder account of key, maar geen gedocumenteerde API, dus een herontwerp van rvo.nl kan het breken (de status wordt dan 'onbekend' met de reden). Alleen de vier labels 'Open', 'Bijna open', 'Tijdelijk gesloten' en 'Gesloten voor aanvragen' zijn gezien (94 pagina's). Uit de lopende tekst wordt niets afgeleid. Toont de pagina alleen dagen (`disableTime`), dan hoort de laatste dag bij de periode ('tot 31 december' is tot en met)
+- **Limieten**: hooguit 10 statuspagina's per zoekvraag, 40 met een statusfilter, en die binnen 10 s (een pagina die dan niet gelezen is: status 'onbekend', 'niet gelezen binnen de tijdslimiet'); drie verzoeken tegelijk; elk verzoek 10 s timeout met één herhaling; de catalogus laadt hooguit 20 s (lijstpagina's die dan niet binnen zijn tellen als ontbrekend, gemeld, en na 5 minuten opnieuw geladen). Zo duurt een koude zoekvraag ook bij een trage rvo.nl hooguit ongeveer 30 s (eens 89 s met de oude 20 s timeout en twee herhalingen per verzoek); normaal 6 tot 13 s koud, 1 ms warm (16 oktober 2026)
+- **Cache**: lijst- en openbare pagina's gaan buiten de HTTP-cache om; de bron bewaart de catalogus 3 uur en status, periode en budget van een pagina 30 minuten (die kunnen dus tot 30 minuten oud zijn; het budget draagt zijn eigen datum `budget_date`)
+- **Niet in de open data**: enkele grote regelingen hebben op rvo.nl een eigen pagina die de catalogus mist (`/subsidies-financiering/isde`, `/sde`, `/mit`, `/dei` geven HTTP 200, zonder status in hun paginagegevens; 15 oktober 2026). `rvo_subsidie_get` op zo'n slug zegt dat en geeft de link, met de treffers uit de catalogus
+
+## NWO en ZonMw — calls en subsidierondes
+
+- **Connectors**: `nwo_calls` (www.nwo.nl en de NWO-onderdelen regieorgaan-sia.nl, nko.nl, openscience.nl) en `zonmw_subsidies` (www.zonmw.nl), category `semi_live`, elk een eigen circuit
+- **Tools**: `nl_onderzoek_calls_search`, `nl_onderzoek_call_get`
+- **Endpoints**: `https://www.nwo.nl/calls?input=…&f[n]=calls_bw_call_status:<term>&page=N` (overzicht, 12 kaarten per pagina, statusfacet met aantallen) en `/calls/<slug>`; `https://www.zonmw.nl/nl/subsidies?input=…&sort_bef_combine=field_subsidy_date_end_DESC&page=N` (overzicht, 12 kaarten, op deadline gesorteerd), `/nl/subsidie/<slug>` en het statusblok `/nl/entity-date-status/<nid>/full`
+- **Auth**: geen API; HTML van twee Drupal-sites, gelezen op stabiele classnamen. robots.txt: NWO en onderdelen `Crawl-delay: 3` (passend binnen hun limiet van 20 verzoeken per minuut) en alleen `/search` uitgesloten; ZonMw `Crawl-delay: 4` en facet-URL's (`?f[`) uitgesloten, dus het statusfacet van zonmw.nl wordt niet gebruikt (live gecontroleerd, 15 oktober 2026)
+- **Crawl-delay**: wordt aangehouden: verzoeken aan nwo.nl (en de onderdelen samen) starten minstens 3 s na elkaar, aan zonmw.nl minstens 4 s, ook als ze tegelijk worden gestuurd (`crawlDelayMs` in `http.ts`, per proces; een antwoord uit de cache telt niet)
+- **Limieten**: een ongecachte NWO-pagina kost 4 tot 20 s, dus hooguit 3 NWO-pagina's per zoekvraag (timeout 30 s, één retry); ZonMw antwoordt in ongeveer 0,1 s, maar door de crawl-delay kost elke volgende pagina 4 s, hooguit 8 pagina's. Een ZonMw-subsidiepagina met statusblok zijn twee verzoeken (ongeveer 4 s); de deadlinevraag van `nl_gov_ask` leest hooguit 3 NWO-callpagina's, 3 s na elkaar
+- **Niet gedekt**: DUS-I (dus-i.nl): het overzicht is een A-Z-lijst zonder status, de status van een regeling staat alleen als vrije tekst in een updateblok; dat zou gokken zijn. De RSS-zoekfunctie van dus-i.nl werkt wel (zelfde platform als rijksoverheid.nl), maar geeft geen status
+
+## EU Funding & Tenders Portal (Europese Commissie)
+
+- **Connector**: `eu_funding` (category `semi_live`), voor de zoek- en de facet-endpoint
+- **Tools**: `eu_funding_search`, `eu_funding_get`
+- **Endpoints**: `POST https://api.tech.ec.europa.eu/search-api/prod/rest/search?apiKey=SEDIA&text=***&pageSize=…&pageNumber=…` en `POST …/rest/facet` (programmanamen)
+- **Auth**: geen account; 'SEDIA' is de publieke sleutel die het portaal zelf meestuurt (in logs en foutmeldingen gemaskeerd)
+- **Request**: `query`, `languages` en `sort` gaan als multipart-delen met type `application/json`; een JSON-body wordt stil genegeerd (alle 4,25 miljoen documenten). Codes: type 1 topic (subsidie of prijs), 2 extern beleid (PROSPECT), 8 cascade funding (0 aanbesteding, weggelaten); status 31094501/02/03 = forthcoming/open/closed. Datumfilters alleen in epoch-milliseconden
+- **Limieten**: `pageSize` max 100, `pageNumber` vanaf 1, voorbij 10.000 resultaten `totalResults` 0. Gelijke sorteerwaarden schudden per verzoek, dus elke sortering eindigt op `identifier` en `callccm2Id`. Pagina's van 100 zijn 2 tot 4 MB (met HTML) en vallen buiten de cache (4 MB per item)
+- **Index**: houdt verouderde kopieën van topics met een oude status; standaard worden calls zonder resterende deadline weggelaten en geteld. Een verouderde kopie met een deadline die nog komt blijft staan (15 oktober 2026: 1 van de 534, ERASMUS-EDU-2022-ECHE-CERT-FP: de kopie noemt 26 januari 2027, het actuele record heeft als laatste deadline 24 maart 2026); de samenvatting van zo'n record en `access_note` zeggen dat het een verouderde kopie is. Bedragen in EUR; een budgetregel kan door meer topics gedeeld worden en wordt dan als gedeelde pot gemeld, niet verdeeld
+- **Transport**: `postForm` in `eu-funding.ts` doet zelf wat `http.ts` voor JSON doet (cache, circuit, slots, timeout, één retry, groottelimiet), omdat `http.ts` geen multipart verstuurt; `Retry-After` wordt niet gevolgd

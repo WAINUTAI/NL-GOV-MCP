@@ -50,6 +50,9 @@ import { DsoOmgevingsdocumentenSource, DsoInputError, DSO_DOCUMENT_TYPES, DSO_PR
 import { DSO_TEXT_DEFAULT_CHARS, DSO_TEXT_MAX_CHARS, selectDsoText, zoektermWords, type DsoTextPart } from "./sources/dso-regeltekst.js";
 import { WodcSource, WODC_SEARCH_ENDPOINT, WODC_MAX_ROWS, WODC_MAX_OFFSET, WODC_DEFAULT_CHARS, WODC_MAX_CHARS, WODC_MAX_PASSAGES, clampWodcRows, mapWodcError, planWodcWindow, shortAbstract, type WodcItem } from "./sources/wodc.js";
 import { AlgoritmeregisterSource, ALGORITMEREGISTER_SEARCH_ENDPOINT, ALGORITMEREGISTER_ORG_ENDPOINT, ALGORITMEREGISTER_MAX_ROWS, ALGORITME_STATUSSEN, ALGORITME_PUBLICATIECATEGORIEEN, ALGORITME_ORGANISATIETYPES, clampAlgoritmeRows, planAlgoritmeWindow, summarizeAlgoritmeSearch } from "./sources/algoritmeregister.js";
+import { EuFundingSource, EuFundingInputError, EU_FUNDING_SEARCH_ENDPOINT, EU_FUNDING_PORTAL, EU_FUNDING_MAX_ROWS, EU_FUNDING_DEFAULT_ROWS, EU_FUNDING_MAX_REACHABLE, EU_FUNDING_DEFAULT_MAX_CHARS, EU_FUNDING_MAX_CHARS, EU_FUNDING_STATUSES, EU_FUNDING_TYPES, EU_FUNDING_SORTS, EU_FUNDING_PROGRAMME_ABBREVIATIONS, clampEuFundingRows, buildEuFundingRequest, euFundingParams, describeEuFundingItem, summarizeEuFundingSearch, summarizeEuFundingGet, type EuFundingItem } from "./sources/eu-funding.js";
+import { RvoSubsidiesSource, RvoSubsidiesInputError, RVO_SUBSIDIES_ENDPOINT, RVO_SUBSIDIES_CONNECTOR, RVO_SUBSIDIES_PAGES_CONNECTOR, RVO_STATUSSEN, RVO_DOELGROEPEN, RVO_ONDERWERPEN, RVO_SORTS, RVO_DEFAULT_ROWS, RVO_MAX_ROWS, RVO_STATUS_CHECK_MAX, RVO_STATUS_ENRICH_MAX, RVO_TEXT_DEFAULT_CHARS, RVO_TEXT_MAX_CHARS, rvoPageUrl, summarizeRvoSearch, summarizeRvoGet, type RvoSubsidyItem, type RvoSubsidyStatus } from "./sources/rvo-subsidies.js";
+import { OnderzoekscallsSource, ONDERZOEKSCALL_STATUS_FILTERS, ONDERZOEKSCALL_MAX_ROWS, ONDERZOEKSCALL_DEFAULT_ROWS, ONDERZOEKSCALL_MAX_OFFSET, ONDERZOEKSCALL_DEFAULT_CHARS, ONDERZOEKSCALL_MAX_CHARS, ONDERZOEKSCALL_CONNECTORS, clampOnderzoekscallRows, resolveOnderzoekscallUrl, summarizeOnderzoekscallsSearch, summarizeOnderzoekscall, amsterdamDay, mapOnderzoekscallError, type OnderzoekscallItem } from "./sources/nl-onderzoekscalls.js";
 import { mapSourceError, nowIso, successResponse, toMcpToolPayload, errorResponse } from "./utils/response.js";
 import { SourceRequestError } from "./utils/http.js";
 import { applyOutputFormat } from "./utils/output-format.js";
@@ -107,6 +110,9 @@ const euCellar = new EuCellarSource(config);
 const lido = new LidoSource(config);
 const algoritmeregister = new AlgoritmeregisterSource(config);
 const wodc = new WodcSource(config);
+const euFunding = new EuFundingSource(config);
+const rvoSubsidies = new RvoSubsidiesSource(config);
+const onderzoekscalls = new OnderzoekscallsSource(config);
 
 function record(source: string, title: string, canonical_url: string, data: Record<string, unknown>, snippet?: string, date?: string): MCPRecord {
   return { source_name: source, title, canonical_url, data, snippet, date };
@@ -117,6 +123,34 @@ function algoritmeRecord(x: Awaited<ReturnType<AlgoritmeregisterSource["search"]
   const meta = [x.organisation, x.status, x.publication_category].filter(Boolean).join(" · ");
   const desc = x.description_short.length > 240 ? `${x.description_short.slice(0, 239)}…` : x.description_short;
   return record("algoritmeregister", x.title, x.url, x as unknown as Record<string, unknown>, [meta, desc].filter(Boolean).join(" — "), x.published_at?.slice(0, 10));
+}
+
+/** An EU funding call as eu_funding_search and nl_gov_ask show it, dated by its next deadline (else its last, else its opening). */
+function euFundingRecord(x: EuFundingItem): MCPRecord {
+  return record("eu_funding", x.title, x.url, x as unknown as Record<string, unknown>, [describeEuFundingItem(x), x.description_short].filter(Boolean).join(" — "), (x.next_deadline ?? x.deadlines.at(-1) ?? x.opening_date)?.slice(0, 10));
+}
+
+/**
+ * An RVO page as rvo_subsidies_search and nl_gov_ask show it: the status label,
+ * period and budget as rvo.nl shows them (when the page was read), and for a
+ * sub-page the regeling it belongs to.
+ */
+function rvoRecord(x: RvoSubsidyItem & { status_info?: RvoSubsidyStatus }): MCPRecord {
+  const s = x.status_info;
+  const meta = [
+    s ? (s.status_label ?? "status onbekend") : "",
+    s?.period_text ? `aanvragen ${s.period_text}` : "",
+    s?.budget_total_eur !== undefined ? `budget € ${s.budget_total_eur.toLocaleString("nl-NL")}` : "",
+    x.main_page ? "" : x.parent_title ? `onderdeel van ${x.parent_title}` : "subpagina",
+  ].filter(Boolean).join(" · ");
+  const intro = x.intro.length > 240 ? `${x.intro.slice(0, 239)}…` : x.intro;
+  return record("rvo", x.title, x.url, x as unknown as Record<string, unknown>, [meta, intro].filter(Boolean).join(" — "), x.changed?.slice(0, 10));
+}
+
+/** A call or subsidy round of NWO or ZonMw, dated by its deadline as an Amsterdam day (a 00:00 deadline is 22:00Z the day before). */
+function onderzoekscallRecord(x: OnderzoekscallItem): MCPRecord {
+  const meta = [x.organisation === "nwo" ? "NWO" : "ZonMw", x.status_label, x.deadline_text ? `deadline ${x.deadline_text}` : "", x.budget_text ? `budget ${x.budget_text}` : "", x.programme, x.for_whom].filter(Boolean).join(" · ");
+  return record(x.organisation, x.title, x.url, x as unknown as Record<string, unknown>, [meta, x.summary].filter(Boolean).join(" — "), amsterdamDay(x.deadline));
 }
 
 /** "Statsch, P.D., Burger, A.M. e.a. · Cahier 2026-12 · project 3105g" */
@@ -2061,7 +2095,7 @@ export function registerTools(server: McpServer): void {
     }
   });
 
-  registerNlGovAsk(server, { config, TOOL_ANNOTATIONS, dataOverheid, cbs, tk, debatten, bekend, rijksoverheid, rijksbegroting, duo, ori, luchtmeetnet, rechtspraak, tenderned, tuchtrecht, samenwerkendeCatalogi, brpGewaspercelen, verkiezingsuitslagen, euCellar, algoritmeregister, record, algoritmeRecord, wodc, wodcRecord, uitspraakResult, wettenTekstResult, debatRecords, debatSummary, debatNotes, dsoRecord, prov, outputFormatSchema, paginationInputSchema });
+  registerNlGovAsk(server, { config, TOOL_ANNOTATIONS, dataOverheid, cbs, tk, debatten, bekend, rijksoverheid, rijksbegroting, duo, ori, luchtmeetnet, rechtspraak, tenderned, tuchtrecht, samenwerkendeCatalogi, brpGewaspercelen, verkiezingsuitslagen, euCellar, algoritmeregister, record, algoritmeRecord, wodc, wodcRecord, euFunding, euFundingRecord, rvoSubsidies, rvoRecord, onderzoekscalls, onderzoekscallRecord, uitspraakResult, wettenTekstResult, debatRecords, debatSummary, debatNotes, dsoRecord, prov, outputFormatSchema, paginationInputSchema });
 
   server.registerTool("data_politie_search", {
     description: "Search Dutch registered crime statistics (data.politie.nl / CBS dataderden OData). Filter by region (RegioS gemeente/wijk/buurt code or name), crime type (SoortMisdrijf code or name) and period. Set 'dimension' to explore valid filter values.",
@@ -3510,11 +3544,8 @@ server.registerTool(
         const plan = planAlgoritmeWindow(offset, rows);
         const org = organisatie?.trim();
         const body = algoritmeregister.buildQuery(args, org ? "<org_id>" : undefined);
-        const planned = dryRunPayload({ connector: "algoritmeregister", url: ALGORITMEREGISTER_SEARCH_ENDPOINT, params: { ...body, page: plan.pages.join(","), limit: plan.pageSize, ...(org ? { organisatie: org, organisatie_lookup: `POST ${ALGORITMEREGISTER_ORG_ENDPOINT}` } : {}) } });
-        // dryRunPayload labels every request GET; the register's search is a POST with a JSON body.
-        const payload = planned.structuredContent as { planned_requests?: Array<Record<string, unknown>> };
-        if (payload.planned_requests?.[0]) payload.planned_requests[0].method = "POST";
-        return { content: [{ type: "text" as const, text: JSON.stringify(planned.structuredContent) }], structuredContent: planned.structuredContent };
+        // The register's search is a POST with a JSON body.
+        return dryRunPayload({ connector: "algoritmeregister", method: "POST", url: ALGORITMEREGISTER_SEARCH_ENDPOINT, params: { ...body, page: plan.pages.join(","), limit: plan.pageSize, ...(org ? { organisatie: org, organisatie_lookup: `POST ${ALGORITMEREGISTER_ORG_ENDPOINT}` } : {}) } });
       }
       const started = Date.now();
       const out = await algoritmeregister.search(args);
@@ -3649,6 +3680,276 @@ server.registerTool(
       }));
     } catch (e) {
       return toMcpToolPayload(mapWodcError(e));
+    }
+  });
+
+  server.registerTool("eu_funding_search", {
+    description: "Search the EU Funding & Tenders Portal (European Commission) for open, forthcoming or closed EU funding: topics of calls for proposals (grants, including prizes) under Horizon Europe, Digital Europe, LIFE, CEF, Creative Europe, CERV, EU4Health, Erasmus+, EDF, SMP and other EU programmes; cascade funding calls (open calls that EU-funded projects run for SMEs, start-ups and other third parties); and EU external action calls (EuropeAid/PROSPECT, mostly for organisations in or working with non-EU countries). Not here: EU tenders (TenderNed for Dutch procurement), national and regional schemes (rvo_subsidies_search, nl_onderzoek_calls_search) and EU structural funds run by Dutch authorities (EFRO/ESF+, Interreg). Per call: id (for eu_funding_get), title, call, programme, status as the portal states it, opening date, all deadlines, next_deadline and deadline_passed (computed), budget_eur with budget_scope (the topic's own budget line, a line shared with other topics: budget_shared_with, a cascade call's total, or an external call's budget; absent when the source has no amount), types of action and the portal URL. The portal index keeps outdated copies of many topics with their old status: with status open/forthcoming (default) calls without a deadline today or later are left out and counted in the summary and access_note; include_expired shows them, flagged outdated_index_record / deadline_passed. Keywords must be English: the portal is English and Dutch words find almost nothing. All words must occur; \"quoted phrases\", OR and -word work. Default order: next deadline first without keywords, relevance with keywords. At most 100 per call; only the first 10,000 results of a query are reachable.",
+    inputSchema: {
+      query: z.string().max(SEARCH_QUERY_MAX).optional().describe("English keywords, e.g. 'hydrogen', '\"cultural heritage\"', 'healthcare innovation', 'batteries OR storage', 'robotics -space'. Matched in title, description, identifier, call, type of action and keywords; every word must occur. Translate Dutch terms (waterstof → hydrogen, cultureel erfgoed → cultural heritage, zorginnovatie → healthcare innovation). A topic or call identifier also works. Empty lists everything matching the filters."),
+      status: z.array(z.enum(EU_FUNDING_STATUSES)).optional().describe("'open', 'forthcoming' (announced, not yet open) and/or 'closed'. Default ['open','forthcoming']."),
+      type: z.array(z.enum(EU_FUNDING_TYPES)).optional().describe("'grant' (topics of EU calls for proposals, including prizes), 'cascade_funding' (open calls of EU-funded projects for third parties, often SMEs) and/or 'external_action' (EuropeAid/PROSPECT, mostly for non-EU countries). Default all three."),
+      programme: z.string().optional().describe(`EU programme as abbreviation (${EU_FUNDING_PROGRAMME_ABBREVIATIONS.join(", ")}), part of its name ('Horizon Europe', 'Digital Europe') or numeric portal id. An abbreviation used in two periods (LIFE, CREA, JUST, ...) covers both. Unknown values are rejected, never ignored.`),
+      deadline_from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("YYYY-MM-DD. A call matches when one of its deadlines falls on or after this day."),
+      deadline_to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("YYYY-MM-DD. A call matches when one of its deadlines falls on or before this day (one range: one deadline must lie inside the whole window)."),
+      include_expired: z.boolean().default(false).describe("With status open/forthcoming: also show calls the portal still labels open/forthcoming whose deadlines have all passed (mostly outdated index copies)."),
+      sort: z.enum(EU_FUNDING_SORTS).optional().describe("'deadline' (next deadline first; default without query), 'relevance' (default with query), 'deadline_desc' (latest last deadline first), 'newest'/'oldest' (opening or publication date), 'title', 'identifier'."),
+      top: z.number().int().min(1).max(EU_FUNDING_MAX_ROWS).default(EU_FUNDING_DEFAULT_ROWS),
+      ...paginationInputSchema,
+      outputFormat: outputFormatSchema,
+      verbose: z.boolean().default(false),
+      dryRun: z.boolean().default(false),
+    },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ query, status, type, programme, deadline_from, deadline_to, include_expired, sort, top, offset, limit, outputFormat, verbose, dryRun }) => {
+    try {
+      // The portal pages itself (at most 100 per page), so records are not sliced locally again.
+      const args = { query, status, type, programme, deadlineFrom: deadline_from, deadlineTo: deadline_to, includeExpired: include_expired, sort, offset, limit: clampEuFundingRows(limit ?? top) };
+      if (dryRun) {
+        // A multipart POST (parts query, languages and sort typed application/json); the params also say
+        // whether a count request and the next-deadline merge apply.
+        return dryRunPayload({ connector: "eu_funding", method: "POST", url: EU_FUNDING_SEARCH_ENDPOINT, params: euFundingParams(buildEuFundingRequest(args)) });
+      }
+      const started = Date.now();
+      const out = await euFunding.search(args);
+      const responseTimeMs = Date.now() - started;
+      const records = out.items.map(euFundingRecord);
+      const formatted = applyOutputFormat({ records, outputFormat });
+      return toMcpToolPayload(successResponse({
+        summary: summarizeEuFundingSearch(out),
+        records,
+        provenance: prov("eu_funding_search", out.endpoint, out.params, records.length, out.total),
+        pagination: {
+          offset: out.offset,
+          limit: out.limit,
+          total: out.total,
+          has_more: typeof out.total === "number" ? out.offset + records.length < Math.min(out.total, EU_FUNDING_MAX_REACHABLE) : false,
+        },
+        output_format: formatted.output_format,
+        formatted_output: formatted.formatted_output,
+        access_note: mergeAccessNotes(out.access_note, formatted.access_note),
+        verbose: singleConnectorVerbose({ enabled: verbose, connector: "eu_funding", endpoint: out.endpoint, responseTimeMs }),
+      }));
+    } catch (e) {
+      if (e instanceof EuFundingInputError) {
+        return toMcpToolPayload(errorResponse({ error: "unexpected", message: e.message, suggestion: "Pas de invoer aan; de toegestane waarden staan in de beschrijving van eu_funding_search." }));
+      }
+      return toMcpToolPayload(mapSourceError(e, "EU Funding & Tenders Portal", EU_FUNDING_PORTAL));
+    }
+  });
+
+  server.registerTool("eu_funding_get", {
+    description: "Get one EU funding opportunity from the EU Funding & Tenders Portal by the id eu_funding_search returns: a topic identifier (e.g. 'HORIZON-CL5-2027-02-D3-01'; case does not matter), a cascade funding call number (cascade_call_id), a EuropeAid reference ('EuropeAid/187686/ID/ACT/MK') or a portal or PROSPECT URL. Returns the search fields plus: for a topic, description (expected outcome, scope) and conditions (admissibility, eligibility, evaluation) as plain text cut at max_chars, its budget lines (EUR per year; expected number of grants and min/max EU contribution per grant when stated, 0 = not stated), the whole call's budget overview with each budget line counted once, per-action status and deadlines, submission links, the latest call updates, and the cascade funding calls run under the topic (cascade_calls); for a cascade call, the project's own texts on eligibility, how to apply, further information and timing; for an external action call, the beneficiary administration and the published documents. A call identifier (e.g. 'HORIZON-CL4-2027-02-two-stage') returns its topics as candidates, as does a topic id that only matches cascade calls. When the index holds a current record and an outdated copy, the current record is used. An item the portal still labels open although all deadlines passed is flagged in access_note.",
+    inputSchema: {
+      id: z.string().min(1).max(500).describe("Topic identifier ('HORIZON-CL5-2027-02-D3-01'), cascade call number (cascade_call_id, e.g. '13882'), EuropeAid reference ('EuropeAid/187686/ID/ACT/MK') or call number, or the URL of the call's page on the Funding & Tenders Portal or PROSPECT. A call identifier lists its topics."),
+      max_chars: z.number().int().min(200).max(EU_FUNDING_MAX_CHARS).default(EU_FUNDING_DEFAULT_MAX_CHARS).describe("Cap per text field (description, conditions, application_info, ...); 'truncated' names the fields that were cut."),
+      verbose: z.boolean().default(false),
+      dryRun: z.boolean().default(false),
+    },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ id, max_chars, verbose, dryRun }) => {
+    try {
+      // One POST on the identifier, at most two fallbacks on a miss (identifier phrase, call identifier).
+      if (dryRun) return dryRunPayload({ connector: "eu_funding", method: "POST", url: EU_FUNDING_SEARCH_ENDPOINT, params: { id } });
+      const started = Date.now();
+      const out = await euFunding.get(id, { maxChars: max_chars });
+      const responseTimeMs = Date.now() - started;
+      const x = out.item;
+      const records = x
+        ? [record("eu_funding", x.title, x.url, { ...x, cascade_calls: out.cascade_calls }, describeEuFundingItem(x), (x.next_deadline ?? x.deadlines.at(-1))?.slice(0, 10))]
+        : (out.candidates ?? []).map(euFundingRecord);
+      return toMcpToolPayload(successResponse({
+        summary: summarizeEuFundingGet(out),
+        records,
+        provenance: prov("eu_funding_get", out.endpoint, out.params, records.length),
+        access_note: out.access_note,
+        verbose: singleConnectorVerbose({ enabled: verbose, connector: "eu_funding", endpoint: out.endpoint, responseTimeMs }),
+      }));
+    } catch (e) {
+      if (e instanceof EuFundingInputError) {
+        return toMcpToolPayload(errorResponse({ error: "unexpected", message: e.message, suggestion: "Gebruik de id uit eu_funding_search." }));
+      }
+      return toMcpToolPayload(mapSourceError(e, "EU Funding & Tenders Portal", EU_FUNDING_PORTAL));
+    }
+  });
+
+  server.registerTool("rvo_subsidies_search", {
+    description: `Search the subsidies and financing schemes of RVO (Rijksdienst voor Ondernemend Nederland) on rvo.nl, e.g. DUMAVA, DEI+, ISDE, SWIM, Innovatiekrediet, BMKB, DHI. The catalogue is RVO's open data list of all ~1,370 pages of the section 'Subsidies en financiering', closed and historical regelingen and their sub-pages (aanvragen, voorwaarden, oproepen) included; it is read whole and searched locally: keywords in title, intro, regeling names and tags, all words required (also inside compounds: 'waterstof' finds 'waterstoftankstation'; words up to 3 letters only as whole words), \"quoted phrase\", uppercase OR for alternatives, -word to exclude; generic words such as 'subsidie' are ignored. Filter by doelgroep, onderwerp, sector, land, changed_since and main_pages_only. Status ('Open voor aanvragen', 'Bijna open voor aanvragen', 'Tijdelijk gesloten voor aanvragen', 'Gesloten voor aanvragen'), application period, total budget, the amount 'In behandeling' and what is still available are not in the open data: they are read from each shown result's public rvo.nl page exactly as RVO shows them (include_status, default true, at most ${RVO_STATUS_ENRICH_MAX} pages), with the raw values as evidence and a note where label and dates disagree. The status filter reads candidates' pages in ranking order, at most ${RVO_STATUS_CHECK_MAX} per call; total is then null when not every candidate was checked. Status pages are read for at most 10 s per call: a page not read in time is 'onbekend' with that reason (with the status filter it is unchecked, so total is null); a later call reuses what came in meanwhile. Only schemes RVO runs: NWO and ZonMw calls are in nl_onderzoek_calls_search, EU calls in eu_funding_search, municipal and provincial subsidieregelingen in cvdr_search. Full text, legal references and downloads of one result: rvo_subsidie_get.`,
+    inputSchema: {
+      query: z.string().max(SEARCH_QUERY_MAX).optional().describe("Keywords, e.g. 'waterstof', 'cultureel erfgoed', 'zorginnovatie', '\"maatschappelijk vastgoed\"'. Matched in title, intro, regeling names and tags; every word must occur (also inside a compound word); words of up to 3 letters only as a whole word. \"quoted phrase\", uppercase OR between alternatives, -word or NOT word to exclude. Generic words (subsidie, regeling, financiering, RVO) and stop words are ignored. Do NOT pass a full question. Empty: all pages matching the filters."),
+      doelgroep: z.string().optional().describe(`Target group, matched case- and accent-insensitively against RVO's own values (exact first, otherwise containing): ${RVO_DOELGROEPEN.join(", ")}. E.g. 'mkb', 'kennisinstelling', 'agrarisch', 'overheid'. An unknown value returns nothing and lists the known ones in access_note.`),
+      onderwerp: z.string().optional().describe(`Subject, matched like doelgroep: ${RVO_ONDERWERPEN.join(", ")}.`),
+      sector: z.string().optional().describe("Sector, matched like doelgroep, e.g. 'Waterstofsector', 'Agrarische sector', 'ICT', 'Creatieve industrie', 'Watersector'. Broad regelingen list (almost) every sector, so this narrows little."),
+      land: z.string().optional().describe("Country or area the regeling is for: Dutch name ('Ghana', 'Caribisch Nederland', 'Europa') or ISO code ('GH', 'NL')."),
+      changed_since: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("YYYY-MM-DD: only pages RVO edited on or after this day (UTC date of the last edit; any edit counts, not only new rounds)."),
+      status: z.array(z.enum(RVO_STATUSSEN)).optional().describe("Only pages whose rvo.nl page shows one of these labels: open = 'Open voor aanvragen', bijna_open = 'Bijna open voor aanvragen', tijdelijk_gesloten = 'Tijdelijk gesloten voor aanvragen', gesloten = 'Gesloten voor aanvragen'. Reads the candidates' pages in ranking order, at most 40 per call; narrow with query or filters. E.g. ['open', 'bijna_open'] for what can be applied for now or soon."),
+      main_pages_only: z.boolean().default(false).describe("Only a regeling's own page (directly under /subsidies-financiering/), not its sub-pages (aanvragen, voorwaarden, oproepen, veelgestelde vragen). Calls of a programme are often sub-pages, so leave false to find them."),
+      include_status: z.boolean().default(true).describe(`Read the public page of each shown result (at most ${RVO_STATUS_ENRICH_MAX}) for status, period and budget. false: catalogue data only (fast, no status).`),
+      sort: z.enum(RVO_SORTS).optional().describe("relevance (default with query), changed (default without: last edited first), created (newest pages first, e.g. new calls), title."),
+      top: z.number().int().min(1).max(RVO_MAX_ROWS).default(RVO_DEFAULT_ROWS),
+      ...paginationInputSchema,
+      limit: z.number().int().min(1).max(RVO_MAX_ROWS).optional(),
+      outputFormat: outputFormatSchema,
+      verbose: z.boolean().default(false),
+      dryRun: z.boolean().default(false),
+    },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ query, doelgroep, onderwerp, sector, land, changed_since, status, main_pages_only, include_status, sort, top, offset, limit, outputFormat, verbose, dryRun }) => {
+    try {
+      if (dryRun) {
+        const filters = Object.fromEntries(Object.entries({ query, doelgroep, onderwerp, sector, land, changed_since, status: status?.join(","), main_pages_only: main_pages_only || undefined, sort }).filter(([, v]) => v !== undefined && v !== ""));
+        const pages = include_status || status?.length
+          ? { status_pages: `GET ${rvoPageUrl("/subsidies-financiering/<slug>")} per ${status?.length ? `candidate (max ${RVO_STATUS_CHECK_MAX})` : `shown result (max ${RVO_STATUS_ENRICH_MAX})`} via connector ${RVO_SUBSIDIES_PAGES_CONNECTOR}` }
+          : {};
+        return dryRunPayload({ connector: RVO_SUBSIDIES_CONNECTOR, url: RVO_SUBSIDIES_ENDPOINT, params: { page: "0,1,2,... (50 per page, until an empty page; about 28; kept 3 h)", ...filters, ...pages } });
+      }
+      const started = Date.now();
+      // The catalogue is searched and paged locally by the source (offset/limit applied there).
+      const out = await rvoSubsidies.search({ query, doelgroep, onderwerp, sector, land, changed_since, status, main_pages_only, include_status, sort, offset, limit: limit ?? top });
+      const responseTimeMs = Date.now() - started;
+      const records = out.items.map(rvoRecord);
+      const formatted = applyOutputFormat({ records, outputFormat });
+      return toMcpToolPayload(successResponse({
+        summary: summarizeRvoSearch(out),
+        records,
+        provenance: prov("rvo_subsidies_search", out.endpoint, out.params, records.length, out.total),
+        pagination: { offset: out.offset, limit: out.limit, total: out.total, has_more: out.has_more },
+        output_format: formatted.output_format,
+        formatted_output: formatted.formatted_output,
+        access_note: mergeAccessNotes(out.access_note, formatted.access_note),
+        verbose: singleConnectorVerbose({ enabled: verbose, connector: RVO_SUBSIDIES_CONNECTOR, endpoint: out.endpoint, responseTimeMs }),
+      }));
+    } catch (e) {
+      if (e instanceof RvoSubsidiesInputError) {
+        return toMcpToolPayload(errorResponse({ error: "unexpected", message: e.message, suggestion: e.suggestion }));
+      }
+      return toMcpToolPayload(mapSourceError(e, "RVO open data", "https://www.rvo.nl/subsidies-financiering"));
+    }
+  });
+
+  server.registerTool("rvo_subsidie_get", {
+    description: "Read one RVO regeling or page (rvo.nl, Subsidies en financiering) in full, by the uuid from rvo_subsidies_search or by its URL, path or slug ('dumava', '/subsidies-financiering/dumava'). Returns the text as plain text with '## ' section headings, taken from all blocks of the public page (uitklapblokken, notices, call-to-action and download lists included; RVO's open data API holds only the rich-text blocks), the list of sections, the status label, application period and budget (total, in behandeling, still available, budget date) as rvo.nl shows them with the raw values as evidence, links to the legal texts (wetten.overheid.nl BWBR ids, Staatscourant publication ids, EUR-Lex CELEX/ELI) to read with wetten_bwb_tekst or officiele_bekendmakingen_record_get, and the downloads (forms, lists: name, URL, type, size). sectie returns only the sections whose heading contains it ('Voorwaarden', 'Budget', 'Aanvragen'); max_chars caps the text (truncation is stated). A slug shared by several pages is not guessed: they are named as suggestions. A path or slug that rvo.nl has a page for but the open data lacks (some big regelingen' own pages, e.g. 'isde', 'sde', 'mit', 'dei') is reported with that page's link and suggestions from the catalogue. When the page redirects elsewhere or cannot be read, the status is 'onbekend' with the reason and the text comes from the open data API, with the missing blocks stated.",
+    inputSchema: {
+      id: z.string().min(1).max(500).describe("uuid from rvo_subsidies_search (data.id), or the page URL, path or slug: 'https://www.rvo.nl/subsidies-financiering/dumava', '/subsidies-financiering/dumava', 'dumava'. A bare slug means the regeling's own page first, else the one page whose path ends in it."),
+      sectie: z.string().optional().describe("Only the sections whose '## ' heading contains this, e.g. 'Voorwaarden', 'Budget', 'Aanvragen', 'Meer weten'. Case- and accent-insensitive; an unknown one returns no text and lists the sections."),
+      max_chars: z.number().int().min(1).max(RVO_TEXT_MAX_CHARS).default(RVO_TEXT_DEFAULT_CHARS).describe(`Maximum characters of text (default ${RVO_TEXT_DEFAULT_CHARS}, max ${RVO_TEXT_MAX_CHARS}); cut at a line.`),
+      read_page: z.boolean().default(true).describe("Read the public rvo.nl page for status, period, budget and the complete text. false: only the open data API (rich-text blocks, no status)."),
+    },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ id, sectie, max_chars, read_page }) => {
+    try {
+      const out = await rvoSubsidies.get({ id, sectie, maxChars: max_chars, readPage: read_page });
+      if ("notFound" in out) {
+        const suggestions = out.suggestions.map((s) => `${s.title} (id ${s.id}, ${s.url})`);
+        return toMcpToolPayload(successResponse({
+          summary: `RVO-pagina '${id}' niet gevonden`,
+          records: [],
+          provenance: prov("rvo_subsidie_get", out.endpoint, out.params, 0, 0),
+          access_note: mergeAccessNotes(out.message, suggestions.length ? `${out.site_page ? "Treffers in de catalogus" : "Misschien bedoeld"}: ${suggestions.join("; ")}.` : undefined, "Zoek de regeling met rvo_subsidies_search."),
+        }));
+      }
+      const s = out.status_info;
+      const snippet = [s?.status_label, s?.period_text ? `aanvragen ${s.period_text}` : undefined].filter(Boolean).join(" · ") || out.item.intro.slice(0, 240);
+      const data = {
+        ...out.item,
+        status_info: s,
+        text: out.text,
+        text_chars: out.text_chars,
+        text_truncated: out.text_truncated,
+        text_source: out.text_source,
+        sections: out.sections,
+        sectie: out.sectie,
+        legal_references: out.legal_references,
+        downloads: out.downloads,
+      };
+      return toMcpToolPayload(successResponse({
+        summary: summarizeRvoGet(out),
+        records: [record("rvo", out.item.title, out.item.url, data, snippet, out.item.changed?.slice(0, 10))],
+        provenance: prov("rvo_subsidie_get", out.endpoint, out.params, 1, 1),
+        access_note: out.access_note,
+      }));
+    } catch (e) {
+      if (e instanceof RvoSubsidiesInputError) {
+        return toMcpToolPayload(errorResponse({ error: "unexpected", message: e.message, suggestion: e.suggestion }));
+      }
+      return toMcpToolPayload(mapSourceError(e, "RVO open data", "https://www.rvo.nl/subsidies-financiering"));
+    }
+  });
+
+  server.registerTool("nl_onderzoek_calls_search", {
+    description: "Search open calls and subsidy rounds of NWO (nwo.nl/calls, including calls of the NWO units on regieorgaan-sia.nl, nko.nl and openscience.nl) and ZonMw (zonmw.nl/nl/subsidies): research and health-care funding. Filter by organisation, keywords and status: 'actueel' (default: open or opening soon), 'open', 'binnenkort', 'gesloten' or 'alle'. Per call: title, link, short description, status (normalised to open/binnenkort/gesloten, with the site's own label such as 'Open voor aanvragen', 'Doorlopend', 'In voorbereiding', 'Verwacht'), and where the overview shows them: budget (NWO), start date and deadline, programme and 'Voor wie' (ZonMw, e.g. 'Op uitnodiging'). The NWO overview shows no closing date and the ZonMw overview no budget: nl_onderzoek_call_get gives those, the conditions and the documents. NWO statuses are nwo.nl's own labels; the ZonMw status follows from the start and deadline on the page with zonmw.nl's own rule. Keywords go to each site's own full-text search and must all occur. With organisatie 'alle', offset and limit apply per organisation (NWO first, then ZonMw). The total can be unknown (null) when a site was not read to the end; this is stated. DUS-I is not covered (its site shows no status). Business subsidies: rvo_subsidies_search; EU calls: eu_funding_search; legal texts of subsidy regulations: CVDR, Officiële Bekendmakingen and wetten_bwb.",
+    inputSchema: {
+      organisatie: z.enum(["nwo", "zonmw", "alle"]).default("alle").describe("Funding body: NWO (research, including its units SIA, NKO and Open Science NL), ZonMw (health care and welfare research) or both."),
+      query: z.string().max(128).optional().describe("Keywords for the site's own full-text search, e.g. 'klimaat', 'zorginnovatie', 'cultureel erfgoed', 'waterstof'. All words must occur; pass one or two keywords, not a question. At most 128 characters."),
+      status: z.enum(ONDERZOEKSCALL_STATUS_FILTERS).default("actueel").describe("'actueel' = open or opening soon (default), 'open', 'binnenkort' (NWO 'Opent binnenkort'/'In voorbereiding', ZonMw 'Verwacht'), 'gesloten' (incl. NWO 'Procedure loopt'), 'alle'."),
+      top: z.number().int().min(1).max(ONDERZOEKSCALL_MAX_ROWS).default(ONDERZOEKSCALL_DEFAULT_ROWS),
+      ...paginationInputSchema,
+      offset: z.number().int().min(0).max(ONDERZOEKSCALL_MAX_OFFSET).default(0).describe("Skip this many calls per organisation."),
+      outputFormat: outputFormatSchema,
+      verbose: z.boolean().default(false),
+      dryRun: z.boolean().default(false),
+    },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ organisatie, query, status, top, offset, limit, outputFormat, verbose, dryRun }) => {
+    try {
+      // The sites page themselves (12 cards a page), so records are not sliced locally again.
+      const args = { organisatie, query, status, offset, limit: clampOnderzoekscallRows(limit ?? top) };
+      if (dryRun) {
+        // One request per organisation; ZonMw starts at page 0 unless every status is asked.
+        const [first, ...rest] = onderzoekscalls.planSearch(args).map(({ connector, url, params }) => ({ connector, url, params }));
+        return dryRunPayload({ ...first, also: rest });
+      }
+      const started = Date.now();
+      const out = await onderzoekscalls.search(args);
+      const responseTimeMs = Date.now() - started;
+      const records = out.items.map(onderzoekscallRecord);
+      const formatted = applyOutputFormat({ records, outputFormat });
+      return toMcpToolPayload(successResponse({
+        summary: summarizeOnderzoekscallsSearch(out),
+        records,
+        provenance: prov("nl_onderzoek_calls_search", out.endpoint, out.params, records.length, out.total),
+        pagination: { offset: out.offset, limit: out.limit, total: out.total, has_more: out.has_more },
+        ...(out.failures.length ? { failures: out.failures.map((f) => ({ connector: f.connector, error_type: f.error_type, message: f.message })) } : {}),
+        output_format: formatted.output_format,
+        formatted_output: formatted.formatted_output,
+        access_note: mergeAccessNotes(out.access_note, formatted.access_note),
+        verbose: singleConnectorVerbose({ enabled: verbose, connector: out.per_site.map((s) => s.connector).join(","), endpoint: out.endpoint, responseTimeMs }),
+      }));
+    } catch (e) {
+      return toMcpToolPayload(mapOnderzoekscallError(e));
+    }
+  });
+
+  server.registerTool("nl_onderzoek_call_get", {
+    description: "Get one call or subsidy round of NWO (also on regieorgaan-sia.nl, nko.nl, openscience.nl) or ZonMw by the url from nl_onderzoek_calls_search: status as the page shows it, every date on the page (opening, pre-registration, closing date; the deadline is 'Sluitingsdatum volledige aanvraag' or the only closing date for NWO, the header deadline for ZonMw; for NWO next_deadline is the first closing date still ahead, e.g. a letter of intent before the full application), budget (total and, for ZonMw, per application; amounts in words stay text), programme, all 'Kenmerken' as shown, links to the call documents and forms, and the page text (who can apply, what for, criteria, procedure) with '## ' before each heading. Contact persons are left out. A warning is given when an open status sits next to closing dates that have all passed, or when several closing dates leave the deadline undetermined. Text is cut at max_chars (stated).",
+    inputSchema: {
+      url: z.string().min(1).max(500).describe("URL of a call page from nl_onderzoek_calls_search, e.g. https://www.nwo.nl/calls/<naam>, https://regieorgaan-sia.nl/calls/<naam>, https://www.zonmw.nl/nl/subsidie/<naam>. Other hosts or paths are refused without a request."),
+      max_chars: z.number().int().min(500).max(ONDERZOEKSCALL_MAX_CHARS).default(ONDERZOEKSCALL_DEFAULT_CHARS).describe("Maximum characters of page text."),
+      verbose: z.boolean().default(false),
+      dryRun: z.boolean().default(false),
+    },
+    annotations: TOOL_ANNOTATIONS,
+  }, async ({ url, max_chars, verbose, dryRun }) => {
+    try {
+      if (dryRun) {
+        // Refuses other hosts and paths before any request. A ZonMw page is followed by
+        // a small request for its status block, whose node id is on the page.
+        const { organisation, url: pageUrl } = resolveOnderzoekscallUrl(url);
+        return dryRunPayload({ connector: ONDERZOEKSCALL_CONNECTORS[organisation], url: pageUrl, params: organisation === "zonmw" ? { status_block: "GET https://www.zonmw.nl/nl/entity-date-status/<nid>/full" } : {} });
+      }
+      const started = Date.now();
+      const d = await onderzoekscalls.get({ url, max_chars });
+      const responseTimeMs = Date.now() - started;
+      const records = [record(d.organisation, d.title, d.url, d as unknown as Record<string, unknown>, [d.status_label, d.deadline_text, d.budget_text].filter(Boolean).join(" · "), amsterdamDay(d.deadline))];
+      return toMcpToolPayload(successResponse({
+        summary: summarizeOnderzoekscall(d),
+        records,
+        provenance: prov("nl_onderzoek_call_get", d.endpoint, d.params, 1, 1),
+        access_note: d.access_note,
+        verbose: singleConnectorVerbose({ enabled: verbose, connector: ONDERZOEKSCALL_CONNECTORS[d.organisation], endpoint: d.endpoint, responseTimeMs }),
+      }));
+    } catch (e) {
+      return toMcpToolPayload(mapOnderzoekscallError(e));
     }
   });
 }

@@ -58,6 +58,12 @@ export interface RequestOptions {
   /** Cap on the decoded response body in bytes. Defaults to MAX_RESPONSE_BYTES. */
   maxResponseBytes?: number;
   /**
+   * The least time between the starts of two requests of this connector that go to
+   * the network (a cache hit does not count, a retry does), as a site's robots.txt
+   * Crawl-delay asks. Requests side by side wait their turn. Kept per process.
+   */
+  crawlDelayMs?: number;
+  /**
    * "binary" returns the raw bytes instead of a UTF-8 string. Binary responses
    * are never cached: the response cache holds strings and a PDF-sized payload
    * would evict everything useful in it.
@@ -83,6 +89,35 @@ const DEFAULT_QUEUE_TIMEOUT_MS = 30_000;
 const MAX_RESPONSE_BYTES = 12 * 1024 * 1024;
 /** Never honor a Retry-After longer than this (seconds) — a slot must not be held indefinitely. */
 const MAX_RETRY_AFTER_S = 30;
+
+/** Per connector with a crawl delay: when its next network request may start (epoch ms). */
+const nextCrawlStart = new Map<string, number>();
+let crawlDelaysEnabled = true;
+
+/**
+ * Waits until this connector may start its next network request under its crawl
+ * delay and books the start after it, so requests sent side by side are spaced too.
+ */
+async function awaitCrawlDelay(connector: string, delayMs: number | undefined): Promise<void> {
+  if (!crawlDelaysEnabled || !delayMs || delayMs <= 0) return;
+  const now = Date.now();
+  const start = Math.max(now, nextCrawlStart.get(connector) ?? 0);
+  nextCrawlStart.set(connector, start + delayMs);
+  if (start > now) await sleep(start - now);
+}
+
+/**
+ * Turns RequestOptions.crawlDelayMs on or off and forgets the booked starts; returns
+ * the previous setting. For test isolation: a mocked source answers at once, so a
+ * tool test would otherwise wait the full delay between its requests (the spacing
+ * itself is tested apart).
+ */
+export function setCrawlDelaysEnabled(enabled: boolean): boolean {
+  const before = crawlDelaysEnabled;
+  crawlDelaysEnabled = enabled;
+  nextCrawlStart.clear();
+  return before;
+}
 
 /** Query keys that must be masked before a URL is logged. */
 const SENSITIVE_QUERY_KEYS = new Set([
@@ -365,6 +400,7 @@ async function request(
 
   try {
     while (attempt <= retries) {
+      await awaitCrawlDelay(connector, options.crawlDelayMs);
       const started = Date.now();
       attempt += 1;
 

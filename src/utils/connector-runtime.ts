@@ -89,6 +89,18 @@ const CONNECTOR_CATEGORY: Record<string, ConnectorCategory> = {
   // Publications of the Rekenkamer and SCP, via the same RSS platform as rijksoverheid.
   rekenkamer: "semi_live",
   scp: "semi_live",
+  // EU Funding & Tenders Portal: statuses and deadlines change daily, and
+  // work-programme updates add topics in batches.
+  eu_funding: "semi_live",
+  // RVO's open data catalogue of subsidy pages, searched like a register (the
+  // source keeps the parsed catalogue itself); the public pages it reads for
+  // status, period and budget are apart, so their failures cannot trip the API.
+  rvo_subsidies: "discovery",
+  rvo_subsidies_pages: "semi_live",
+  // Call overviews and pages of nwo.nl (and its units) and zonmw.nl: statuses
+  // and deadlines change daily; one connector per site.
+  nwo_calls: "semi_live",
+  zonmw_subsidies: "semi_live",
 };
 
 const FAILURE_THRESHOLD = 3;
@@ -223,6 +235,10 @@ export function inferConnectorName(endpointUrl: string): string {
       return "data_overheid";
     }
     if (host.includes("omgevingswet.overheid.nl")) return "dso_omgevingsdocumenten";
+    if (host === "api.tech.ec.europa.eu" && path.startsWith("/search-api/")) return "eu_funding";
+    if (host === "www.rvo.nl") return path.startsWith("/api/v1/opendata/") ? "rvo_subsidies" : "rvo_subsidies_pages";
+    if (/^(?:www\.)?zonmw\.nl$/.test(host)) return "zonmw_subsidies";
+    if (/^(?:www\.)?(?:nwo|regieorgaan-sia|nko|openscience)\.nl$/.test(host)) return "nwo_calls";
 
     return host || "unknown";
   } catch {

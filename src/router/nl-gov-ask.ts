@@ -15,6 +15,9 @@ import { tenderNedRecordFields, type TenderNedSource } from "../sources/tenderne
 import { parseDocumentNumber, type EuCellarSource } from "../sources/eu-cellar.js";
 import { DsoOmgevingsdocumentenSource, DsoInputError, DSO_PRESENTEREN_BASE, type DsoSearchItem } from "../sources/dso-omgevingsdocumenten.js";
 import { ALGORITMEREGISTER_SEARCH_ENDPOINT, clampAlgoritmeRows, summarizeAlgoritmeSearch, type AlgoritmeregisterSource } from "../sources/algoritmeregister.js";
+import { EU_FUNDING_SEARCH_ENDPOINT, buildEuFundingRequest, clampEuFundingRows, describeEuFundingItem, euFundingParams, summarizeEuFundingGet, summarizeEuFundingSearch, type EuFundingItem, type EuFundingSearchArgs, type EuFundingSource } from "../sources/eu-funding.js";
+import { RVO_MAX_ROWS, RVO_SUBSIDIES_ENDPOINT, summarizeRvoSearch, type RvoSubsidiesSearchArgs, type RvoSubsidiesSource, type RvoSubsidyItem, type RvoSubsidyStatus } from "../sources/rvo-subsidies.js";
+import { clampOnderzoekscallRows, mapOnderzoekscallError, summarizeOnderzoekscallsSearch, type OnderzoekscallItem, type OnderzoekscallsSearchArgs, type OnderzoekscallsSource } from "../sources/nl-onderzoekscalls.js";
 import { mapSourceError, successResponse, toMcpToolPayload, errorResponse } from "../utils/response.js";
 import { SourceRequestError } from "../utils/http.js";
 import { parseTemporalRange } from "../utils/temporal.js";
@@ -37,7 +40,7 @@ import type { KoopCollectieSource } from "../sources/koop-collecties.js";
 import type { BrpGewasperceelSource } from "../sources/brp-gewaspercelen.js";
 import type { VerkiezingsuitslagenSource } from "../sources/verkiezingsuitslagen.js";
 import { matchesTerm, hasTerm, CBS_TERMS, TK_TERMS, OB_TERMS, RIJK_TERMS, RIJK_OFFICE_TERMS, BUDGET_TERMS, DUO_TERMS, API_TERMS, CASE_LAW_TERMS, ENFORCEMENT_TERMS, EXAM_TERMS, SCHOOL_TERMS, duoSector, routeChain, firstRoute, type RouteFacts, type RouteId } from "./routes.js";
-import { extractPlaceName, cbsNarrowingCandidates, extractLuchtComponent, extractVerkiezingHint, detectEuIntent, shouldDeepenTweedeKamerQuery, MUNICIPAL_SCOPE_WORDS, ORGANISATION_WORDS, uitsprakenSense, detectPolicyIntent, detectDebatIntent, detectAlgoritmeIntent, DSO_DOCUMENT_WORDS_RE, dsoWords, type DsoIntent, detectDsoIntent, toPhraseQuery, toOriQuery, oriPlacePhrase, detectEcliIntent, detectForeignEcliIntent, detectWetArtikelIntent, detectResearchOrgIntent, extractPopulationPlace, extractPopulationYear, type ResearchOrg } from "./intents.js";
+import { extractPlaceName, cbsNarrowingCandidates, extractLuchtComponent, extractVerkiezingHint, detectEuIntent, shouldDeepenTweedeKamerQuery, MUNICIPAL_SCOPE_WORDS, ORGANISATION_WORDS, uitsprakenSense, detectPolicyIntent, detectDebatIntent, detectAlgoritmeIntent, DSO_DOCUMENT_WORDS_RE, dsoWords, type DsoIntent, detectDsoIntent, toPhraseQuery, toOriQuery, oriPlacePhrase, detectEcliIntent, detectForeignEcliIntent, detectWetArtikelIntent, detectResearchOrgIntent, extractPopulationPlace, extractPopulationYear, type ResearchOrg, detectSubsidieIntent, narrowSubsidieIntent, type SubsidieIntent, type SubsidieSource } from "./intents.js";
 import { KnmiSource } from "../sources/knmi.js";
 
 /** data.match of a Tweede Kamer record that holds the words of a name apart, not as the phrase (nl_gov_ask). */
@@ -307,6 +310,22 @@ const TK_LETTER_RE = /\bbrie(?:f|ven)\b.*\b(?:aan|naar|van)\s+de\s+(?:tweede\s+)
 /** The longest question nl_gov_ask takes: a question, not a document. */
 const NL_GOV_ASK_QUESTION_MAX_CHARS = 2_000;
 
+/**
+ * The topic words for RVO's catalogue search, a long word cut to its stem.
+ * RVO matches a word anywhere in a longer one, so the stem finds the other
+ * forms too: "verduurzaming" missed the DUMAVA page ("verduurzamen"), which
+ * "verduurzam" finds; "batterijen" missed "batterij". A quoted phrase and an
+ * operator stay as they are.
+ */
+export function rvoStems(query: string): string {
+  if (/["]|\bOR\b|(?:^|\s)-/.test(query)) return query;
+  return query
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => (word.length >= 7 ? (/^(\p{L}{5,}?)(?:ingen|ing|en)$/u.exec(word)?.[1] ?? word) : word))
+    .join(" ");
+}
+
 /** The research bodies nl_gov_ask reads the publications of, as their tools name them. */
 const RESEARCH_ORGS: Record<ResearchOrg, { label: string; tool: string }> = {
   rekenkamer: { label: "Algemene Rekenkamer", tool: "rekenkamer_publicaties_search" },
@@ -340,6 +359,12 @@ export interface NlGovAskDeps {
   algoritmeRecord: (x: Awaited<ReturnType<AlgoritmeregisterSource["search"]>>["items"][number]) => MCPRecord;
   wodc: WodcSource;
   wodcRecord: (x: WodcItem) => MCPRecord;
+  euFunding: EuFundingSource;
+  euFundingRecord: (x: EuFundingItem) => MCPRecord;
+  rvoSubsidies: RvoSubsidiesSource;
+  rvoRecord: (x: RvoSubsidyItem & { status_info?: RvoSubsidyStatus }) => MCPRecord;
+  onderzoekscalls: OnderzoekscallsSource;
+  onderzoekscallRecord: (x: OnderzoekscallItem) => MCPRecord;
   /** rechtspraak_uitspraak_get: a ruling by ECLI. */
   uitspraakResult: (args: { ecli: string; onderdeel: "overzicht" | "beslissing" | "overwegingen" | "volledig"; sectie?: string; zoekterm?: string; max_chars: number }) => Promise<ToolResult>;
   /** wetten_bwb_tekst: the text of a national law or one of its artikelen. */
@@ -354,7 +379,7 @@ export interface NlGovAskDeps {
 }
 
 export function registerNlGovAsk(server: McpServer, deps: NlGovAskDeps): void {
-  const { config, TOOL_ANNOTATIONS, dataOverheid, cbs, tk, debatten, bekend, rijksoverheid, rijksbegroting, duo, ori, luchtmeetnet, rechtspraak, tenderned, tuchtrecht, samenwerkendeCatalogi, brpGewaspercelen, verkiezingsuitslagen, euCellar, algoritmeregister, record, algoritmeRecord, wodc, wodcRecord, uitspraakResult, wettenTekstResult, debatRecords, debatSummary, debatNotes, dsoRecord, prov, outputFormatSchema, paginationInputSchema } = deps;
+  const { config, TOOL_ANNOTATIONS, dataOverheid, cbs, tk, debatten, bekend, rijksoverheid, rijksbegroting, duo, ori, luchtmeetnet, rechtspraak, tenderned, tuchtrecht, samenwerkendeCatalogi, brpGewaspercelen, verkiezingsuitslagen, euCellar, algoritmeregister, record, algoritmeRecord, wodc, wodcRecord, euFunding, euFundingRecord, rvoSubsidies, rvoRecord, onderzoekscalls, onderzoekscallRecord, uitspraakResult, wettenTekstResult, debatRecords, debatSummary, debatNotes, dsoRecord, prov, outputFormatSchema, paginationInputSchema } = deps;
 
   /**
    * An ORI item as nl_gov_ask shows it, the way ori_search does: the passage
@@ -377,7 +402,7 @@ export function registerNlGovAsk(server: McpServer, deps: NlGovAskDeps): void {
   }
 
   // _meta "anthropic/alwaysLoad": Claude Code loads this entry point upfront instead of behind its tool search.
-  server.registerTool("nl_gov_ask", { inputSchema: { question: z.string().min(1, "question is leeg").max(NL_GOV_ASK_QUESTION_MAX_CHARS, `question is te lang: maximaal ${NL_GOV_ASK_QUESTION_MAX_CHARS} tekens; stel een kortere vraag of gebruik de zoektool van de bron`), top: z.number().int().min(1).max(config.limits.maxRows).default(10), reference_now: z.string().optional(), timezone: z.string().optional(), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) }, description: "Use this when the best source is unclear: routes a question about Dutch government data to the best source(s); then use that source's own tool for full text. Reads dates ('vorige week', 'since 2020'). Policy questions ('GGZ-beleid gemeente Utrecht') search council records (ORI), publications, Tweede Kamer, Rijksoverheid. An ECLI gives that ruling, 'artikel 3:4 Awb' the law text ('op <datum>' too), Algemene Rekenkamer/SCP/WODC their reports, 'inwoners <gemeente>' a CBS count. With DSO_API_KEY, Omgevingswet document questions go to the DSO first: an omgevingsplan, -visie, -verordening, -programma, waterschapsverordening, voorbereidingsbesluit, projectbesluit or ontwerpregeling with an address, place or body, or asking for a list, the newest or ontwerpen; 'welke regels gelden op <adres/postcode>' ('mag ik een dakkapel plaatsen op ...'); ontwerpen ter inzage of a named body or place. An address covers every bestuurslaag, 'in de provincie X' also its gemeenten; 'gelden op <dag>' sets the day. Questions about the law, procedures, costs, participation or politics, or naming another kind of source (publications, case law, enforcement, permits, tenders, statistics, news) skip the DSO, as do questions over 500 characters. For an address, place or ontwerpen an empty DSO answer stands; if the DSO fails, times out (20 s) or misses the place, other routes answer. Without an answer it falls back to the data.overheid.nl catalogue. access_note names the search terms and the routes tried.", annotations: TOOL_ANNOTATIONS, _meta: { "anthropic/alwaysLoad": true } }, async ({ question, top, reference_now, timezone, offset, limit, outputFormat, verbose, dryRun }) => {
+  server.registerTool("nl_gov_ask", { inputSchema: { question: z.string().min(1, "question is leeg").max(NL_GOV_ASK_QUESTION_MAX_CHARS, `question is te lang: maximaal ${NL_GOV_ASK_QUESTION_MAX_CHARS} tekens; stel een kortere vraag of gebruik de zoektool van de bron`), top: z.number().int().min(1).max(config.limits.maxRows).default(10), reference_now: z.string().optional(), timezone: z.string().optional(), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) }, description: "Use this when the best source is unclear: routes a question about Dutch government data to the best source(s); then use that source's own tool for full text. Reads dates ('vorige week', 'since 2020'). Policy questions ('GGZ-beleid gemeente Utrecht') search council records (ORI), publications, Tweede Kamer, Rijksoverheid. An ECLI gives that ruling, 'artikel 3:4 Awb' the law text ('op <datum>' too), Algemene Rekenkamer/SCP/WODC their reports, 'inwoners <gemeente>' a CBS count. Subsidy and funding questions ('welke subsidies zijn er voor waterstof', 'open EU-calls voor zorginnovatie', 'NWO call AI deadline') go to RVO, NWO/ZonMw or the EU Funding & Tenders Portal (topic words in English there); with a gemeente or provincie as funder the document routes answer. With DSO_API_KEY, Omgevingswet document questions go to the DSO first: an omgevingsplan, -visie, -verordening, -programma, waterschapsverordening, voorbereidingsbesluit, projectbesluit or ontwerpregeling with an address, place or body, or asking for a list, the newest or ontwerpen; 'welke regels gelden op <adres/postcode>' ('mag ik een dakkapel plaatsen op ...'); ontwerpen ter inzage of a named body or place. An address covers every bestuurslaag, 'in de provincie X' also its gemeenten; 'gelden op <dag>' sets the day. Questions about the law, procedures, costs, participation or politics, or naming another kind of source (publications, case law, enforcement, permits, tenders, statistics, news) skip the DSO, as do questions over 500 characters. For an address, place or ontwerpen an empty DSO answer stands; if the DSO fails, times out (20 s) or misses the place, other routes answer. Without an answer it falls back to the data.overheid.nl catalogue. access_note names the search terms and the routes tried.", annotations: TOOL_ANNOTATIONS, _meta: { "anthropic/alwaysLoad": true } }, async ({ question, top, reference_now, timezone, offset, limit, outputFormat, verbose, dryRun }) => {
     const decodedQuestion = (() => {
       try { return decodeURIComponent(question.replace(/\+/g, " ")); } catch { return question; }
     })();
@@ -591,6 +616,8 @@ export function registerNlGovAsk(server: McpServer, deps: NlGovAskDeps): void {
     let dsoNote: string | undefined;
     let debatNote: string | undefined;
     let algoritmeNote: string | undefined;
+    // The subsidy route: the funders it asked without an answer, named by whichever route does.
+    let subsidieNote: string | undefined;
     // The law-article route: why it did not answer, named by whichever route does.
     let wetNote: string | undefined;
     // The population route: the place it did not find, named by whichever route answers.
@@ -700,7 +727,7 @@ export function registerNlGovAsk(server: McpServer, deps: NlGovAskDeps): void {
             offset,
             limit: effectiveLimit,
             total: held,
-            access_note: mergeAccessNotes(dsoNote, debatNote, algoritmeNote, wetNote, populationNote, args.access_note, pagingNote),
+            access_note: mergeAccessNotes(dsoNote, debatNote, algoritmeNote, subsidieNote, wetNote, populationNote, args.access_note, pagingNote),
             failures: failures.length ? failures : undefined,
           }),
           verbose: buildVerbose(),
@@ -795,6 +822,58 @@ export function registerNlGovAsk(server: McpServer, deps: NlGovAskDeps): void {
       })();
       // The Algemene Rekenkamer, the SCP or the WODC named with a topic: their publications.
       const researchIntent = detectResearchOrgIntent(decodedQuestion);
+      // Which subsidies or funding calls exist or are open: RVO, NWO/ZonMw or the EU portal; see detectSubsidieIntent.
+      // Today where the question is asked, for a month in a deadline question ("sluiten in november").
+      const askToday = (() => {
+        const ref = reference_now ? new Date(reference_now) : new Date();
+        const at = Number.isNaN(ref.getTime()) ? new Date() : ref;
+        try {
+          return new Intl.DateTimeFormat("en-CA", { timeZone: timezone ?? config.temporal.defaultTimeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(at);
+        } catch {
+          return at.toISOString().slice(0, 10);
+        }
+      })();
+      // "Erasmus+", "DEI+", "ESF+": in a question with spaces a plus belongs to a name and is no
+      // form-encoded space, so the subsidy detection reads it as written (decodedQuestion has none).
+      const subsidieQuestion = /\s/.test(question.trim())
+        ? (() => {
+            try { return decodeURIComponent(question); } catch { return question; }
+          })()
+        : decodedQuestion;
+      const subsidieIntent = !euIntent && !dsoIntent && !debatArgs && !algoritmeIntent && !researchIntent ? detectSubsidieIntent(subsidieQuestion, askToday) : undefined;
+      // The arguments each funder gets, the same for dryRun and execution. A deadline
+      // question with a month or period ("die sluiten in november") limits the EU deadlines to it.
+      const subsidieWindow = (intent: SubsidieIntent) =>
+        intent.deadlineWindow ?? (intent.deadline && temporal ? { from: temporal.from, to: temporal.to, phrase: temporal.matchedPattern } : undefined);
+      const subsidieEuArgs = (intent: SubsidieIntent): EuFundingSearchArgs => {
+        const window = subsidieWindow(intent);
+        return {
+          query: intent.euQuery || undefined,
+          // Calls for organisations that apply themselves; EuropeAid calls are for non-EU countries.
+          type: ["grant", "cascade_funding"],
+          programme: intent.euProgramme,
+          ...(intent.soonOnly ? { status: ["forthcoming" as const] } : {}),
+          ...(window ? { deadlineFrom: window.from, deadlineTo: window.to } : {}),
+          offset: 0,
+          limit: clampEuFundingRows(top),
+        };
+      };
+      const subsidieRvoArgs = (intent: SubsidieIntent, withStatus = true): RvoSubsidiesSearchArgs => ({
+        query: rvoStems(intent.query) || undefined,
+        doelgroep: intent.doelgroep,
+        land: intent.land,
+        ...(withStatus && (intent.openOnly || intent.soonOnly) ? { status: intent.soonOnly ? ["bijna_open" as const] : ["open" as const, "bijna_open" as const] } : {}),
+        include_status: true,
+        offset: 0,
+        limit: Math.min(top, RVO_MAX_ROWS),
+      });
+      const subsidieCallsArgs = (intent: SubsidieIntent): OnderzoekscallsSearchArgs => ({
+        organisatie: intent.organisatie ?? "alle",
+        query: intent.query || undefined,
+        status: intent.soonOnly ? "binnenkort" : "actueel",
+        offset: 0,
+        limit: clampOnderzoekscallRows(top),
+      });
       // "Hoeveel inwoners heeft Nijmegen?": the CBS population table for that municipality.
       const populationPlace = extractPopulationPlace(decodedQuestion);
       // The year it asks for, also one the period parser does not read ("in 1800").
@@ -861,6 +940,7 @@ export function registerNlGovAsk(server: McpServer, deps: NlGovAskDeps): void {
         foreignEcli: Boolean(foreignEclis),
         wetArtikel: Boolean(wetIntent),
         research: researchIntent?.org,
+        subsidies: subsidieIntent?.sources,
         debat: Boolean(debatArgs),
         algoritme: Boolean(algoritmeIntent),
         multi: multiIntentSignal && uniquePlannerCandidates.length >= 2,
@@ -1011,6 +1091,28 @@ export function registerNlGovAsk(server: McpServer, deps: NlGovAskDeps): void {
               url: ALGORITMEREGISTER_SEARCH_ENDPOINT,
               params: { ...algoritmeIntent, question: decodedQuestion, limit: top },
             }];
+          }
+          if (candidate === "eu_funding" && subsidieIntent) {
+            // A multipart POST to the portal's search API; a named call is looked up by its id.
+            let params: Record<string, unknown>;
+            try {
+              params = subsidieIntent.euId ? { id: subsidieIntent.euId } : euFundingParams(buildEuFundingRequest(subsidieEuArgs(subsidieIntent)));
+            } catch {
+              params = defined({ query: subsidieIntent.euQuery || undefined, programme: subsidieIntent.euProgramme });
+            }
+            return [{ connector: "eu_funding", method: "POST", url: EU_FUNDING_SEARCH_ENDPOINT, params: { ...params, question: decodedQuestion } }];
+          }
+          if (candidate === "rvo_subsidies" && subsidieIntent) {
+            const args = subsidieRvoArgs(subsidieIntent);
+            return [{
+              connector: "rvo_subsidies",
+              method: "GET",
+              url: RVO_SUBSIDIES_ENDPOINT,
+              params: defined({ page: "0,1,2,... (whole catalogue, kept 3 h)", query: args.query, doelgroep: args.doelgroep, land: args.land, status: args.status?.join(","), include_status: true, question: decodedQuestion, top: args.limit }),
+            }];
+          }
+          if (candidate === "nl_onderzoekscalls" && subsidieIntent) {
+            return onderzoekscalls.planSearch(subsidieCallsArgs(subsidieIntent)).map((r) => ({ connector: r.connector, method: "GET", url: r.url, params: { ...r.params, question: decodedQuestion } }));
           }
           if (first.id === "schoolvakanties") {
             const year = decodedQuestion.match(/\b(20\d{2})\b/)?.[1];
@@ -1465,6 +1567,240 @@ export function registerNlGovAsk(server: McpServer, deps: NlGovAskDeps): void {
         return undefined;
       };
 
+      /** What one funder of the subsidy route answered. */
+      type SubsidiePart = {
+        source: SubsidieSource;
+        records: MCPRecord[];
+        total: number | null;
+        summary: string;
+        endpoint: string;
+        params: Record<string, string>;
+        notes: Array<string | undefined>;
+        failures: AskFailures;
+      };
+      const SUBSIDIE_LABELS: Record<SubsidieSource, string> = { eu_funding: "het EU Funding & Tenders Portal", rvo_subsidies: "RVO", nl_onderzoekscalls: "NWO en ZonMw" };
+      const SUBSIDIE_TOOLS: Record<SubsidieSource, string> = { eu_funding: "eu_funding_search en eu_funding_get", rvo_subsidies: "rvo_subsidies_search en rvo_subsidie_get", nl_onderzoekscalls: "nl_onderzoek_calls_search en nl_onderzoek_call_get" };
+
+      /** One funder of the subsidy route, as its own search tool answers; a failure is thrown. */
+      const subsidiePart = async (source: SubsidieSource, intent: SubsidieIntent): Promise<SubsidiePart> => {
+        if (source === "eu_funding") {
+          if (intent.euId) {
+            const id = intent.euId;
+            const out = await timed("eu_funding", () => euFunding.get(id, { maxChars: 2_000 }));
+            const x = out.item;
+            const records = x
+              ? [record("eu_funding", x.title, x.url, { ...x, cascade_calls: out.cascade_calls }, describeEuFundingItem(x), (x.next_deadline ?? x.deadlines.at(-1))?.slice(0, 10))]
+              : (out.candidates ?? []).map(euFundingRecord);
+            return {
+              source, records, total: records.length, summary: summarizeEuFundingGet(out), endpoint: out.endpoint, params: out.params, failures: [],
+              notes: [`De vraag noemt EU-oproep ${id}: die is zelf gelezen, zoals eu_funding_get (teksten tot 2.000 tekens; meer met max_chars).`, out.access_note],
+            };
+          }
+          let out = await timed("eu_funding", () => euFunding.search(subsidieEuArgs(intent)));
+          let soonNote: string | undefined;
+          // Nothing announced yet: what is open now, said so.
+          if (intent.soonOnly && !out.items.length) {
+            const open = await timed("eu_funding", () => euFunding.search({ ...subsidieEuArgs(intent), status: undefined }));
+            if (open.items.length) {
+              soonNote = "Geen EU-oproep die nog moet openen (forthcoming); hieronder de oproepen die nu open zijn.";
+              out = open;
+            }
+          }
+          const searched = intent.translated.length
+            ? `Het portaal is Engelstalig: gezocht op '${intent.euQuery}' (vertaald: ${intent.translated.map(([nl, en]) => `${nl} → ${en.replace(/"/g, "")}`).join(", ")}).`
+            : intent.euQuery ? `Gezocht op '${intent.euQuery}'.` : undefined;
+          const untranslated = intent.untranslated.length
+            ? `Zonder vertaling meegestuurd: ${intent.untranslated.map((w) => `'${w}'`).join(", ")}. Het portaal is Engelstalig; vindt dit te weinig, zoek dan met Engelse trefwoorden in eu_funding_search.`
+            : undefined;
+          return {
+            source, records: out.items.map(euFundingRecord), total: out.total, summary: summarizeEuFundingSearch(out), endpoint: out.endpoint, params: out.params, failures: [],
+            notes: [soonNote, searched, untranslated, "Alleen oproepen voor subsidies (grants, ook prijzen) en cascade funding; EuropeAid-oproepen voor landen buiten de EU: eu_funding_search met type 'external_action'.", out.access_note],
+          };
+        }
+        if (source === "rvo_subsidies") {
+          let out = await timed("rvo_subsidies", () => rvoSubsidies.search(subsidieRvoArgs(intent)));
+          let statusNote: string | undefined;
+          // Nothing open among the matches: they are shown with their status, so a closed regeling is not silently missing.
+          const checks = out.status_checks;
+          if (!out.items.length && checks?.candidates) {
+            const all = await timed("rvo_subsidies", () => rvoSubsidies.search(subsidieRvoArgs(intent, false)));
+            if (all.items.length) {
+              const wanted = intent.soonOnly ? "bijna open" : "open of bijna open";
+              // Not every candidate checked: the read cap or the time limit for status pages was reached.
+              statusNote = checks.all_checked
+                ? `Geen van de ${checks.candidates} treffers staat bij RVO ${wanted} voor aanvragen; hieronder de treffers met hun huidige status.`
+                : checks.checked
+                  ? `Van ${checks.checked} van de ${checks.candidates} treffers is de status gelezen en daarvan staat er bij RVO geen ${wanted} voor aanvragen; hieronder de treffers met hun huidige status. Verder filteren: rvo_subsidies_search met status.`
+                  : `De status van de ${checks.candidates} treffers kon niet op tijd van rvo.nl worden gelezen; hieronder de treffers met de status die wel bekend is. Verder filteren: rvo_subsidies_search met status.`;
+              out = all;
+            }
+          }
+          return {
+            source, records: out.items.map(rvoRecord), total: out.total, summary: summarizeRvoSearch(out), endpoint: out.endpoint, params: out.params, failures: [],
+            notes: [statusNote, out.access_note, "Alleen regelingen die RVO uitvoert; gemeentelijke, provinciale en waterschapsregelingen staan in CVDR (cvdr_search)."],
+          };
+        }
+        let out = await timed("nl_onderzoekscalls", () => onderzoekscalls.search(subsidieCallsArgs(intent)));
+        let soonNote: string | undefined;
+        // Nothing opening soon: what is open now, said so.
+        if (intent.soonOnly && !out.items.length && !out.failures.length) {
+          const open = await timed("nl_onderzoekscalls", () => onderzoekscalls.search({ ...subsidieCallsArgs(intent), status: "actueel" }));
+          if (open.items.length) {
+            soonNote = "Geen call of subsidieronde die binnenkort opent; hieronder wat nu open is.";
+            out = open;
+          }
+        }
+        let items: OnderzoekscallItem[] = out.items;
+        let deadlineNote: string | undefined;
+        // The NWO overview shows no closing date: for a deadline question it is read from the
+        // first call pages (at most 3; nwo.nl's crawl delay spaces them 3 s apart, see the source).
+        const toRead = intent.deadline ? items.filter((x) => x.organisation === "nwo" && !x.deadline).slice(0, 3) : [];
+        if (toRead.length) {
+          const read = await Promise.allSettled(toRead.map((x) => timed("nl_onderzoekscalls", () => onderzoekscalls.get({ url: x.url, max_chars: 500 }))));
+          const pages = new Map(read.flatMap((r, i) => (r.status === "fulfilled" ? [[toRead[i].url, r.value] as const] : [])));
+          let earlier = 0;
+          items = items.map((x) => {
+            const d = pages.get(x.url);
+            if (!d) return x;
+            // The first closing date still ahead (an intentieverklaring or vooraanmelding can close
+            // months before the full application), with the last one named next to it.
+            const before = d.next_deadline !== undefined && d.next_deadline !== d.deadline;
+            if (before) earlier += 1;
+            const date = d.next_deadline ?? d.deadline;
+            const text = before ? d.next_deadline_text : d.deadline_text;
+            const label = before ? d.next_deadline_label : d.deadline_label;
+            const later = before && d.deadline_text ? `; daarna ${d.deadline_label ?? "sluitingsdatum"} ${d.deadline_text}` : "";
+            return {
+              ...x,
+              ...(date ? { deadline: date } : {}),
+              ...(text ? { deadline_text: label ? `${text} (${label}${later})` : text } : {}),
+              ...(!x.budget_text && d.budget_text ? { budget_text: d.budget_text, ...(d.budget_eur !== undefined ? { budget_eur: d.budget_eur } : {}) } : {}),
+              ...(d.warnings.length ? { warnings: d.warnings } : {}),
+            };
+          });
+          deadlineNote =
+            `Het overzicht van nwo.nl toont geen sluitingsdatum: die is van de callpagina gelezen bij ${pages.size} van de eerste ${toRead.length} NWO-calls; de overige via nl_onderzoek_call_get.` +
+            (earlier ? ` Bij ${earlier === 1 ? "één call" : `${earlier} calls`} sluit eerst een eerdere stap (intentieverklaring of vooraanmelding): de deadline is die eerstvolgende, de latere staat erachter; of die stap verplicht is, staat in de tekst van de call.` : "");
+        }
+        return {
+          source, records: items.map(onderzoekscallRecord), total: out.total, summary: summarizeOnderzoekscallsSearch(out), endpoint: out.endpoint, params: out.params,
+          failures: out.failures.map((f) => ({ connector: f.connector, error_type: f.error_type, message: f.message })),
+          notes: [soonNote, deadlineNote, out.access_note],
+        };
+      };
+
+      /**
+       * The subsidy route: the funders the intent names, side by side, each with its
+       * share of `top`. Undefined when none has anything: the next routes answer and
+       * say that these were asked.
+       */
+      const runSubsidies = async (intent: SubsidieIntent) => {
+        const settle = async (sources: SubsidieSource[], asking: SubsidieIntent) => {
+          const settled = await Promise.allSettled(sources.map((source) => subsidiePart(source, asking)));
+          const parts: SubsidiePart[] = [];
+          const failures: AskFailures = [];
+          settled.forEach((r, i) => {
+            if (r.status === "fulfilled") {
+              parts.push(r.value);
+              failures.push(...r.value.failures);
+            } else {
+              const mapped = sources[i] === "nl_onderzoekscalls" ? mapOnderzoekscallError(r.reason) : mapSourceError(r.reason, SUBSIDIE_LABELS[sources[i]]);
+              failures.push({ connector: sources[i], error_type: mapped.error, message: mapped.message });
+            }
+          });
+          return { parts, failures };
+        };
+        const found = (ps: SubsidiePart[]) => ps.some((p) => p.records.length);
+        const sameFailure = (a: AskFailures[number], b: AskFailures[number]) => a.connector === b.connector && a.message === b.message;
+        let used = intent;
+        let { parts, failures } = await settle(intent.sources, used);
+        let asked = intent.sources;
+        let narrowed: string | undefined;
+        let widened: string | undefined;
+        // Nothing with all topic words together (every word is required at RVO, NWO, ZonMw and the
+        // EU portal): once more with only the most specific one before the question goes on.
+        const narrow = parts.length && !found(parts) ? narrowSubsidieIntent(intent) : undefined;
+        if (narrow) {
+          const again = await settle(asked, narrow);
+          if (found(again.parts)) {
+            parts = again.parts;
+            failures = again.failures;
+          } else {
+            failures = [...failures, ...again.failures.filter((f) => !failures.some((g) => sameFailure(f, g)))];
+          }
+          used = narrow;
+          narrowed = `Met alle trefwoorden samen ('${intent.query}') niets gevonden; daarom gezocht op '${narrow.query}' alleen.`;
+        }
+        // RVO alone without a match: the national research funders get the question too.
+        if (asked.length === 1 && asked[0] === "rvo_subsidies" && !found(parts)) {
+          const more = await settle(["nl_onderzoekscalls"], used);
+          parts = [...parts, ...more.parts];
+          failures = [...failures, ...more.failures];
+          asked = [...asked, "nl_onderzoekscalls"];
+          widened = "Bij RVO niets gevonden: daarom ook gezocht in de calls van NWO en ZonMw.";
+        }
+        const labels = asked.map((s) => SUBSIDIE_LABELS[s]).join(", ");
+        const described = [
+          intent.euId ? `oproep ${intent.euId}` : intent.query ? `trefwoorden '${intent.query}'${narrow ? `, daarna alleen '${narrow.query}'` : ""}` : intent.euJointUndertaking ? undefined : "zonder trefwoorden",
+          intent.doelgroep ? `doelgroep '${intent.doelgroep}'` : undefined,
+          intent.land ? `land '${intent.land}'` : undefined,
+          intent.euProgramme ? `EU-programma ${intent.euProgramme}` : undefined,
+          intent.euJointUndertaking ? `joint undertaking: '${intent.euJointUndertaking}' in de oproepcode` : undefined,
+          intent.soonOnly ? "binnenkort open" : intent.openOnly ? "alleen wat open is of binnenkort opent" : undefined,
+        ].filter(Boolean).join(", ");
+        const window = subsidieWindow(intent);
+        const windowNote = window
+          ? asked.includes("eu_funding")
+            ? `Deadline tussen ${window.from} en ${window.to} (uit '${window.phrase}')${asked.length > 1 ? "; alleen op de EU-oproepen toegepast, RVO, NWO en ZonMw hebben geen deadlinefilter (zie de periode of deadline per record)" : ""}.`
+            : `De periode uit de vraag ('${window.phrase}') is niet toegepast: RVO, NWO en ZonMw hebben geen deadlinefilter; zie de periode of deadline per record.`
+          : undefined;
+        const answering = parts.filter((p) => p.records.length);
+        if (!answering.length) {
+          routeFailures.push(...failures);
+          fallbackSteps.push(parts.length ? "subsidies:no_results" : "subsidies:search_failed");
+          subsidieNote = `Eerst gezocht naar subsidies en calls bij ${labels} (${described}): ${parts.length ? "niets gevonden" : "mislukt"}. Dit antwoord komt van de andere routes van nl_gov_ask.`;
+          return undefined;
+        }
+        // Each funder that answered its share of `top`; what one leaves goes to the next, in order.
+        const counts = answering.map((p) => Math.min(p.records.length, Math.ceil(top / answering.length)));
+        let free = top - counts.reduce((a, b) => a + b, 0);
+        answering.forEach((p, i) => {
+          const more = Math.max(0, Math.min(free, p.records.length - counts[i]));
+          counts[i] += more;
+          free -= more;
+        });
+        const records = answering.flatMap((p, i) => p.records.slice(0, counts[i]));
+        const totals = parts.map((p) => p.total);
+        const total = totals.every((t): t is number => typeof t === "number") ? totals.reduce((a, b) => a + b, 0) : null;
+        const provenance = parts.length === 1
+          ? prov("nl_gov_ask", parts[0].endpoint, parts[0].params, records.length, parts[0].total)
+          : prov(
+              "nl_gov_ask",
+              parts.map((p) => p.endpoint).join(" | "),
+              Object.fromEntries(parts.flatMap((p) => Object.entries(p.params).map(([k, v]) => [`${p.source}.${k}`, v]))),
+              records.length,
+              total,
+            );
+        return askSuccess({
+          summary: `Router: subsidies — ${parts.map((p) => p.summary).join("; ")}`,
+          records,
+          provenance,
+          access_note: mergeAccessNotes(
+            `Vraag over subsidies of financiering: gezocht bij ${labels} (${described}). Meer resultaten, filters of de volledige tekst: ${asked.map((s) => SUBSIDIE_TOOLS[s]).join("; ")}.`,
+            windowNote,
+            used.euSharedFund
+              ? "EU-fondsen die in Nederland worden uitgevoerd (het landbouwbeleid GLB, EFRO, ESF+, Interreg) staan niet in het EU Funding & Tenders Portal. " +
+                `Gezocht is bij RVO, dat de GLB-regelingen uitvoert (de andere fondsen staan er alleen in voor zover RVO ze uitvoert)${used.glbAsTopic ? ", op 'GLB' (Gemeenschappelijk Landbouwbeleid)" : ""}.`
+              : undefined,
+            narrowed,
+            widened,
+            ...parts.flatMap((p) => p.notes),
+          ),
+          failures: failures.length ? failures : undefined,
+          total,
+        });
+      };
+
       if (takes("rekenkamer")) {
         const answered = await runResearch("rekenkamer");
         if (answered) return answered;
@@ -1475,6 +1811,11 @@ export function registerNlGovAsk(server: McpServer, deps: NlGovAskDeps): void {
       }
       if (takes("wodc")) {
         const answered = await runResearch("wodc");
+        if (answered) return answered;
+      }
+
+      if (takes("subsidies") && subsidieIntent) {
+        const answered = await runSubsidies(subsidieIntent);
         if (answered) return answered;
       }
 
@@ -2667,7 +3008,7 @@ export function registerNlGovAsk(server: McpServer, deps: NlGovAskDeps): void {
       const records = out.items.map((d) => record("data.overheid.nl", String(d.title ?? d.id), `https://data.overheid.nl/dataset/${d.id}`, d as unknown as Record<string, unknown>, d.notes, d.metadata_modified));
       // Name the routes that ran: "no source recognised" is only true when
       // none did, and a failed source must not read as an empty one.
-      const recognised = triedRoutes.length > 0 || policyNote !== undefined || dsoNote !== undefined || debatNote !== undefined || algoritmeNote !== undefined || wetNote !== undefined;
+      const recognised = triedRoutes.length > 0 || policyNote !== undefined || dsoNote !== undefined || debatNote !== undefined || algoritmeNote !== undefined || subsidieNote !== undefined || wetNote !== undefined;
       const triedNote = triedRoutes.length ? `Eerst geprobeerd, zonder resultaat: ${[...new Set(triedRoutes)].join(", ")}.` : undefined;
       const catalogNote = records.length
         ? recognised

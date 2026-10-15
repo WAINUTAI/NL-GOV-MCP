@@ -58,28 +58,26 @@ export function buildFormattedResponse(args: {
   });
 }
 
-export function dryRunPayload(args: {
+interface PlannedRequest {
   connector: string;
+  /** GET unless the source sends a body (a search POST). */
+  method?: "GET" | "POST";
   url: string;
   params: Record<string, unknown>;
-}): { content: Array<{ type: "text"; text: string }>; structuredContent: Record<string, unknown> } {
+}
+
+/**
+ * The request(s) a tool would send. `also` holds the requests a source sends
+ * side by side with the first one (another site of the same search).
+ */
+export function dryRunPayload(args: PlannedRequest & { also?: PlannedRequest[] }): { content: Array<{ type: "text"; text: string }>; structuredContent: Record<string, unknown> } {
+  const requests = [args, ...(args.also ?? [])].map((r) => ({ connector: r.connector, method: r.method ?? "GET", url: r.url, params: r.params }));
+  const connectors = [...new Set(requests.map((r) => r.connector))];
   const payload = {
     dry_run: true,
-    planned_requests: [
-      {
-        connector: args.connector,
-        method: "GET",
-        url: args.url,
-        params: args.params,
-      },
-    ],
-    estimated_sources: [args.connector],
-    cache_status: [
-      {
-        connector: args.connector,
-        cache_policy: "hardcoded-ttl",
-      },
-    ],
+    planned_requests: requests,
+    estimated_sources: connectors,
+    cache_status: connectors.map((connector) => ({ connector, cache_policy: "hardcoded-ttl" })),
   };
 
   return {

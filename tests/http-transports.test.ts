@@ -191,12 +191,14 @@ describe("HTTP transports", () => {
   });
 
   it("closes streamable-http sessions that stay idle past the TTL", async () => {
-    const base = await start("streamable-http", { sessionTtlMs: 100, sweepIntervalMs: 25 });
+    // A TTL of 1 s, not 100 ms: under a full parallel test run an initialize (which
+    // registers every tool) can take longer than 100 ms, so the first session was
+    // swept before the second existed. Poll for the sweep for the same reason.
+    const base = await start("streamable-http", { sessionTtlMs: 1000, sweepIntervalMs: 25 });
     await initialize(base);
     await initialize(base);
     expect(handle!.sessionCount!()).toBe(2);
-    await wait(250);
-    expect(handle!.sessionCount!()).toBe(0);
+    await vi.waitFor(() => expect(handle!.sessionCount!()).toBe(0), { timeout: 5000, interval: 25 });
   });
 
   it("keeps no session for a POST that is not an initialize request", async () => {

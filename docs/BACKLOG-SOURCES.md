@@ -284,3 +284,28 @@ Beoordeeld met de vaste regel: alleen officiële, open bronnen. Een bron die een
 - **`tweede_kamer_document_get`**: een onbekend document (HTTP 404) komt terug als `http_error`, niet als leeg resultaat met uitleg zoals bij de andere get-tools.
 - **`isError`**: fouten op toolniveau (`error`-vorm) komen terug zonder `isError: true`; de MCP-spec suggereert dat wel. Voorlopig bewust zo gelaten.
 - **LiDO-route in `nl_gov_ask`**: 'uitspraken die verwijzen naar <ECLI>' leest nu de uitspraak zelf en verwijst naar `lido_verwijzingen_lijst`; een eigen route die de verwijzingen direct ophaalt ontbreekt.
+
+## Subsidies en financiering (oktober 2026)
+
+Doel: vragen als "welke subsidies of calls staan open voor X" beantwoorden uit officiële, open bronnen. De juridische tekst van regelingen stond er al (CVDR, Officiële Bekendmakingen, BWB, EUR-Lex); wat ontbrak was de loketlaag: open of dicht, deadline, budget, doelgroep. Live geverifieerd op 15 oktober 2026.
+
+**Gebouwd (drie bronnen, 50 → 53 connectors; 85 → 91 tools; connector-sleutels `rvo_subsidies`, `rvo_subsidies_pages`, `nwo_calls`, `zonmw_subsidies`, `eu_funding`):**
+- `rvo_subsidies_search`, `rvo_subsidie_get` — RVO: de open-data-catalogus van rvo.nl (CC0) met status, aanvraagperiode en budget van de openbare pagina's
+- `nl_onderzoek_calls_search`, `nl_onderzoek_call_get` — NWO (met SIA, NKO, Open Science NL) en ZonMw: de overzichts- en callpagina's van beide sites
+- `eu_funding_search`, `eu_funding_get` — het EU Funding & Tenders Portal (open zoek-API, geen account)
+- `nl_gov_ask` stuurt subsidievragen naar deze tools; een vraag met een gemeente of provincie als financier houdt de documentroutes (CVDR, bekendmakingen, ORI)
+
+**Onderzocht en niet gebouwd:**
+- **DUS-I** (Dienst Uitvoering Subsidies aan Instellingen) — het overzicht `/subsidies` is een A-Z-lijst zonder status; de status van een regeling staat alleen als vrije tekst in een updateblok ('U kunt geen subsidie meer aanvragen', 'Het budget voor 2026 is op', of niets). Dat lezen is gokken. De RSS-zoekfunctie (`www.dus-i.nl/api/rss`, zelfde platform als rijksoverheid.nl) werkt wel, maar geeft alleen titel, link, beschrijving en datum. Mogelijk later: alleen vindbaarheid, als regel in `RSS_SITES`
+- **Rijkscultuurfondsen** (Mondriaan Fonds, Filmfonds en de andere) — private stichtingen met een publieke taak, geen API, hun regelingen staan niet in de Staatscourant
+- **Regionale uitvoerders** (SNN, Stimulus, OP Oost, Kansen voor West) — alleen websites, geen API; hun regelingen zijn als tekst bereikbaar via CVDR en het Provinciaal blad
+- **wetten.rvo.nl-API** — gesloten licentie; een sleutel alleen voor overheden
+- **Milieu Centraal Energiesubsidiewijzer** — API alleen op aanvraag
+- **KVK Ondernemersplein-API** — een catalogusvermelding uit 2022, niet geverifieerd als werkende open API
+
+**Open punten:**
+- De status, periode en het budget van RVO komen uit de paginagegevens van rvo.nl, geen gedocumenteerde API: een herontwerp van de site kan het breken (de status wordt dan 'onbekend' met de reden). Officieel en openbaar, zonder account; de beheerder kan beoordelen of dat binnen de bronnenregel valt.
+- `eu-funding.ts` heeft een eigen multipart-transport (`postForm`) omdat `http.ts` alleen JSON verstuurt; het volgt `Retry-After` niet en controleert de groottelimiet pas na het lezen. Opruimen kan met een `postMultipartJson`-helper in `http.ts`.
+- De vertaling van Nederlandse onderwerpwoorden naar het Engels voor het EU-portaal (in `nl_gov_ask`) is een vaste woordenlijst; een woord zonder vertaling gaat ongewijzigd mee en wordt gemeld.
+- De crawl-delays van nwo.nl (3 s) en zonmw.nl (4 s) worden per proces aangehouden (`crawlDelayMs` in `http.ts`); meer serverprocessen naast elkaar houden geen gezamenlijke wachtrij bij.
+- De programma-tabel van het EU-portaal is een momentopname (65 programma's, oktober 2026); een nieuw programma krijgt via de facet-endpoint wel een naam, maar is pas op afkorting te filteren na toevoeging aan de tabel.

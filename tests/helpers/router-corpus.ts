@@ -1184,6 +1184,61 @@ export const ROUND_FOUR: Record<string, string[]> = {
 };
 
 /**
+ * Subsidy and funding questions, by the funder they are for: RVO's regelingen,
+ * NWO and ZonMw calls, and calls in the EU Funding & Tenders Portal.
+ */
+export const SUBSIDIE_QUESTIONS: Record<string, string[]> = {
+  subsidiesRvo: [
+    "Welke subsidies zijn er voor waterstof?",
+    "welke subsidies zijn er voor waterstof",
+    "subsidie verduurzaming maatschappelijk vastgoed",
+    "Welke subsidies staan nu open voor cultureel erfgoed?",
+    "Is de DUMAVA-regeling nog open?",
+    "Financiering voor mkb-innovatie",
+    "Subsidies om zaken te doen in Ghana",
+    "Welke subsidieregelingen zijn er voor batterijen?",
+    "Subsidie voor de kosten van isolatie",
+    "Hoeveel subsidie krijg ik voor een warmtepomp?",
+    "Welke subsidies zijn er voor zorginnovatie?",
+    "Welke isolatiesubsidies zijn er?",
+    "Wanneer sluit het Innovatiekrediet?",
+    "Wanneer sluit de DEI+?",
+    "Hoe zit het met de subsidie voor de warmtepomp?",
+    "landbouwsubsidies EU",
+    "Europese subsidies voor boeren",
+    // A regeling named with a step of applying for it.
+    "Regeling mbo verduurzamen deadline",
+    "Wanneer kan ik de Regeling mbo verduurzamen aanvragen?",
+    "Is de Flex-e subsidie nog open?",
+  ],
+  subsidiesEu: [
+    "open EU calls voor zorginnovatie",
+    "Welke EU-subsidies zijn er voor waterstof?",
+    "Zijn er Horizon Europe calls over batterijen?",
+    "Wanneer sluit de EIC Accelerator?",
+    "Europese subsidies voor cultureel erfgoed",
+    "LIFE-subsidie natuurherstel",
+    "Wat is het budget en de deadline van HORIZON-CL4-2027-02-MAT-PROD-32-two-stage?",
+    "Welke Europese oproepen sluiten in november?",
+    "Erasmus+ subsidie voor scholen",
+    "Erasmus+ calls",
+    "EU subsidie life sciences",
+    // Joint undertakings publish their calls in the EU portal.
+    "Welke Chips Joint Undertaking calls staan open?",
+    "Welke calls van de Innovative Health Initiative staan open?",
+    "EuroHPC calls deadline",
+  ],
+  subsidiesOnderzoek: [
+    "NWO call kunstmatige intelligentie deadline",
+    "Welke ZonMw-subsidies voor dementie openen binnenkort?",
+    "Welke NWO-calls zijn nu open over klimaat?",
+    "Welke Veni-beurzen zijn er?",
+    "Onderzoeksfinanciering voor cultureel erfgoed",
+    "Welke open calls zijn er voor kunstmatige intelligentie?",
+  ],
+};
+
+/**
  * Near misses of the round-three routes, by the source they must not get: a
  * ruling searched rather than named, a local or EU instrument or a policy
  * question about a law, a rekenkamer that is not the Algemene, another
@@ -1244,6 +1299,60 @@ export const NOT_THIS_ROUTE: Record<string, string[]> = {
     "Hoeveel mantelzorgers zijn er volgens het CBS?",
     "Kamervragen over het SCP-rapport over armoede",
     "Wat zeggen het SCP en het WODC over jeugdcriminaliteit?",
+  ],
+  // A decentral funder's regelingen (CVDR, the decentral journals, ORI), the legal text, parliament,
+  // policy, rulings, statistics or recipients and reports are other routes' questions, as are
+  // "subsidiariteit" and a body named without a funding word.
+  rvo_subsidies: [
+    "Wat staat er in de Staatscourant over subsidies?",
+    "Staatscourant regeling subsidie verduurzaming woningen",
+    "Verordening provincie Gelderland subsidies",
+    "Subsidieregeling gemeente Utrecht duurzaamheid",
+    "Subsidieverordening Amsterdam",
+    "Welke subsidies geeft de provincie Gelderland voor waterstof?",
+    "Welke subsidies zijn er in Utrecht voor zonnepanelen?",
+    "Kamervragen over landbouwsubsidies",
+    "Uitspraken over terugvordering van subsidie",
+    "Hoeveel subsidie is er uitgekeerd aan boeren in 2024?",
+    "Wat zegt de minister over subsidies voor zonnepanelen?",
+    "Wat is het subsidiebeleid van het kabinet?",
+    "Wat zegt de Algemene Rekenkamer over subsidies?",
+    "Aanbesteding subsidieadvies",
+    "Hoeveel pensioenfondsen zijn er?",
+    // A register, a legal notion, a budget year or recipients; and no topic at all.
+    "Subsidieregister 2026",
+    "Wat is een subsidieplafond?",
+    "SDE++ budget 2026",
+    "Welke projecten kregen SDE++ subsidie?",
+    "Hoeveel subsidie krijgt de publieke omroep?",
+    "Welke subsidies zijn er?",
+    // A regeling's text, amendment or entry into force, and a regeling without a name.
+    "Tekst van de Regeling mbo verduurzamen",
+    "Tekst van de regeling mbo verduurzamen over de aanvraagperiode",
+    "Wijziging Regeling mbo verduurzamen Staatscourant",
+    "Artikel 3 van de Regeling mbo verduurzamen",
+    "Wanneer is de Regeling mbo verduurzamen in werking getreden?",
+    "Wanneer kan ik de regeling aanvragen?",
+  ],
+  eu_funding: [
+    "Subsidiariteitsbeginsel in de EU",
+    "Europese verordening staatssteun",
+    "Wat zegt de Europese Rekenkamer over landbouwsubsidies?",
+    "EFRO-subsidie voor de regio",
+    "Kamervragen over Horizon Europe",
+    // EU money for farming is the GLB, which RVO runs.
+    "landbouwsubsidies EU",
+    "Europese subsidies voor boeren",
+    // SNS is a joint undertaking only with "JU".
+    "SNS Bank subsidie",
+  ],
+  nl_onderzoekscalls: [
+    "Wat doet NWO?",
+    "Welke rapporten publiceerde ZonMw over dementie?",
+    "Wat is de begroting van NWO?",
+    "Welke subsidies zijn er voor waterstof?",
+    // A joint undertaking's calls are in the EU portal.
+    "Welke Chips Joint Undertaking calls staan open?",
   ],
   wodc: [
     "Welke API heeft het WODC?",

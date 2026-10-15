@@ -10,6 +10,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerTools } from "../../src/tools.js";
 import { TTLCache } from "../../src/cache.js";
 import { clearHttpCache, getAllConnectorHealth, markConnectorSuccess } from "../../src/utils/connector-runtime.js";
+import { setCrawlDelaysEnabled } from "../../src/utils/http.js";
 
 type Handler = (args: Record<string, unknown>) => Promise<{ content: Array<{ type: string; text: string }> }>;
 
@@ -66,6 +67,10 @@ export function sourceOfUrl(raw: string): string {
   if (host === "publications.europa.eu" || host === "eur-lex.europa.eu") return "eu_cellar";
   if (host === "api.openraadsinformatie.nl") return "ori";
   if (host === "algoritmes.overheid.nl") return "algoritmeregister";
+  // The subsidy route's funders: the EU portal's search API, RVO (open data and its pages), NWO (and its units) and ZonMw.
+  if (host === "api.tech.ec.europa.eu") return "eu_funding";
+  if (host === "www.rvo.nl") return "rvo_subsidies";
+  if (/^(?:www\.)?(?:nwo|regieorgaan-sia|nko|openscience|zonmw)\.nl$/.test(host)) return "nl_onderzoekscalls";
   if (host === "www.tenderned.nl") return "tenderned";
   if (host.endsWith("luchtmeetnet.nl")) return "luchtmeetnet";
   if (host.endsWith("verkiezingsuitslagen.nl")) return "verkiezingsuitslagen";
@@ -151,6 +156,8 @@ export function createAskHarness(): AskHarness {
       const requests: TracedRequest[] = [];
       let delivered = 0;
       const realFetch = globalThis.fetch;
+      // No crawl delay either: it would hold a site's first request back until another route answered.
+      const crawlDelays = setCrawlDelaysEnabled(false);
       // Nor from the sources' own caches (CBS, data.overheid.nl).
       const realCacheGet = TTLCache.prototype.get;
       TTLCache.prototype.get = function () {
@@ -186,6 +193,7 @@ export function createAskHarness(): AskHarness {
       } finally {
         globalThis.fetch = realFetch;
         TTLCache.prototype.get = realCacheGet;
+        setCrawlDelaysEnabled(crawlDelays);
       }
     },
   };

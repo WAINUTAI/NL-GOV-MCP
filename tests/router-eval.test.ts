@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { ROUTES } from "../src/router/routes.js";
 import { logger } from "../src/utils/logger.js";
 import { asTraced, createAskHarness, type AskTrace } from "./helpers/route-trace.js";
-import { ADVERSARIAL_NON_DSO, DSO_QUESTIONS, LEFT_TO_OTHER_ROUTES, NON_DSO_QUESTIONS, NOT_THIS_ROUTE, ROUND_FOUR, ROUND_THREE, ROUND_TWO_NON_DSO } from "./helpers/router-corpus.js";
+import { ADVERSARIAL_NON_DSO, DSO_QUESTIONS, LEFT_TO_OTHER_ROUTES, NON_DSO_QUESTIONS, NOT_THIS_ROUTE, ROUND_FOUR, ROUND_THREE, ROUND_TWO_NON_DSO, SUBSIDIE_QUESTIONS } from "./helpers/router-corpus.js";
 
 /* ------------------------------------------------------------------ */
 /*  The routing check of nl_gov_ask over the labelled corpus.         */
@@ -54,6 +54,10 @@ const LABEL_SOURCES: Record<string, readonly string[]> = {
   rekenkamer: ["rekenkamer"],
   scp: ["scp"],
   wodc: ["wodc"],
+  // Subsidies and funding calls, by funder.
+  subsidiesRvo: ["rvo_subsidies"],
+  subsidiesEu: ["eu_funding"],
+  subsidiesOnderzoek: ["nl_onderzoekscalls"],
 };
 
 /**
@@ -134,6 +138,7 @@ const cases: Case[] = [
   ...Object.entries(ROUND_TWO_NON_DSO).flatMap(([label, qs]) => qs.map((question) => ({ label, question, dsoKey: false }))),
   ...Object.entries(ROUND_THREE).flatMap(([label, qs]) => qs.map((question) => ({ label, question, dsoKey: false }))),
   ...Object.entries(ROUND_FOUR).flatMap(([label, qs]) => qs.map((question) => ({ label, question, dsoKey: false }))),
+  ...Object.entries(SUBSIDIE_QUESTIONS).flatMap(([label, qs]) => qs.map((question) => ({ label, question, dsoKey: false }))),
   ...ADVERSARIAL_NON_DSO.map((question) => ({ label: "adversarial", question, dsoKey: false })),
   // With the key: these are the questions the DSO route takes, or leaves on purpose.
   ...LEFT_TO_OTHER_ROUTES.map((question) => ({ label: "leftToOther", question, dsoKey: true })),

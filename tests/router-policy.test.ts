@@ -1057,7 +1057,8 @@ describe("nl_gov_ask catalogue fallback note", () => {
 
   it("still says so when no route ran", async () => {
     mockUpstreams({ dov: () => jsonResponse(ckanJson(["Subsidieregister 2026"])) });
-    const res = await ask({ question: "subsidie cultuur", top: 3 });
+    // Not "subsidie cultuur": a subsidy question has a route of its own (RVO) since the subsidy sources.
+    const res = await ask({ question: "kunst cultuur", top: 3 });
     expect(res.access_note).toContain("Geen specifieke bron herkend");
   });
 });

@@ -341,7 +341,7 @@ function attachServerErrorHandler(httpServer: HttpServer, port: number): void {
  * instructions load upfront, so they say when to reach for this server and how to read results.
  */
 export const SERVER_INSTRUCTIONS =
-  "NL-GOV-MCP searches official Dutch government sources (Tweede Kamer, bekendmakingen, wetten, Rechtspraak, CBS, council records, DSO/Omgevingswet, PDOK/BAG, KNMI, TenderNed and more). " +
+  "NL-GOV-MCP searches official Dutch government sources (Tweede Kamer, bekendmakingen, wetten, Rechtspraak, CBS, council records, DSO/Omgevingswet, PDOK/BAG, KNMI, TenderNed, subsidies and funding calls of RVO, NWO/ZonMw and the EU, and more). " +
   "Start with nl_gov_ask when the right source is unclear; it reports the source it used. Then use that source's own tools for details or full text (e.g. tweede_kamer_document_get, officiele_bekendmakingen_record_get, dso_omgevingsdocument_tekst). " +
   "Records carry an official canonical URL and provenance: cite those URLs. A result with an 'error' field is a failure; 'failures' lists sources that failed while others answered; zero records without either means the source answered and found nothing; access_note explains filters, truncation and fallbacks. " +
   "Some tools need a free API key: DSO_API_KEY, KNMI_API_KEY, OVERHEID_API_KEY, BAG_API_KEY, NED_API_KEY, EP_ONLINE_API_KEY, NS_API_KEY, DNB_API_KEY; without it the tool says so.";

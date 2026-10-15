@@ -14,6 +14,9 @@ import { BrpGewasperceelSource } from "../src/sources/brp-gewaspercelen.js";
 import { VerkiezingsuitslagenSource } from "../src/sources/verkiezingsuitslagen.js";
 import { DuoSource } from "../src/sources/duo.js";
 import { TweedeKamerSource } from "../src/sources/tweede-kamer.js";
+import { EuFundingSource } from "../src/sources/eu-funding.js";
+import { RvoSubsidiesSource } from "../src/sources/rvo-subsidies.js";
+import { OnderzoekscallsSource } from "../src/sources/nl-onderzoekscalls.js";
 
 const config = loadConfig();
 const tenderned = new TenderNedSource(config);
@@ -23,6 +26,9 @@ const brp = new BrpGewasperceelSource(config);
 const kiesraad = new VerkiezingsuitslagenSource(config);
 const duo = new DuoSource(config);
 const tk = new TweedeKamerSource(config);
+const euFunding = new EuFundingSource(config);
+const rvo = new RvoSubsidiesSource(config);
+const calls = new OnderzoekscallsSource(config);
 
 let failures = 0;
 
@@ -228,6 +234,89 @@ await check("tweede kamer pdf tekst", async () => {
     `no text extracted (${String(out.item.text_preview_unavailable_reason ?? "?")})`,
   );
   return `${id.slice(0, 8)}: ${out.item.resource_pages} pagina's, ${out.item.text_preview_chars} tekens`;
+});
+
+let euTopicId = "";
+await check("eu funding search (hydrogen, open)", async () => {
+  const out = await euFunding.search({ query: "hydrogen" });
+  assert(out.items.length > 0, "no open or forthcoming calls");
+  assert(typeof out.total === "number" && out.total >= out.items.length, "no total");
+  assert(out.items.every((i) => i.status === "open" || i.status === "forthcoming"), "status filter not applied");
+  assert(out.items.every((i) => i.next_deadline || i.outdated_index_record || !i.deadlines.length), "an expired call was not left out");
+  euTopicId = out.items.find((i) => i.type === "grant")?.id ?? "";
+  return `${out.items.length}/${out.total} (${out.expired_hidden ?? 0} verlopen weggelaten) — ${out.items[0].id}`;
+});
+
+await check("eu funding search (cultural heritage, HORIZON)", async () => {
+  const out = await euFunding.search({ query: '"cultural heritage"', programme: "HORIZON", type: ["grant"], status: ["closed"], limit: 5 });
+  assert(out.items.length > 0, "no closed calls");
+  assert(out.items.every((i) => i.programme_abbreviation === "HORIZON"), "programme filter not applied");
+  return `${out.total} gesloten — ${out.items[0].identifier}`;
+});
+
+await check("eu funding get (topic)", async () => {
+  assert(euTopicId, "no topic id from the search");
+  const out = await euFunding.get(euTopicId, { maxChars: 1000 });
+  assert(out.item, `topic ${euTopicId} not found`);
+  assert(out.item!.deadlines.length > 0, "no deadlines");
+  return `${out.item!.id}: ${out.item!.deadlines.join(", ")}${out.item!.budget_eur !== undefined ? `, € ${out.item!.budget_eur.toLocaleString("nl-NL")}` : ""}`;
+});
+
+await check("rvo subsidies search (waterstof + status)", async () => {
+  const out = await rvo.search({ query: "waterstof", limit: 5 });
+  assert(out.catalogue.complete, `catalogue incomplete (missing pages ${out.catalogue.missing_pages.join(",")})`);
+  assert(out.items.length > 0, "no matches");
+  assert(out.items.some((i) => i.status_info?.status_label), "no status read from the pages");
+  return `${out.total} treffers in ${out.catalogue.entries} pagina's — ${out.items[0].title} (${out.items[0].status_info?.status_label ?? "status onbekend"})`;
+});
+
+await check("rvo subsidies search (status open)", async () => {
+  const out = await rvo.search({ query: "waterstof", status: ["open", "bijna_open"], limit: 5 });
+  assert(out.items.every((i) => i.status_info?.status === "open" || i.status_info?.status === "bijna_open"), "status filter not applied");
+  return `${out.items.length} open, ${out.status_checks?.checked}/${out.status_checks?.candidates} gelezen`;
+});
+
+await check("rvo subsidie get (dumava)", async () => {
+  const out = await rvo.get({ id: "dumava", maxChars: 2000 });
+  assert(!("notFound" in out), "dumava not found");
+  const found = out as Exclude<typeof out, { notFound: true }>;
+  assert(found.text_source === "pagina", `text from ${found.text_source}`);
+  assert(found.sections.length > 0, "no sections");
+  return `${found.status_info?.status_label ?? "status onbekend"}; ${found.status_info?.period_text ?? "geen periode"}; ${found.sections.length} secties`;
+});
+
+await check("rvo subsidie get (isde: on rvo.nl, not in the open data)", async () => {
+  const out = await rvo.get({ id: "isde", maxChars: 200 });
+  assert("notFound" in out, "isde is in the catalogue now: drop this check");
+  const missing = out as Extract<typeof out, { notFound: true }>;
+  assert(missing.site_page === "https://www.rvo.nl/subsidies-financiering/isde", "the rvo.nl page was not found");
+  return `${missing.site_page}; ${missing.suggestions.length} treffers in de catalogus`;
+});
+
+let nwoCallUrl = "";
+await check("nwo calls search (actueel)", async () => {
+  const out = await calls.search({ organisatie: "nwo", status: "actueel", limit: 5 });
+  assert(!out.failures.length, out.failures.map((f) => f.message).join("; "));
+  assert(out.items.length > 0, "no current NWO calls");
+  assert(out.items.every((i) => i.status === "open" || i.status === "binnenkort"), "status filter not applied");
+  nwoCallUrl = out.items.find((i) => /^https:\/\/www\.nwo\.nl\/calls\//.test(i.url))?.url ?? "";
+  return `${out.total} actueel — ${out.items[0].title.slice(0, 50)} (${out.items[0].status_label})`;
+});
+
+await check("zonmw subsidies search (actueel)", async () => {
+  const out = await calls.search({ organisatie: "zonmw", status: "actueel", limit: 5 });
+  assert(!out.failures.length, out.failures.map((f) => f.message).join("; "));
+  assert(out.items.length > 0, "no current ZonMw rounds");
+  assert(out.items.every((i) => i.deadline || i.status === "binnenkort" || i.status_label), "no deadline or status");
+  return `${out.total ?? `${out.items.length}+`} actueel — ${out.items[0].title.slice(0, 50)}`;
+});
+
+await check("nwo call get (deadline)", async () => {
+  assert(nwoCallUrl, "no nwo.nl call url from the search");
+  const d = await calls.get({ url: nwoCallUrl, max_chars: 1000 });
+  assert(d.status_label, "no status label");
+  const earlier = d.next_deadline && d.next_deadline !== d.deadline ? `; eerst ${d.next_deadline_label} ${d.next_deadline_text}` : "";
+  return `${d.title.slice(0, 40)}: ${d.status_label}; ${d.deadline_text ?? "geen eenduidige sluitingsdatum"}${earlier}${d.budget_text ? `; ${d.budget_text}` : ""}`;
 });
 
 console.log(failures ? `\n${failures} check(s) FAILED` : "\nAll live checks passed");

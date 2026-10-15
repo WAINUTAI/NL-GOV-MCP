@@ -1679,3 +1679,472 @@ export function extractPopulationYear(question: string): number | undefined {
   const m = /(?:^|[^\p{L}\d])(?:(?:in|op|per|anno|van)\s+(?:1\s+januari\s+)?)?(1\d{3}|2\d{3})(?![\p{L}\d])/u.exec(String(question ?? ""));
   return m ? Number(m[1]) : undefined;
 }
+
+// ---------------------------------------------------------------------------
+// Subsidies and funding calls
+
+/** The sources the subsidy route asks, as dryRun names them. */
+export type SubsidieSource = "eu_funding" | "nl_onderzoekscalls" | "rvo_subsidies";
+
+export interface SubsidieIntent {
+  /** The sources asked side by side, in the order their records are shown. */
+  sources: SubsidieSource[];
+  /** Dutch topic words for RVO and NWO/ZonMw; empty without a topic. */
+  query: string;
+  /** The topic in English for the EU portal (which is English), with the translations used and the words left as they were. */
+  euQuery: string;
+  translated: Array<[string, string]>;
+  untranslated: string[];
+  /** An EU topic identifier or EuropeAid reference in the question: that call is read, not searched. */
+  euId?: string;
+  /** An EU programme the question names, as eu_funding_search takes it ('HORIZON', 'LIFE', ...). */
+  euProgramme?: string;
+  /** An EU joint undertaking the question names, as the words of its topic identifiers ('chips JU'; 'JU' for any): the front of euQuery. */
+  euJointUndertaking?: string;
+  /** Only what can be applied for now or soon: "staan open", "nu", "aanvragen", a deadline. */
+  openOnly: boolean;
+  /** Only what opens soon: "binnenkort", "verwacht". */
+  soonOnly: boolean;
+  /** The question asks for a deadline or closing date. */
+  deadline: boolean;
+  /** A month the deadline question names ("sluiten in november", "deze maand", "voor december"): the days it covers. */
+  deadlineWindow?: { from: string; to: string; phrase: string };
+  /** NWO or ZonMw when the question names only one of them. */
+  organisatie?: "nwo" | "zonmw";
+  /** RVO target group ('mkb', 'agrarisch', 'kennisinstelling'). */
+  doelgroep?: string;
+  /** A country the question names ("in Ghana"), for RVO's country filter. */
+  land?: string;
+  /**
+   * An EU fund run in the Netherlands (GLB, EFRO, ESF+, Interreg, ...) or EU money for
+   * farming: not in the EU portal, so RVO is asked. glbAsTopic: EU money for farmers
+   * without a topic ("Europese subsidies voor boeren") is searched as 'glb'.
+   */
+  euSharedFund?: boolean;
+  glbAsTopic?: boolean;
+}
+
+const SUBSIDIE_QUESTION_MAX_CHARS = 300;
+
+/**
+ * What may follow "subsidie" in a compound that still asks for one: the plural,
+ * "subsidieregeling", "subsidiemogelijkheden", "subsidieaanvraag", "subsidieloket".
+ * Not "subsidieregister", "subsidieplafond", "subsidievaststelling" or
+ * "subsidievoorwaarden": their head is a register, a legal notion or a step of
+ * the procedure, not a subsidy to find.
+ */
+const SUBSIDIE_FUNDING_SUFFIX = "(?:s|regeling(?:en)?|mogelijkhe(?:id|den)|aanvra(?:ag|gen)|loket|ronde(?:s)?|oproep(?:en)?|pot(?:je|jes|ten)?|programma(?:'s)?|kansen)?";
+/** A word with "subsidie" that asks for funding, with what comes before it: "isolatiesubsidies" → "isolatie". */
+const SUBSIDIE_COMPOUND_RE = new RegExp(`^(\\p{L}*?)subsidie${SUBSIDIE_FUNDING_SUFFIX}$`, "u");
+/**
+ * Words that ask for funding by themselves: subsidie and the compounds above
+ * ("eu-subsidies", "subsidieregeling", "landbouwsubsidie"), financing schemes,
+ * RVO schemes and NWO grants by name, open calls. Not "subsidiair" or
+ * "subsidiariteit", which hold no "subsidie".
+ */
+const SUBSIDIE_WORD_RE = new RegExp(
+  `(?:^|[^\\p{L}])(?:[\\p{L}-]*subsidie${SUBSIDIE_FUNDING_SUFFIX}|financieringsregeling(?:en)?|financieringsmogelijkhe(?:id|den)|financieringsronde(?:s)?|financieringsoproep(?:en)?|onderzoeksfinanciering|innovatiekrediet|borgstelling\\p{L}*|bmkb|dumava|isde|sde\\+*|wbso|dei\\+?|dhi|veni|vidi|vici|eu-?fondsen|europese\\s+fondsen|(?:eu|europese)[\\s-]+(?:oproepen|calls?)|open\\s+calls?|calls?\\s+for\\s+proposals|cascade\\s+funding)(?=$|[^\\p{L}])`,
+  "u",
+);
+const CALL_RE = /(?:^|[^\p{L}])calls?(?=$|[^\p{L}])/u;
+/** Words that make a named funder ("NWO", "Horizon Europe") a question about its calls, not about the body. */
+const FUNDING_CONTEXT_RE = /(?:^|[^\p{L}])(?:calls?|financier\p{L}*|aanvra\p{L}*|deadline\p{L}*|sluit\p{L}*|sluitingsdatum\p{L}*|open|opent|openen|beurs\p{L}*|ronde\p{L}*|oproep\p{L}*|wanneer)(?=$|[^\p{L}])/u;
+/**
+ * A regeling named with a step of applying for it ("Regeling mbo verduurzamen
+ * deadline", "Wanneer kan ik de regeling ... aanvragen?"): a subsidy scheme,
+ * although the question does not say "subsidie". Not its text, an amendment or
+ * its entry into force, which the publication routes answer, nor a
+ * gemeenschappelijke regeling (a body of municipalities).
+ */
+const REGELING_RE = /(?:^|[^\p{L}])regeling(?:en)?(?=$|[^\p{L}])/u;
+const REGELING_APPLY_RE = /(?:^|[^\p{L}])(?:deadline\p{L}*|aanvragen|aanvraagperiode|openstelling\p{L}*|nog\s+open|sluit\p{L}*|wanneer\s+(?:kan|kunnen)\s+(?:ik|je|we|wij|men))(?=$|[^\p{L}])/u;
+const REGELING_LEGAL_RE = /(?:^|[^\p{L}])(?:tekst\p{L}*|wijzig\p{L}*|in\s+werking|inwerkingtreding|toelichting|ingetrokken|intrekking|vervallen|vervalt|gemeenschappelijke\s+regeling)(?=$|[^\p{L}])/u;
+
+/** NWO, its units and its grants. */
+const NWO_RE = /(?:^|[^\p{L}])(?:nwo|regieorgaan\s+sia|nationaal\s+regieorgaan\s+onderwijsonderzoek|nro|open\s+science\s+nl|veni|vidi|vici)(?=$|[^\p{L}])/u;
+const ZONMW_RE = /(?:^|[^\p{L}])zonmw(?=$|[^\p{L}])/u;
+/** Research funding without a funder named. */
+const RESEARCH_FUNDING_RE = /(?:^|[^\p{L}])(?:onderzoeks(?:financiering|subsidie\p{L}*|call\p{L}*|geld|ronde\p{L}*)|(?:wetenschappelijk|medisch|praktijkgericht|fundamenteel|toegepast)e?\s+onderzoek|onderzoekers?)(?=$|[^\p{L}])/u;
+/** A topic that NWO or ZonMw funds next to RVO: care, health, research. */
+const RESEARCH_TOPIC_RE = /(?:^|[^\p{L}])(?:zorg\p{L}*|gezondheid\p{L}*|welzijn|preventie|ziekte\p{L}*|dementie|kanker|ggz|onderzoek\p{L}*|wetenschap\p{L}*)(?=$|[^\p{L}])/u;
+/** RVO and its schemes by name. */
+const RVO_RE = /(?:^|[^\p{L}])(?:rvo|rijksdienst\s+voor\s+ondernemend\s+nederland|dumava|isde|sde\+*|wbso|dei\+?|dhi|bmkb|innovatiekrediet|borgstelling\p{L}*)(?=$|[^\p{L}])/u;
+/**
+ * EU funds run in the Netherlands (agricultural policy, structural funds): not
+ * in the EU portal. RVO runs the agricultural ones, so "landbouwsubsidies" (EU or
+ * not) are among them.
+ */
+const EU_SHARED_FUND_RE = /(?:^|[^\p{L}])(?:glb|gemeenschappelijk\s+landbouwbeleid|eco-regeling|efro|esf\+|interreg|pop3\+?|elfpo|efmzv|jtf|landbouwsubsidies?)(?=$|[^\p{L}])/u;
+
+/** An EU funding signal in the lowercased question. */
+const EU_FUNDING_SIGNAL_RE = /(?:^|[^\p{L}])(?:eu|europese?|europees|europa|brussel|horizon\s+(?:europe|2020)|eic|erc|msca|marie\s+(?:sk[łl]odowska-)?curie|digital\s+europe|creative\s+europe|cerv|eu4health|erasmus\+|erasmusplus|cef|connecting\s+europe(?:\s+facility)?|innovation\s+fund|european\s+defence\s+fund|europees\s+defensiefonds|cascade\s+funding|calls?\s+for\s+proposals|funding\s*(?:&|and|en)\s*tenders|life-?(?:programma|subsidies?))(?=$|[^\p{L}+])|(?:^|[^\p{L}])eu-\p{L}+/u;
+/** The same in the question as written: "Horizon" and "LIFE" are EU programmes only with their capitals. */
+const EU_FUNDING_SIGNAL_CASED_RE = /(?:^|[^\p{L}])(?:Horizon|LIFE)(?=$|[^\p{L}])/u;
+/** An EU funding programme or instrument by name: with a funding word ("Wanneer sluit de EIC Accelerator?") a question about its calls. */
+const EU_INSTRUMENT_RE = /(?:^|[^\p{L}])(?:horizon|eic|erc|msca|marie\s+(?:sk[łl]odowska-)?curie|life|digital\s+europe|creative\s+europe|cerv|eu4health|erasmus\+|erasmusplus|cef|connecting\s+europe|innovation\s+fund|european\s+defence\s+fund)(?=$|[^\p{L}+])/u;
+/** "Financiering voor mkb-innovatie": financing for a target group or innovation, not the financing of a sector. */
+const FINANCIERING_RE = /(?:^|[^\p{L}])financiering(?:en)?(?=$|[^\p{L}])/u;
+const FINANCIERING_FOR_RE = /(?:^|[^\p{L}])(?:mkb\p{L}*|zzp\p{L}*|startups?|start-ups?|ondernemers?|innovatie\p{L}*|\p{L}+-innovatie)(?=$|[^\p{L}])/u;
+/**
+ * EU programmes by name, as eu_funding_search takes them, with the words that name
+ * them (left out of the keywords). Matched on the question as written: case does
+ * not matter, except that a bare "LIFE" is the programme only in capitals ("EU
+ * subsidie life sciences" is about life sciences); "life-programma",
+ * "life-subsidie" and "Life programme" are it in any case.
+ */
+const EU_PROGRAMMES: Array<[RegExp, string, string[]]> = [
+  [/(?:^|[^\p{L}])horizon(?:\s+europe)?(?=$|[^\p{L}])/iu, "HORIZON", ["horizon", "europe", "horizon europe"]],
+  [/(?:^|[^\p{L}])(?:LIFE(?:-?programma|-?subsidie)?|[Ll]ife-?(?:programma|subsidie)|[Ll]ife\s+programme)(?=$|[^\p{L}])/u, "LIFE", ["life", "life-programma", "life-subsidie", "programma", "programme"]],
+  [/(?:^|[^\p{L}])digital\s+europe(?=$|[^\p{L}])/iu, "DIGITAL", ["digital", "europe", "digital europe"]],
+  [/(?:^|[^\p{L}])creative\s+europe(?=$|[^\p{L}])/iu, "CREA", ["creative", "europe", "creative europe"]],
+  [/(?:^|[^\p{L}])cerv(?=$|[^\p{L}])/iu, "CERV", ["cerv"]],
+  [/(?:^|[^\p{L}])eu4health(?=$|[^\p{L}])/iu, "EU4H", ["eu4health"]],
+  [/(?:^|[^\p{L}])(?:erasmus\+|erasmusplus)/iu, "ERASMUS", ["erasmus", "erasmus+", "erasmusplus"]],
+  [/(?:^|[^\p{L}])(?:cef|connecting\s+europe(?:\s+facility)?)(?=$|[^\p{L}])/iu, "CEF", ["cef", "connecting", "europe", "facility", "connecting europe", "connecting europe facility"]],
+  [/(?:^|[^\p{L}])innovation\s+fund(?=$|[^\p{L}])/iu, "INNOVFUND", ["innovation fund", "innovation", "fund"]],
+  [/(?:^|[^\p{L}])(?:european\s+defence\s+fund|europees\s+defensiefonds)(?=$|[^\p{L}])/iu, "EDF", ["european defence fund", "europees defensiefonds", "european", "defence", "fund", "defensiefonds"]],
+];
+/**
+ * EU joint undertakings: partnerships whose calls are in the EU portal under the
+ * programme that funds them, with "JU" and their name in the topic identifier
+ * (DIGITAL-JU-CHIPS-2026-..., HORIZON-JU-IHI-..., HORIZON-JTI-CLEANH2-...). The
+ * portal has no programme code for them but matches those words, which are
+ * searched instead of the name: "chips JU" finds the Chips JU's calls, "Chips
+ * Joint Undertaking" none of them and "chips" or "semiconductors" others too.
+ * Matched with "JU", "joint undertaking" or "partnership" after the name, which a
+ * name that is also a topic or another body ("chips", "clean hydrogen", SNS, CBE)
+ * needs. The KDT JU is the Chips JU since 2023. Without a name: all JU calls.
+ */
+const euJu = (name: string, suffix: "" | "?") =>
+  new RegExp(`(?:^|[^\\p{L}])(?:${name})(?:[\\s-]+(?:ju|joint\\s+undertaking|partnership))${suffix}(?=$|[^\\p{L}\\d])`, "iu");
+const EU_JOINT_UNDERTAKINGS: Array<[RegExp, string]> = [
+  [euJu("chips", ""), "chips JU"],
+  [euJu("key\\s+digital\\s+technologies|kdt", "?"), "chips JU"],
+  [euJu("clean\\s+aviation", "?"), "clean aviation JU"],
+  [euJu("clean\\s+hydrogen", ""), "CLEANH2"],
+  [euJu("cleanh2", "?"), "CLEANH2"],
+  [euJu("innovative\\s+health\\s+initiative|ihi", "?"), "IHI JU"],
+  [euJu("eurohpc", "?"), "EuroHPC JU"],
+  [euJu("sns", ""), "SNS JU"],
+  [euJu("smart\\s+networks\\s+and\\s+services", "?"), "SNS JU"],
+  [euJu("europe['’]?s\\s+rail", "?"), "ER JU"],
+  [euJu("(?:global\\s+health\\s+)?edctp3?", "?"), "EDCTP3"],
+  [euJu("cbe", ""), "CBE JU"],
+  [euJu("circular\\s+bio-?based\\s+europe", "?"), "CBE JU"],
+];
+/** "JU" or "joint undertaking" without a name. */
+const EU_JU_WORDS_RE = /(?:^|[^\p{L}])(?:ju|joint\s+undertakings?)(?=$|[^\p{L}])/iu;
+/** A topic identifier of the EU portal ("HORIZON-CL5-2027-02-D3-01") or a EuropeAid reference, as written. */
+const EU_TOPIC_ID_RE = /(?:^|[^\p{L}\d-])((?:HORIZON|LIFE|DIGITAL|CEF|CREA|CERV|EU4H|ERASMUS|EDF|SMP|I3|INNOVFUND|EUAF|JUST|AMIF|BMVI|ISF|RFCS|EMFAF|PPPA|SOCPL|UCPM|ESC|EUBA|RENEWFM|IMREG|AGRIP|EURATOM|ESF|JTM|HUMA|ERC|EIC|MSCA|H2020)(?:-[A-Za-z0-9]+){2,})(?![\p{L}\d-])|(?:^|[^\p{L}])(EuropeAid\/\d+(?:\/[A-Z0-9]+)*)/u;
+
+/**
+ * Another source the question asks for: a decentral funder (whose regelingen
+ * are in CVDR and the decentral journals, and whose council papers are in ORI),
+ * the legal text, parliament or the Rijk's policy, rulings, the budget (also
+ * "SDE++ budget 2026"), statistics or the recipients ("Welke projecten kregen
+ * SDE++ subsidie?"), tenders, research reports or news.
+ */
+const SUBSIDIE_OTHER_ROUTE_RE = new RegExp(
+  "(?:^|[^\\p{L}])(?:" +
+    "gemeente\\p{L}*|gemeentelijke?|provincie\\p{L}*|provinciale?|waterschap\\p{L}*|hoogheemraadschap\\p{L}*|wethouders?|burgemeesters?|raadsle(?:den|d)|raadsvoorstel\\p{L}*" +
+    "|staatsblad|staatscourant|stcrt|tractatenblad|gemeenteblad|gmb|provinciaal\\s+blad|waterschapsblad|bekendmaking\\p{L}*|offici[eë]le?\\s+publicatie\\p{L}*|officieel\\s+besluit|\\p{L}*verordening\\p{L}*|apv" +
+    "|wet|wetten|wetgeving|wettekst\\p{L}*|\\p{L}+wet|awb|artikel\\p{L}*|juridisch\\p{L}*|grondslag|rechtsgrond" +
+    "|kamervra\\p{L}*|kamerbrie\\p{L}*|kamerstuk\\p{L}*|kamerleden|kamerlid|moties?|amendement\\p{L}*|\\p{L}*debat\\p{L}*|tweede\\s+kamer|eerste\\s+kamer|wetsvoorstel\\p{L}*|parlement\\p{L}*" +
+    "|minister\\p{L}*|staatssecretaris\\p{L}*|kabinet|regering|rijksoverheid|[\\p{L}-]*beleid\\p{L}*|\\p{L}*strategie\\p{L}*|\\p{L}*visie" +
+    "|uitspra(?:ak|ken)|rechtspraak|rechter\\p{L}*|rechtbank\\p{L}*|jurisprudentie|vonnis\\p{L}*|arrest\\p{L}*|bezwaar\\p{L}*|beroep|terugvorder\\p{L}*|\\p{L}*fraude\\p{L}*|handhaving|boetes?|sancties?" +
+    "|begroting\\p{L}*|rijksbegroting|uitgaven|begrotingsartikel\\p{L}*|besteed\\p{L}*|gaat\\s+naar|ging\\s+naar|kost|kostte|kostten|budget\\s+(?:19|20)\\d\\d" +
+    "|cbs|statistiek\\p{L}*|cijfers|dataset\\p{L}*|databestand\\p{L}*|open\\s+data|uitgekeerd|verstrekt|toegekend|ontvangers?|ontving(?:en)?|uitbetaald|kregen|kreeg" +
+    // "Hoeveel subsidie krijgt de publieke omroep?", "Hoeveel bedrijven gebruiken de WBSO?": what a named
+    // recipient gets, or a count; "Hoeveel subsidie krijg ik ..." asks what can be applied for and stays.
+    "|hoeveel\\s+(?:\\p{L}+\\s+){0,2}(?:krijgt|ontvangt)\\s+(?:de|het)|hoeveel\\s+(?:bedrijven|projecten|aanvragen|aanvragers|organisaties|instellingen|ondernemers|ondernemingen|huishoudens|woningen|mensen|personen)" +
+    "|aanbested\\p{L}*|tenderned|gunning\\p{L}*|gegund|inkoop|marktconsultatie" +
+    "|\\p{L}*rekenkamer\\p{L}*|evaluatie\\p{L}*|geëvalueerd|rapport\\p{L}*|nieuws|persbericht\\p{L}*|algoritme\\p{L}*" +
+    ")(?=$|[^\\p{L}])",
+  "u",
+);
+
+/** The provinces by name: a subsidy question about one is about its regelingen. */
+const SUBSIDIE_PROVINCES = /(?:^|[^\p{L}])(?:groningen|friesland|fryslân|drenthe|overijssel|flevoland|gelderland|utrecht|noord-holland|zuid-holland|zeeland|noord-brabant|brabant|limburg)(?=$|[^\p{L}])/u;
+
+/**
+ * Countries and areas outside the European Netherlands that RVO has regelingen
+ * for (its 'land' field): "in Ghana" asks RVO's international schemes, while
+ * another place ("in Utrecht") names a decentral funder.
+ */
+const SUBSIDIE_COUNTRIES = new Set([
+  "afghanistan", "albanië", "algerije", "angola", "argentinië", "armenië", "aruba", "australië", "bangladesh", "belgië", "benin", "bolivia", "bonaire", "bosnië", "brazilië", "bulgarije",
+  "burkina faso", "burundi", "cambodja", "canada", "caribisch nederland", "chili", "china", "colombia", "costa rica", "curaçao", "denemarken", "duitsland", "egypte", "ethiopië", "filipijnen",
+  "frankrijk", "georgië", "ghana", "griekenland", "guatemala", "india", "indonesië", "irak", "iran", "israël", "italië", "ivoorkust", "japan", "jemen", "jordanië", "kaapverdië", "kameroen",
+  "kenia", "kosovo", "kroatië", "libanon", "libië", "mali", "marokko", "mexico", "moldavië", "mozambique", "myanmar", "namibië", "nepal", "nicaragua", "niger", "nigeria", "noord-macedonië",
+  "noorwegen", "oekraïne", "oeganda", "oostenrijk", "pakistan", "palestijnse gebieden", "peru", "polen", "portugal", "roemenië", "rwanda", "saba", "saudi-arabië", "senegal", "servië",
+  "sierra leone", "singapore", "sint eustatius", "sint maarten", "somalië", "spanje", "sri lanka", "sudan", "suriname", "syrië", "tanzania", "thailand", "tsjechië", "tunesië", "turkije",
+  "verenigde staten", "verenigd koninkrijk", "vietnam", "zambia", "zimbabwe", "zuid-afrika", "zuid-korea", "zuid-soedan", "zweden", "zwitserland",
+]);
+/** Places that are no decentral funder: the country and Europe. */
+const SUBSIDIE_NATIONAL_PLACES = new Set(["nederland", "europa", "eu", "brussel"]);
+
+const SUBSIDIE_OPEN_RE = /(?:^|[^\p{L}])(?:open|opent|openstaan|openstaat|nu|momenteel|actueel|actuele|lopend\p{L}*|aanvragen|aanvraagperiode|deadline\p{L}*|sluit\p{L}*|sluitingsdatum\p{L}*|nog\s+(?:open|aan\s+te\s+vragen|budget|beschikbaar)|kan\s+ik|kunnen\s+we|wanneer\s+kan)(?=$|[^\p{L}])/u;
+const SUBSIDIE_SOON_RE = /(?:^|[^\p{L}])(?:binnenkort|verwacht\p{L}*|komend\p{L}*|aangekondigd\p{L}*|forthcoming)(?=$|[^\p{L}])/u;
+const SUBSIDIE_DEADLINE_RE = /(?:^|[^\p{L}])(?:deadline\p{L}*|sluit\p{L}*|sluitingsdatum\p{L}*|wanneer|uiterlijk|indieningsdatum)(?=$|[^\p{L}])/u;
+
+const SUBSIDIE_MONTHS = ["januari", "februari", "maart", "april", "mei", "juni", "juli", "augustus", "september", "oktober", "november", "december"];
+/** "in november", "november 2027", "voor december": a month of a deadline question (the period parser reads no bare month). */
+const SUBSIDIE_MONTH_RE = new RegExp(`(?:^|[^\\p{L}])(?:(in|voor|vóór|eind|begin)\\s+)?(${SUBSIDIE_MONTHS.join("|")})(?:\\s+((?:19|20)\\d\\d))?(?=$|[^\\p{L}\\d])`, "u");
+const SUBSIDIE_RELATIVE_MONTH_RE = /(?:^|[^\p{L}])(deze|volgende|komende)\s+maand(?=$|[^\p{L}])/u;
+
+/**
+ * The days of the month a deadline question names, from `today` (YYYY-MM-DD): a
+ * month without a year is its next occurrence; "voor <maand>" is today up to the
+ * end of the month before it.
+ */
+function subsidieMonthWindow(q: string, today: string): { from: string; to: string; phrase: string } | undefined {
+  const [y, m] = today.split("-").map(Number);
+  if (!y || !m) return undefined;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const lastDay = (year: number, month: number) => new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const rel = SUBSIDIE_RELATIVE_MONTH_RE.exec(q);
+  if (rel) {
+    const month = rel[1] === "deze" ? m : (m % 12) + 1;
+    const year = rel[1] !== "deze" && m === 12 ? y + 1 : y;
+    return { from: rel[1] === "deze" ? today : `${year}-${pad(month)}-01`, to: `${year}-${pad(month)}-${pad(lastDay(year, month))}`, phrase: rel[0].trim() };
+  }
+  const hit = SUBSIDIE_MONTH_RE.exec(q);
+  if (!hit) return undefined;
+  const month = SUBSIDIE_MONTHS.indexOf(hit[2]) + 1;
+  const year = hit[3] ? Number(hit[3]) : month < m ? y + 1 : y;
+  if (hit[1] === "voor" || hit[1] === "vóór") {
+    const endMonth = month === 1 ? 12 : month - 1;
+    const endYear = month === 1 ? year - 1 : year;
+    const to = `${endYear}-${pad(endMonth)}-${pad(lastDay(endYear, endMonth))}`;
+    return to >= today ? { from: today, to, phrase: hit[0].trim() } : undefined;
+  }
+  return { from: `${year}-${pad(month)}-01`, to: `${year}-${pad(month)}-${pad(lastDay(year, month))}`, phrase: hit[0].trim() };
+}
+
+const SUBSIDIE_DOELGROEPEN: Array<[RegExp, string]> = [
+  [/(?:^|[^\p{L}])(?:mkb|mkb'?ers?|zzp\p{L}*|kleine?\s+bedrijven|startups?|start-ups?)(?=$|[^\p{L}])/u, "mkb"],
+  [/(?:^|[^\p{L}])(?:agrari\p{L}*|boeren|boer|veehouder\p{L}*|akkerbouwer\p{L}*|tuinder\p{L}*)(?=$|[^\p{L}])/u, "agrarisch"],
+  [/(?:^|[^\p{L}])(?:kennisinstelling\p{L}*|universiteit\p{L}*|hogescholen|hogeschool)(?=$|[^\p{L}])/u, "kennisinstelling"],
+];
+
+/** Words that pick the route, the funder, the status or the target group: no topic. */
+const SUBSIDIE_NOT_A_TOPIC = new Set([
+  "regeling", "regelingen", "financiering", "financieringen", "financieringsregeling", "financieringsregelingen", "financieringsmogelijkheden", "financieringsmogelijkheid",
+  "financieringsronde", "financieringsrondes", "onderzoeksfinanciering", "onderzoeksgeld", "rvo", "nwo", "zonmw", "nro", "eu", "europese", "europees", "europa", "brussel",
+  "open", "opent", "openen", "openstaan", "openstaat", "staan", "staat", "nu", "momenteel", "actueel", "actuele", "lopend", "lopende", "call", "calls", "oproep", "oproepen",
+  "deadline", "deadlines", "sluit", "sluiten", "sluitingsdatum", "wanneer", "uiterlijk", "aanvragen", "aanvraag", "aanvraagperiode", "openstelling", "binnenkort", "verwacht", "verwachte",
+  "komend", "komende", "aangekondigd", "krijgen", "krijg", "kan", "kunnen", "ik", "we", "mijn", "ons", "onze", "mogelijkheden", "mogelijkheid", "beschikbaar", "nog", "budget",
+  "hoeveel", "geld", "mkb", "mkb'er", "mkb'ers", "zzp", "zzp'er", "zzp'ers", "startup", "startups", "start-up", "start-ups", "ondernemer", "ondernemers", "bedrijf", "bedrijven",
+  "agrarisch", "agrarische", "agrariër", "agrariërs", "boer", "boeren", "kennisinstelling", "kennisinstellingen", "universiteit", "universiteiten", "hogeschool", "hogescholen",
+  "fonds", "fondsen", "beurs", "beurzen", "programma", "programma's", "ronde", "rondes", "nederland", "nederlandse", "landelijke", "landelijk", "nationale", "zaken", "doen",
+  "funding", "grant", "grants", "for", "proposals", "cascade", "tenders", "onderzoekers", "onderzoeker", "kosten", "kost", "maand", "maanden", "volgende", "eind", "begin",
+  // Verbs and nouns of the question frame that the keyword extractor keeps ("Hoe zit het met de subsidie
+  // voor de warmtepomp?", "Geeft het Rijk subsidie voor zonnepanelen?"): as a required search word
+  // they made RVO, NWO and ZonMw find nothing.
+  "zit", "zitten", "kom", "kregen", "kreeg", "rijk", "overheid", "regelen", "geregeld", "bereikt", "bereiken", "terecht",
+  "opstellen", "aanschaffen", "aanschaf", "kopen", "installeren", "plaatsen", "aanleggen", "betalen",
+  "particulier", "particulieren", "huiseigenaar", "huiseigenaren", "woningeigenaar", "woningeigenaren",
+]);
+
+/**
+ * Dutch topic words in English for the EU portal, whose index is English
+ * ("waterstof" finds nothing there, "hydrogen" does). A fixed phrase becomes a
+ * quoted phrase. Words that are the same in English map to themselves.
+ */
+const EU_TOPIC_TRANSLATIONS: Record<string, string> = {
+  "cultureel erfgoed": '"cultural heritage"', "kunstmatige intelligentie": '"artificial intelligence"', "circulaire economie": '"circular economy"',
+  "duurzame energie": "renewable energy", "hernieuwbare energie": "renewable energy", "mentale gezondheid": '"mental health"', "openbaar vervoer": '"public transport"',
+  "slimme steden": '"smart cities"', "zorginnovatie": "healthcare innovation", "klimaatadaptatie": '"climate adaptation"', "natuurherstel": '"nature restoration"',
+  "zonne-energie": "solar", "zonnepanelen": "solar", "windenergie": '"wind energy"', "energieopslag": '"energy storage"', "energietransitie": '"energy transition"',
+  "waterstof": "hydrogen", "batterij": "batteries", "batterijen": "batteries", "klimaat": "climate", "energie": "energy", "landbouw": "agriculture", "voedsel": "food",
+  "water": "water", "zorg": "health", "gezondheid": "health", "gezondheidszorg": "healthcare", "kanker": "cancer", "dementie": "dementia", "vaccins": "vaccines",
+  "geneesmiddelen": "medicines", "medicijnen": "medicines", "infectieziekten": '"infectious diseases"', "antibioticaresistentie": '"antimicrobial resistance"', "ggz": '"mental health"',
+  "vergrijzing": "ageing", "onderwijs": "education", "scholen": "schools", "school": "school", "studenten": "students", "leraren": "teachers", "docenten": "teachers",
+  "uitwisseling": "exchange", "cultuur": "culture", "erfgoed": "heritage", "media": "media", "digitalisering": "digital", "cybersecurity": "cybersecurity",
+  "cyberveiligheid": "cybersecurity", "ruimtevaart": "space", "defensie": "defence", "veiligheid": "security", "mobiliteit": "mobility", "transport": "transport",
+  "luchtvaart": "aviation", "scheepvaart": "shipping", "maritiem": "maritime", "maritieme": "maritime", "oceaan": "ocean", "oceanen": "ocean", "zee": "sea", "visserij": "fisheries",
+  "biodiversiteit": "biodiversity", "natuur": "nature", "bodem": "soil", "stikstof": "nitrogen", "recycling": "recycling", "plastic": "plastic", "plastics": "plastics", "afval": "waste",
+  "grondstoffen": '"raw materials"', "materialen": "materials", "chips": "semiconductors", "halfgeleiders": "semiconductors", "quantum": "quantum", "robotica": "robotics",
+  "fotonica": "photonics", "migratie": "migration", "integratie": "integration", "gelijkheid": "equality", "democratie": "democracy", "jeugd": "youth", "jongeren": "youth",
+  "sport": "sport", "innovatie": "innovation", "onderzoek": "research", "bouw": "construction", "gebouwen": "buildings", "renovatie": "renovation", "steden": "cities",
+  "stedelijke": "urban", "warmte": "heat", "geothermie": "geothermal", "aardwarmte": "geothermal", "kernenergie": "nuclear", "kernfusie": "fusion", "ai": "AI", "data": "data",
+  "blockchain": "blockchain", "telecom": "telecommunications", "toerisme": "tourism", "armoede": "poverty", "verduurzaming": "sustainability", "duurzaamheid": "sustainability",
+  "isolatie": "insulation", "emissies": "emissions", "co2": "CO2", "methaan": "methane", "bossen": "forests", "bos": "forest", "drinkwater": '"drinking water"', "voeding": "nutrition",
+  "eiwitten": "proteins", "biotechnologie": "biotechnology", "nanotechnologie": "nanotechnology", "elektrificatie": "electrification", "laadinfrastructuur": '"charging infrastructure"',
+  "elektrische": "electric", "voertuigen": "vehicles", "fietsen": "cycling", "creatieve": "creative", "film": "film", "muziek": "music", "musea": "museums",
+  "bibliotheken": "libraries", "eic": "EIC", "erc": "ERC", "msca": "MSCA", "accelerator": "Accelerator", "pathfinder": "Pathfinder", "journalistiek": "journalism", "rechtsstaat": '"rule of law"', "inclusie": "inclusion", "eilanden": "islands",
+};
+
+/** The Dutch topic words in English, a two-word phrase first. */
+function euTopic(words: string[]): { query: string; translated: Array<[string, string]>; untranslated: string[] } {
+  const out: string[] = [];
+  const translated: Array<[string, string]> = [];
+  const untranslated: string[] = [];
+  for (let i = 0; i < words.length; i++) {
+    const pair = i + 1 < words.length ? `${words[i]} ${words[i + 1]}` : undefined;
+    const key = pair && EU_TOPIC_TRANSLATIONS[pair] ? pair : words[i];
+    if (key === pair) i += 1;
+    const en = EU_TOPIC_TRANSLATIONS[key];
+    if (en) {
+      if (en.replace(/"/g, "").toLowerCase() !== key) translated.push([key, en]);
+      out.push(en);
+    } else {
+      untranslated.push(key);
+      out.push(key);
+    }
+  }
+  return { query: [...new Set(out)].join(" "), translated, untranslated };
+}
+
+/** A linking s after these endings: "onderzoekssubsidie" → "onderzoek", "verduurzamingssubsidie" → "verduurzaming". */
+const LINKING_S_RE = /(?:ing|heid|schap|teit|oek|ijf|nis)s$/u;
+
+/**
+ * A word with "subsidie" as its topic part: what a compound names before it
+ * ("isolatiesubsidies" → "isolatie", "landbouwsubsidie" → "landbouw"); "" for
+ * "subsidies" or "subsidieregeling" alone, and for a compound that is not about
+ * getting a subsidy ("subsidieplafond").
+ */
+function subsidieCompoundTopic(word: string): string {
+  const m = SUBSIDIE_COMPOUND_RE.exec(word);
+  if (!m) return "";
+  return LINKING_S_RE.test(m[1]) ? m[1].slice(0, -1) : m[1];
+}
+
+/**
+ * The topic words of a subsidy question: a hyphenated word without its route part
+ * ("dumava-regeling" → "dumava"), a subsidie compound without the subsidie
+ * ("isolatiesubsidies" → "isolatie").
+ */
+function subsidieTopicWords(text: string, extra: ReadonlySet<string>): string[] {
+  const notTopic = (w: string) => SUBSIDIE_NOT_A_TOPIC.has(w) || extra.has(w) || SUBSIDIE_COUNTRIES.has(w) || SUBSIDIE_MONTHS.includes(w);
+  const words: string[] = [];
+  for (const term of extractKeywords(text)) {
+    const raw = term.includes(" ") ? [term] : term.split("-").filter(Boolean);
+    const parts = raw.map((p) => (/subsidie/.test(p) ? subsidieCompoundTopic(p) : p));
+    // Only a word with a route or subsidie part is taken apart: "zonne-energie" stays whole.
+    const split = notTopic(term) || raw.some((p, i) => p !== parts[i] || notTopic(p));
+    const kept = split ? parts.filter((p) => p && !notTopic(p)) : [term];
+    // "SDE++", "DEI+": the plus is part of the name, not of a search word (the sites' searches drop it or read it as syntax).
+    for (const word of kept.map((w) => w.replace(/\++$/, ""))) if (word && !/^\d+$/.test(word)) words.push(word);
+  }
+  return [...new Set(words)];
+}
+
+/**
+ * The words of a subsidy question's topic to search once more when all of them
+ * together found nothing: a scheme or grant named ("dumava", "isde", "veni"), else
+ * the last word, which in Dutch is the head of the phrase ("cultureel erfgoed" →
+ * "erfgoed", "elektrische auto" → "auto"). Undefined for a single word.
+ */
+export function narrowSubsidieIntent(intent: SubsidieIntent): SubsidieIntent | undefined {
+  if (intent.euId) return undefined;
+  const words = intent.query.split(" ").filter(Boolean);
+  if (words.length < 2) return undefined;
+  const scheme = words.find((w) => RVO_RE.test(w) || NWO_RE.test(w));
+  const word = scheme ?? words[words.length - 1];
+  const en = euTopic([word]);
+  return { ...intent, query: word, euQuery: [intent.euJointUndertaking, en.query].filter(Boolean).join(" "), translated: en.translated, untranslated: en.untranslated };
+}
+
+/**
+ * A question about which subsidies, funding schemes or calls exist or are open
+ * for a topic: RVO's regelingen, NWO and ZonMw calls, or calls in the EU
+ * Funding & Tenders Portal ("Welke subsidies zijn er voor waterstof?", "Open
+ * EU-calls voor zorginnovatie", "NWO call kunstmatige intelligentie
+ * deadline"). Precision first: never for a decentral funder (a gemeente,
+ * provincie or waterschap, or a place in the Netherlands), whose regelingen
+ * are in CVDR and the decentral journals, nor for the legal text, parliament,
+ * policy, rulings, the budget, statistics or recipients, tenders, reports or
+ * news, which other routes answer; nor without a topic or anything else to
+ * select on ("Welke subsidies zijn er?", "Wat is een subsidieplafond?").
+ * `today` (YYYY-MM-DD) dates a month in a deadline question ("sluiten in
+ * november"), which the period parser does not read.
+ */
+export function detectSubsidieIntent(question: string, today?: string): SubsidieIntent | undefined {
+  const text = String(question ?? "").replace(/\s+/g, " ").trim();
+  if (!text || text.length > SUBSIDIE_QUESTION_MAX_CHARS) return undefined;
+  const q = text.toLowerCase();
+  const idMatch = EU_TOPIC_ID_RE.exec(text);
+  const euId = idMatch ? (idMatch[1] ?? idMatch[2]) : undefined;
+  const rest = euId ? text.replace(euId, " ") : text;
+  const nwo = NWO_RE.test(q);
+  const zonmw = ZONMW_RE.test(q);
+  const sharedFund = EU_SHARED_FUND_RE.test(q);
+  const doelgroep = SUBSIDIE_DOELGROEPEN.find(([re]) => re.test(q))?.[1];
+  // A joint undertaking, or "JU" alone: its calls are in the EU portal ("Welke Chips JU calls staan open?").
+  const juHit = EU_JOINT_UNDERTAKINGS.find(([re]) => re.test(rest));
+  const jointUndertaking = juHit?.[1] ?? (EU_JU_WORDS_RE.test(rest) ? "JU" : undefined);
+  const euSignal = !sharedFund && (EU_FUNDING_SIGNAL_RE.test(q) || EU_FUNDING_SIGNAL_CASED_RE.test(text) || Boolean(jointUndertaking));
+  const programme = euSignal ? EU_PROGRAMMES.find(([re]) => re.test(text)) : undefined;
+  // EU money for farmers without a programme named is the GLB, which RVO runs ("Europese subsidies voor boeren").
+  const farmEu = euSignal && !euId && !programme && !jointUndertaking && doelgroep === "agrarisch";
+  const eu = euSignal && !farmEu;
+  const funding =
+    Boolean(euId) ||
+    SUBSIDIE_WORD_RE.test(q) ||
+    (CALL_RE.test(q) && (eu || nwo || zonmw || RESEARCH_FUNDING_RE.test(q) || SUBSIDIE_OPEN_RE.test(q) || SUBSIDIE_DEADLINE_RE.test(q))) ||
+    ((nwo || zonmw || (eu && (EU_INSTRUMENT_RE.test(q) || Boolean(jointUndertaking)))) && FUNDING_CONTEXT_RE.test(q)) ||
+    (FINANCIERING_RE.test(q) && FINANCIERING_FOR_RE.test(q));
+  // A regeling named with a step of applying for it, not its legal text ("Regeling mbo verduurzamen deadline").
+  const regeling = !funding && REGELING_RE.test(q) && REGELING_APPLY_RE.test(q) && !REGELING_LEGAL_RE.test(q);
+  if (!(funding || regeling) || SUBSIDIE_OTHER_ROUTE_RE.test(q) || SUBSIDIE_PROVINCES.test(q)) return undefined;
+
+  // A place in the Netherlands names a decentral funder; a country abroad RVO's international schemes.
+  let land: string | undefined;
+  const place = extractPlaceName(text);
+  if (place && !eu) {
+    const key = place.toLowerCase();
+    if (SUBSIDIE_COUNTRIES.has(key)) land = place;
+    else if (!SUBSIDIE_NATIONAL_PLACES.has(key)) return undefined;
+  }
+
+  const research = RESEARCH_FUNDING_RE.test(q) || (CALL_RE.test(q) && !euSignal);
+  const rvo = RVO_RE.test(q) || sharedFund || farmEu;
+  const sources: SubsidieSource[] = [];
+  if (euId || eu) sources.push("eu_funding");
+  if (nwo || zonmw || research) sources.push("nl_onderzoekscalls");
+  if (rvo || !sources.length) sources.push("rvo_subsidies");
+  // A care or research topic without a funder named: NWO and ZonMw next to RVO.
+  if (!euId && !eu && !nwo && !zonmw && !research && !rvo && RESEARCH_TOPIC_RE.test(q)) sources.push("nl_onderzoekscalls");
+
+  // A joint undertaking is searched by the words of its identifiers, not by its name.
+  const topicText = jointUndertaking ? (juHit ? rest.replace(juHit[0], " ") : rest).replace(new RegExp(EU_JU_WORDS_RE, "giu"), " ") : rest;
+  const words = subsidieTopicWords(topicText, new Set(programme?.[2] ?? []));
+  // Only a regeling with a name to search ("Wanneer kan ik de regeling aanvragen?" names none).
+  if (regeling && !words.length) return undefined;
+  // EU money for farmers is the Gemeenschappelijk Landbouwbeleid: without another topic, that is it.
+  const glbAsTopic = farmEu && !words.length;
+  if (glbAsTopic) words.push("glb");
+  const openOnly = SUBSIDIE_OPEN_RE.test(q);
+  const soonOnly = SUBSIDIE_SOON_RE.test(q);
+  const deadline = SUBSIDIE_DEADLINE_RE.test(q);
+  // No topic, and no status, target group, country, programme or funder to go on ("Welke subsidies
+  // zijn er?", "Subsidie voor particulieren"): a funder's list would only show what it changed last,
+  // so the other routes answer.
+  if (!words.length && !euId && !programme && !eu && !nwo && !zonmw && !research && !rvo && !doelgroep && !land && !openOnly && !soonOnly && !deadline) {
+    return undefined;
+  }
+  const en = euTopic(words);
+  const ju = eu ? jointUndertaking : undefined;
+  const window = deadline && today ? subsidieMonthWindow(q, today) : undefined;
+  return {
+    sources: [...new Set(sources)],
+    query: words.join(" "),
+    euQuery: [ju, en.query].filter(Boolean).join(" "),
+    translated: en.translated,
+    untranslated: en.untranslated,
+    ...(euId ? { euId } : {}),
+    ...(programme ? { euProgramme: programme[1] } : {}),
+    ...(ju ? { euJointUndertaking: ju } : {}),
+    openOnly,
+    soonOnly,
+    deadline,
+    ...(window ? { deadlineWindow: window } : {}),
+    ...(nwo !== zonmw ? { organisatie: nwo ? ("nwo" as const) : ("zonmw" as const) } : {}),
+    ...(doelgroep ? { doelgroep } : {}),
+    ...(land ? { land } : {}),
+    ...(sharedFund || farmEu ? { euSharedFund: true } : {}),
+    ...(glbAsTopic ? { glbAsTopic: true } : {}),
+  };
+}

@@ -117,6 +117,8 @@ export interface RouteFacts {
   wetArtikel: boolean;
   /** The Algemene Rekenkamer, the SCP or the WODC named with a topic (detectResearchOrgIntent). */
   research: "rekenkamer" | "scp" | "wodc" | undefined;
+  /** Which subsidies or funding calls exist or are open (detectSubsidieIntent): the sources it asks, side by side. */
+  subsidies: string[] | undefined;
   /** What was said in a Tweede Kamer debate (detectDebatIntent). */
   debat: boolean;
   /** The algorithms of a government body (detectAlgoritmeIntent). */
@@ -150,6 +152,7 @@ export type RouteId =
   | "rekenkamer"
   | "scp"
   | "wodc"
+  | "subsidies"
   | "multi"
   | "schoolvakanties"
   | "verkiezingen"
@@ -199,6 +202,9 @@ export const ROUTES: readonly Route[] = [
   { id: "rekenkamer", matches: (f) => f.research === "rekenkamer", sources: one("rekenkamer") },
   { id: "scp", matches: (f) => f.research === "scp", sources: one("scp") },
   { id: "wodc", matches: (f) => f.research === "wodc", sources: one("wodc") },
+  // Subsidies and funding calls (RVO, NWO/ZonMw, the EU portal), side by side as the question names
+  // them; before the term routes their topic words also hit ("woningen", "scholen").
+  { id: "subsidies", matches: (f) => Boolean(f.subsidies?.length), sources: (f) => f.subsidies ?? [] },
   { id: "multi", matches: (f) => f.multi, sources: (f) => f.multiSources },
   { id: "schoolvakanties", matches: (f) => isSchoolHolidayQuestion(f.q), sources: one("rijk") },
   // Specific sources before the broad statistical and parliamentary routes.

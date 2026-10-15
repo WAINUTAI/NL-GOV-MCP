@@ -23,7 +23,7 @@ Technical overview of how NL-GOV-MCP is structured internally.
                                    │
                      ┌─────────────┴─────────────┐
                      │   tools.ts                 │
-                     │   85 tool handlers         │
+                     │   91 tool handlers         │
                      │   Zod schemas + logic      │
                      └───┬────────┬────────┬─────┘
                          │        │        │
@@ -31,7 +31,7 @@ Technical overview of how NL-GOV-MCP is structured internally.
               ▼                   ▼                    ▼
      ┌────────────────┐  ┌────────────────┐  ┌────────────────┐
      │  sources/*.ts   │  │  utils/*.ts     │  │  types.ts      │
-     │  50 connectors  │  │  shared infra   │  │  contracts     │
+     │  53 connectors  │  │  shared infra   │  │  contracts     │
      └───────┬────────┘  └────────────────┘  └────────────────┘
              │
              ▼
@@ -80,12 +80,12 @@ A single tool call flows through these steps:
 |------|------|
 | `src/index.ts` | Entry point. Reads `--sse` / `--streamable-http` flags or `MCP_TRANSPORT` env, starts the matching transport. |
 | `src/server.ts` | Creates `McpServer` with the server `instructions` (`SERVER_INSTRUCTIONS`, sent at `initialize`), calls `registerTools()`, sets up Express routes for HTTP transports, adds `/health` and `/health/sources` endpoints. |
-| `src/tools.ts` | All 85 tool registrations. Each tool has a Zod input schema and an async handler that calls a source, transforms results, and returns via `toMcpToolPayload()`. |
-| `src/router/` | The `nl_gov_ask` router: `nl-gov-ask.ts` holds its registration and handler (called from `registerTools()`), `intents.ts` what it reads from a question (places, EU acts, policy and council questions, debates, Algoritmeregister, DSO documents, ECLIs, law articles, research bodies, population questions), `routes.ts` the route chain: which routes a question takes and in what order, shared by the handler and `dryRun`. |
+| `src/tools.ts` | All 91 tool registrations. Each tool has a Zod input schema and an async handler that calls a source, transforms results, and returns via `toMcpToolPayload()`. |
+| `src/router/` | The `nl_gov_ask` router: `nl-gov-ask.ts` holds its registration and handler (called from `registerTools()`), `intents.ts` what it reads from a question (places, EU acts, policy and council questions, debates, Algoritmeregister, DSO documents, ECLIs, law articles, research bodies, population questions, subsidies and funding calls), `routes.ts` the route chain: which routes a question takes and in what order, shared by the handler and `dryRun`. |
 | `src/types.ts` | Shared TypeScript interfaces: `MCPRecord`, `Provenance`, `MCPToolResponse`, `MCPErrorResponse`, `AppConfig`. |
 | `src/config.ts` | Loads `config/default.json`, merges env var overrides. |
 
-### Sources (50 connectors)
+### Sources (53 connectors)
 
 Each source is a class with one or more async methods. All methods return a normalized shape:
 
@@ -153,12 +153,15 @@ The tool handler in `tools.ts` maps `items` to `MCPRecord[]` and wraps provenanc
 | `lido.ts` | LiDO REST services (XML): public counts + `get-links` list | `lido` |
 | `algoritmeregister.ts` | REST JSON (POST search, keyless) | `algoritmeregister` |
 | `wodc.ts` | DSpace 7 REST (discovery search, items, bitstreams) + PDF text extraction | `wodc` |
+| `rvo-subsidies.ts` | RVO open data REST JSON (whole catalogue, searched in-process) + the page data of the public rvo.nl pages (status, period, budget) | `rvo_subsidies`, `rvo_subsidies_pages` |
+| `nl-onderzoekscalls.ts` | HTML of the call overviews and pages of nwo.nl (and its units) and zonmw.nl | `nwo_calls`, `zonmw_subsidies` |
+| `eu-funding.ts` | EU Funding & Tenders Portal search API (multipart POST, own transport with the http.ts safeguards) | `eu_funding` |
 
 ### Utilities
 
 | File | Purpose |
 |------|---------|
-| `http.ts` | `getJson()`, `getText()`, `postJson()`, `getBinary()` — all HTTP goes through here. Adds timeout (10s default), retry with exponential backoff (2 retries default), cache lookup, circuit breaker check, concurrency slot acquisition. Throws typed `SourceRequestError`. |
+| `http.ts` | `getJson()`, `getText()`, `postJson()`, `getBinary()` — all HTTP goes through here. Adds timeout (10s default), retry with exponential backoff (2 retries default), cache lookup, circuit breaker check, concurrency slot acquisition, and on request a crawl delay per connector (`crawlDelayMs`: the least time between two network requests, as a site's robots.txt asks; used for nwo.nl and zonmw.nl). Throws typed `SourceRequestError`. |
 | `connector-runtime.ts` | Per-connector state machine: health counters, circuit breaker (3 failures → open, 5 min cooldown, probe-on-recovery), concurrency limiter (max 3 in-flight, queue with 30s timeout), HTTP response cache (TTL by source category, max 1000 entries, LRU eviction). |
 | `response.ts` | Factory functions: `successResponse()`, `errorResponse()`, `mapSourceError()` (translates `SourceRequestError` → typed MCP error), `toMcpToolPayload()` (wraps result for MCP transport). |
 | `tool-runner.ts` | `buildFormattedResponse()` — the standard post-processing pipeline: cross-reference enrichment → pagination → output formatting → wrap as success response. Also `dryRunPayload()` and `singleConnectorVerbose()`. |
@@ -187,6 +190,8 @@ Request arrives
     ├─ Concurrency slot available? → proceed
     │   └─ No → queue (30s timeout, then throw timeout)
     │
+    ├─ Crawl delay set (crawlDelayMs)? → wait for this connector's next start
+    │
     ├─ fetch with AbortController timeout (10s)
     │
     ├─ HTTP 429? → retry with Retry-After or exponential backoff
@@ -202,15 +207,15 @@ Request arrives
 | Category | TTL | Sources |
 |----------|-----|---------|
 | static | 1 hour | CBS, Rijksbegroting, DUO, Eurostat |
-| semi_live | 10 min | Tweede Kamer, Rechtspraak, Bekendmakingen, Rijksoverheid, Algemene Rekenkamer, SCP, data.overheid, PDOK, data.europa, the DSO search's Locatieserver and bekendmakingen lookups |
+| semi_live | 10 min | Tweede Kamer, Rechtspraak, Bekendmakingen, Rijksoverheid, Algemene Rekenkamer, SCP, data.overheid, PDOK, data.europa, EU Funding & Tenders, NWO and ZonMw calls, the DSO search's Locatieserver and bekendmakingen lookups |
 | live | 2 min | Luchtmeetnet, NDW, RDW, Rijkswaterstaat, KNMI |
 | discovery | 30 min | NGR, RIVM, ORI, API Register, BAG/RCE Linked Data, Ruimtelijke Plannen, DSO Omgevingsdocumenten, Algoritmeregister, WODC |
 
-The table names the main sources; `CONNECTOR_CATEGORY` in `connector-runtime.ts` is the full list. The cache holds at most 64 MB of response bodies (oldest out first) and never caches a body over 4 MB. Large documents bypass it where it would hold megabytes: the BWB toestand XML (`wetten_bwb_tekst`) and the DSO documentstructuur are parsed once and kept in a small in-source cache instead, and ORI document texts are not cached.
+The table names the main sources; `CONNECTOR_CATEGORY` in `connector-runtime.ts` is the full list. The cache holds at most 64 MB of response bodies (oldest out first) and never caches a body over 4 MB. Large documents bypass it where it would hold megabytes: the BWB toestand XML (`wetten_bwb_tekst`) and the DSO documentstructuur are parsed once and kept in a small in-source cache instead, and ORI document texts are not cached. RVO bypasses it too, for its list pages and its public pages alike: `rvo-subsidies.ts` keeps the parsed catalogue 3 hours and the status, period and budget read from a page 30 minutes, so those can be up to 30 minutes old. Its time is bounded, as most MCP clients give up after 60 s: every request has a 10 s timeout and one retry, loading the catalogue stops after 20 s (list pages not in by then are reported missing and the catalogue is loaded again after 5 minutes; callers share one load), and one search reads status pages for at most 10 s (a page not read by then is 'onbekend' with that reason; its read, when it comes in later, is kept for the next call).
 
 ## nl_gov_ask router
 
-`nl_gov_ask` is the one tool that takes a natural-language question. Its router decodes the question, parses date expressions against a real reference time (`temporal.ts`), detects the intent and picks one or more source routes: specific routes first (EU legislation, DSO/Omgevingswet with `DSO_API_KEY`, Tweede Kamer debates, the Algoritmeregister, elections, procurement, disciplinary law, per-school education, air quality), then the broad document and statistics routes, and finally the data.overheid.nl catalogue. Detection is precision-first: a question another route already answered keeps that route. Each route calls the same source classes as the individual tools, searches the topic keywords of the question rather than the sentence, and reports the terms, the routes tried and why one fell through in `access_note`; a failing route is listed in `failures`. The routes and their guards are described in `docs/TOOLS.md` under "Meta router".
+`nl_gov_ask` is the one tool that takes a natural-language question. Its router decodes the question, parses date expressions against a real reference time (`temporal.ts`), detects the intent and picks one or more source routes: specific routes first (EU legislation, DSO/Omgevingswet with `DSO_API_KEY`, Tweede Kamer debates, the Algoritmeregister, the research bodies, subsidies and funding calls (RVO, NWO/ZonMw, the EU portal), elections, procurement, disciplinary law, per-school education, air quality), then the broad document and statistics routes, and finally the data.overheid.nl catalogue. Detection is precision-first: a question another route already answered keeps that route. Each route calls the same source classes as the individual tools, searches the topic keywords of the question rather than the sentence, and reports the terms, the routes tried and why one fell through in `access_note`; a failing route is listed in `failures`. The routes and their guards are described in `docs/TOOLS.md` under "Meta router".
 
 ## Server instructions and tool metadata
 
@@ -259,7 +264,7 @@ The HTTP client, caching, circuit breaker, retry, and concurrency limiting are a
 
 ## Transport modes
 
-All three transports expose the same 85 tools and are created by `server.ts`:
+All three transports expose the same 91 tools and are created by `server.ts`:
 
 | Mode | Protocol | Session model | Use case |
 |------|----------|---------------|----------|
