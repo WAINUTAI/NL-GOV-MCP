@@ -305,6 +305,8 @@ export interface RvoSubsidieGetNotFound {
   message: string;
   /** A page that rvo.nl has for the path or slug although the open data lacks it (e.g. /subsidies-financiering/isde). */
   site_page?: string;
+  /** Where rvo.nl redirects the path to (another page, not read in its place). */
+  redirects_to?: string;
   suggestions: RvoSubsidyItem[];
   endpoint: string;
   params: Record<string, string>;
@@ -368,6 +370,48 @@ function pathKey(path: string): string {
     // keep as given
   }
   return p.toLowerCase().replace(/\/+$/, "");
+}
+
+/** What a get id that is not a uuid names: an exact path on rvo.nl, or a bare slug. */
+export type RvoIdTarget = { kind: "path"; path: string } | { kind: "slug"; slug: string };
+
+/**
+ * A URL ("https://www.rvo.nl/...", also without scheme: "www.rvo.nl/...") or an input with
+ * more than one path segment names exactly that path: query, fragment and a trailing slash
+ * are dropped, case does not matter. One segment ("dumava", "/dumava") is a slug.
+ * Undefined for a URL of another site or one without a path.
+ */
+export function rvoIdTarget(input: string): RvoIdTarget | undefined {
+  let s = input.trim();
+  if (/^(?:[a-z0-9-]+\.)*rvo\.nl(?:[/?#]|$)/i.test(s)) s = `https://${s}`;
+  let url = false;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) {
+    try {
+      const u = new URL(s);
+      if (!/(^|\.)rvo\.nl$/i.test(u.hostname)) return undefined;
+      s = u.pathname;
+      url = true;
+    } catch {
+      return undefined;
+    }
+  } else {
+    s = s.replace(/[?#].*$/, "");
+  }
+  try {
+    s = decodeURIComponent(s);
+  } catch {
+    // keep as given
+  }
+  const segments = s.split("/").filter(Boolean);
+  if (!segments.length) return undefined;
+  if (!url && segments.length === 1) return { kind: "slug", slug: segments[0].toLowerCase() };
+  return { kind: "path", path: `/${segments.join("/")}` };
+}
+
+/** The rvo.nl path a target stands for: a slug and a path outside the section get /subsidies-financiering in front. */
+function sectionPath(target: RvoIdTarget): string {
+  const path = target.kind === "slug" ? `/${target.slug}` : target.path;
+  return /^\/subsidies-financiering(\/|$)/i.test(path) ? path : `/subsidies-financiering${path}`;
 }
 
 export function rvoPageUrl(path: string): string {
@@ -743,6 +787,32 @@ export function findRvoPageNode(flight: string, id: string): Record<string, unkn
   return undefined;
 }
 
+/**
+ * The id (uuid) of the page's own node in its page data: the first node with blocks or a
+ * status whose url (or last breadcrumb) is `path`. The open data API knows a page by it.
+ */
+export function rvoPageNodeId(flight: string, path: string): string | undefined {
+  const want = pathKey(path);
+  const seen = new Set<string>();
+  for (const m of flight.matchAll(/\{"id":"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/gi)) {
+    const id = m[1];
+    if (seen.has(id)) continue;
+    seen.add(id);
+    if (seen.size > 400) break;
+    const node = findRvoPageNode(flight, id);
+    if (!node) continue;
+    const crumbs = Array.isArray(node.breadcrumbs) ? node.breadcrumbs : [];
+    const url = str(node.url) ?? str(asRecord(crumbs[crumbs.length - 1])?.uri);
+    if (!url) continue;
+    try {
+      if (pathKey(new URL(url, SITE).pathname) === want) return id;
+    } catch {
+      // not a URL
+    }
+  }
+  return undefined;
+}
+
 function canonicalOf(html: string): string | undefined {
   const tag = html.match(/<link\b[^>]*\brel="canonical"[^>]*>/i)?.[0];
   return tag?.match(/\bhref="([^"]+)"/i)?.[1];
@@ -781,6 +851,58 @@ const EUR = new Intl.NumberFormat("nl-NL", { maximumFractionDigits: 0 });
 
 function euro(n: number): string {
   return `€ ${EUR.format(n)}`;
+}
+
+const BUDGET_CLOSED_PATTERNS: RegExp[] = [
+  // "het budget voor 2026 is uitgeput", "Het budget voor deze regeling is op 2 juni overtekend"
+  /[\p{L}-]*budget\b(?<gap>[^.!?]{0,80}?)\b(?:is|was|zijn|waren|raakte)\b(?<gap2>[^.!?]{0,60}?)\b(?:uitgeput|overtekend)\b/iu,
+  // "Het budget voor 2026 van deze regeling is op."
+  /[\p{L}-]*budget\b(?<gap>[^.!?]{0,80}?)\b(?:is|was)\s+(?:nu\s+|inmiddels\s+|helaas\s+|al\s+)?op\s*(?=[.!;,]|$)/iu,
+  // "op 1 oktober 2026 raakte het AanZET-budget overtekend"
+  /\b(?:raakte|is|was)\s+(?:het|de)\s+[\p{L}-]*budget\s+(?:overtekend|uitgeput)\b/iu,
+  // "het subsidieplafond is bereikt"
+  /[\p{L}-]*plafond\b(?<gap>[^.!?]{0,60}?)\b(?:is|was)\s+(?:nu\s+|inmiddels\s+|al\s+)?bereikt\b/iu,
+  // "Deze regeling is gesloten."
+  /^(?:let op:\s*)?(?:deze|de)\s+(?:subsidie)?regeling\s+is\s+(?:nu\s+|definitief\s+)?gesloten\b/iu,
+  // "U kunt geen aanvraag meer indienen." / "u kunt niet meer aanvragen." (the whole rest of the sentence)
+  /(?:^|[;,:]\s*)(?:let op:\s*)?u kunt (?:(?:deze|de) (?:subsidie|regeling) )?(?:geen (?:nieuwe )?(?:aanvraag|aanvragen) meer (?:indienen|doen)|niet meer aanvragen)\s*[.!]?$/iu,
+];
+
+/**
+ * Sentences in which the page text itself says the budget is used up or oversubscribed, the
+ * subsidieplafond is reached or no more applications can be made. Conservative: questions,
+ * headings, conditions ("Als ...", "Dan ...", "totdat het budget ...") and negations ("nog
+ * niet overtekend") do not count. The sentence is returned as written, year included.
+ */
+export function rvoBudgetClosedSentences(texts: string[], max = 3): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const text of texts) {
+    for (const raw of text.split("\n")) {
+      const line = raw.trim();
+      if (!line || line.startsWith("#")) continue;
+      const body = line.replace(/^-\s+/, "").replace(/^["'“”]+|["'“”]+$/g, "");
+      for (const piece of body.split(/(?<=[.!?])\s+(?=["'“(]?\p{Lu})|(?<=\p{Ll}[.!?])(?=\p{Lu})/u)) {
+        const sentence = piece.trim();
+        if (!sentence || sentence.endsWith("?") || /^(?:dan|als|wanneer|indien|zodra|stel)\b/iu.test(sentence)) continue;
+        const hit = BUDGET_CLOSED_PATTERNS.some((re) => {
+          const m = re.exec(sentence);
+          if (!m) return false;
+          const gaps = `${m.groups?.gap ?? ""} ${m.groups?.gap2 ?? ""}`;
+          if (/\b(?:niet|geen|bijna)\b/iu.test(gaps)) return false;
+          // "..., totdat het budget is uitgeput": a condition, not a statement.
+          return !/\b(?:totdat|tot|als|wanneer|indien|zodra|voordat|nadat)\b[^,;:]*$/iu.test(sentence.slice(0, m.index));
+        });
+        if (!hit) continue;
+        const key = foldRvo(sentence);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(sentence.length > 300 ? `${sentence.slice(0, 297)}...` : sentence);
+        if (out.length >= max) return out;
+      }
+    }
+  }
+  return out;
 }
 
 /**
@@ -859,6 +981,21 @@ export function rvoStatusFromNode(node: Record<string, unknown>, pageUrl: string
     notes.push(`Label '${label}', terwijl de periode op de pagina (${out.period_text}) nog loopt.`);
   } else if (out.status === "bijna_open" && out.period_state === "running") {
     notes.push(`Label '${label}', terwijl de periode op de pagina (${out.period_text}) al loopt.`);
+  }
+  if (out.status !== "gesloten") {
+    // The label is kept as RVO shows it; a sentence in the page text that says the budget is
+    // used up or applications are closed is quoted next to it (it may concern one year or part).
+    const said = rvoBudgetClosedSentences([
+      ...(typeof node.intro === "string" ? rvoHtmlLines(node.intro) : []),
+      ...(notice ? [notice] : []),
+      ...(budgetNote ? [budgetNote] : []),
+      ...(Array.isArray(node.contentElements) ? renderRvoElements(node.contentElements).lines : []),
+    ]);
+    if (said.length) {
+      notes.push(
+        `${label ? `Label '${label}' ongewijzigd overgenomen, maar de` : "De"} paginatekst zegt: ${said.map((x) => `"${x}"`).join("; ")}.`,
+      );
+    }
   }
   if (notes.length) out.status_note = notes.join(" ");
   return out;
@@ -1241,6 +1378,16 @@ export interface RvoSubsidiesSourceOptions {
   catalogueDeadlineMs?: number;
   /** How long one search may read status pages (STATUS_BUDGET_MS). */
   statusBudgetMs?: number;
+}
+
+/** A page on rvo.nl for a path the catalogue lacks. */
+interface SitePage {
+  url: string;
+  title?: string;
+  status_data: boolean;
+  /** The page's own id in its page data, and the page read with it. */
+  node_id?: string;
+  read?: RvoPageRead;
 }
 
 export class RvoSubsidiesSource {
@@ -1713,23 +1860,20 @@ export class RvoSubsidiesSource {
   }
 
   /**
-   * The catalogue entry a URL, path or slug names. A bare slug ("dumava") means the
-   * regeling's own page /subsidies-financiering/<slug> first, else the one page whose
-   * path ends in it.
+   * The catalogue entry a URL, path or slug names. A URL or path names exactly that page
+   * (also with /subsidies-financiering in front), never another page with the same last
+   * segment. A bare slug ("dumava") means the regeling's own page
+   * /subsidies-financiering/<slug> first, else the one page whose path ends in it.
    */
-  private resolvePath(cat: Catalogue, input: string): { entry?: Entry; candidates: Entry[] } {
-    let path = input.trim();
-    try {
-      const u = new URL(path);
-      if (/(^|\.)rvo\.nl$/i.test(u.hostname)) path = u.pathname;
-    } catch {
-      // Not a URL: a path or slug.
+  private resolvePath(cat: Catalogue, target: RvoIdTarget): { entry?: Entry; candidates: Entry[] } {
+    if (target.kind === "path") {
+      // A URL or path names that one page: never another page that merely ends the same way.
+      const entry = cat.byPath.get(pathKey(target.path)) ?? cat.byPath.get(pathKey(sectionPath(target)));
+      return { entry, candidates: [] };
     }
-    const key = pathKey(path.startsWith("/") ? path : `/${path}`);
-    const direct = cat.byPath.get(key) ?? cat.byPath.get(pathKey(`/subsidies-financiering${key}`));
+    const direct = cat.byPath.get(pathKey(sectionPath(target)));
     if (direct) return { entry: direct, candidates: [] };
-    const slug = key.split("/").filter(Boolean).pop() ?? "";
-    const ending = slug ? cat.entries.filter((e) => pathKey(e.item.path).endsWith(`/${slug}`)) : [];
+    const ending = cat.entries.filter((e) => pathKey(e.item.path).endsWith(`/${target.slug}`));
     return ending.length === 1 ? { entry: ending[0], candidates: [] } : { candidates: ending };
   }
 
@@ -1737,20 +1881,12 @@ export class RvoSubsidiesSource {
    * The rvo.nl page for a path or slug the catalogue does not hold. The open data
    * lacks some big regelingen' own pages (/subsidies-financiering/isde, /sde, /mit and
    * /dei answer HTTP 200 on rvo.nl, checked October 2026; their page data holds no
-   * status). Undefined when rvo.nl has no such page, it redirects to another one, or
-   * it could not be read.
+   * status). The page's own id is taken from its page data: the open data API may know
+   * the page by it although the catalogue as read lacks it. `redirect` when rvo.nl sends
+   * the path to another page; undefined when rvo.nl has no such page or it could not be read.
    */
-  private async pageOutsideCatalogue(input: string): Promise<{ url: string; title?: string; status_data: boolean } | undefined> {
-    let path = input.trim();
-    try {
-      const u = new URL(path);
-      if (!/(^|\.)rvo\.nl$/i.test(u.hostname)) return undefined;
-      path = u.pathname;
-    } catch {
-      // Not a URL: a path or slug.
-    }
-    path = `/${path.replace(/^\/+|\/+$/g, "")}`;
-    if (!path.startsWith("/subsidies-financiering/")) path = `/subsidies-financiering${path}`;
+  private async pageOutsideCatalogue(target: RvoIdTarget): Promise<SitePage | { redirect: string } | undefined> {
+    const path = sectionPath(target);
     if (!/^\/subsidies-financiering(?:\/[a-z0-9-]+)+$/i.test(path)) return undefined;
     const url = rvoPageUrl(path);
     try {
@@ -1762,9 +1898,16 @@ export class RvoSubsidiesSource {
         disableCache: true,
       });
       const canonical = canonicalOf(data);
-      if (canonical && pathKey(new URL(canonical, SITE).pathname) !== pathKey(path)) return undefined;
+      if (canonical && pathKey(new URL(canonical, SITE).pathname) !== pathKey(path)) return { redirect: new URL(canonical, SITE).toString() };
       const title = htmlToText(/<title>([^<]*)<\/title>/i.exec(data)?.[1] ?? "").replace(/\s*\|\s*RVO\.nl\s*$/i, "");
-      return { url, ...(title ? { title } : {}), status_data: extractRvoFlight(data).includes('"subsidyStatus"') || Boolean(flagLabel(data)) };
+      const flight = extractRvoFlight(data);
+      const nodeId = rvoPageNodeId(flight, path);
+      return {
+        url,
+        ...(title ? { title } : {}),
+        status_data: flight.includes('"subsidyStatus"') || Boolean(flagLabel(data)),
+        ...(nodeId ? { node_id: nodeId, read: parseRvoPage(data, nodeId, url) } : {}),
+      };
     } catch {
       return undefined;
     }
@@ -1772,45 +1915,99 @@ export class RvoSubsidiesSource {
 
   async get(args: RvoSubsidieGetArgs): Promise<RvoSubsidieGetResult> {
     const input = args.id.trim();
-    const maxChars = Math.min(RVO_TEXT_MAX_CHARS, Math.max(1, Math.floor(args.maxChars ?? RVO_TEXT_DEFAULT_CHARS)));
-    const readPage = args.readPage !== false;
     if (!input) throw new RvoSubsidiesInputError("Geef een id (uuid) of de URL of slug van een RVO-pagina.", "Zoek de regeling met rvo_subsidies_search.");
+    if (UUID.test(input)) return this.getById(args, input, input);
 
-    let id = input;
-    let known: RvoSubsidyItem | undefined;
-    if (!UUID.test(input)) {
-      const { value: cat } = await this.loadCatalogue();
-      const resolved = this.resolvePath(cat, input);
-      if (!resolved.entry) {
-        const suggestions = resolved.candidates.length
-          ? resolved.candidates.slice(0, 5).map((e) => e.item)
-          : (await this.search({ query: words(foldRvo(input.replace(/^.*\//, ""))).join(" OR "), limit: 5, include_status: false })).items.map(
-              // Without score and status: these are suggestions, not results.
-              ({ score: _score, status_info: _status, ...item }) => item,
-            );
-        const onSite = resolved.candidates.length ? undefined : await this.pageOutsideCatalogue(input);
-        return {
-          notFound: true,
-          message: resolved.candidates.length
-            ? `'${input}' past bij ${resolved.candidates.length} pagina's; geef het volledige pad of de uuid.`
-            : onSite
-              ? `Geen pagina '${input}' in de RVO-catalogus (open data), maar rvo.nl heeft er wel een: ${onSite.url}${onSite.title ? ` ('${onSite.title}')` : ""}. ` +
-                (onSite.status_data
-                  ? "Die staat niet in de open data en is hier niet verder gelezen: status, periode en budget staan op de pagina zelf."
-                  : "Die staat niet in de open data, en in haar paginagegevens staan geen status, periode of budget.")
-              : `Geen pagina '${input}' in de RVO-catalogus (open data).`,
-          ...(onSite ? { site_page: onSite.url } : {}),
-          suggestions,
-          endpoint: RVO_SUBSIDIES_ENDPOINT,
-          params: { id: input, ...(onSite ? { site_page: onSite.url } : {}) },
-        };
+    const { value: cat } = await this.loadCatalogue();
+    const target = rvoIdTarget(input);
+    const resolved = target ? this.resolvePath(cat, target) : { candidates: [] };
+    if (resolved.entry) {
+      const known = resolved.entry.item;
+      return this.getById(args, input, known.id, args.readPage !== false ? this.readPage(known) : undefined);
+    }
+    const lastSegment = target ? (target.kind === "slug" ? target.slug : (target.path.split("/").pop() ?? "")) : input;
+    const found = resolved.candidates.length || !target ? undefined : await this.pageOutsideCatalogue(target);
+    const onSite = found && "url" in found ? found : undefined;
+    const redirect = found && "redirect" in found ? found.redirect : undefined;
+    const gap = cat.complete
+      ? undefined
+      : `De catalogus is nu onvolledig ingelezen (lijstpagina's van rvo.nl ontbraken), dus de pagina kan er wel in horen; een aanroep na ${CATALOGUE_RETRY_MS / 60_000} minuten laadt de catalogus opnieuw.`;
+    if (onSite?.node_id) {
+      // The page is on rvo.nl and names its own id: the open data API may know it by that id
+      // although the catalogue as read lacks it (a list page that failed, or a gap in the list).
+      const viaSite = await this.getById(
+        args,
+        input,
+        onSite.node_id,
+        args.readPage !== false && onSite.read ? Promise.resolve(onSite.read) : undefined,
+        `'${input}' stond niet in de ingelezen catalogus${cat.complete ? "" : " (die was onvolledig)"}; de pagina is op rvo.nl gevonden en via haar id ${onSite.node_id} uit de open data gelezen.`,
+      ).catch(() => undefined);
+      if (viaSite && !("notFound" in viaSite)) {
+        if (onSite.read) this.rememberStatus(onSite.node_id, onSite.read.status);
+        return viaSite;
       }
-      id = resolved.entry.item.id;
-      known = resolved.entry.item;
     }
 
+    // Suggestions: the candidates of a slug; for a path the page rvo.nl redirects it to and
+    // the nearest page above it in the catalogue; then a search on the last segment.
+    let suggestions: RvoSubsidyItem[] = resolved.candidates.slice(0, 5).map((e) => e.item);
+    if (!resolved.candidates.length) {
+      const near: RvoSubsidyItem[] = [];
+      if (redirect) {
+        const to = cat.byPath.get(pathKey(new URL(redirect).pathname));
+        if (to) near.push(to.item);
+      }
+      if (target?.kind === "path") {
+        const segments = sectionPath(target).split("/").filter(Boolean);
+        for (let n = segments.length - 1; n >= 2; n--) {
+          const up = cat.byPath.get(pathKey(`/${segments.slice(0, n).join("/")}`));
+          if (up) {
+            near.push(up.item);
+            break;
+          }
+        }
+      }
+      const searched = (await this.search({ query: words(foldRvo(lastSegment)).join(" OR "), limit: 5, include_status: false })).items.map(
+        // Without score and status: these are suggestions, not results.
+        ({ score: _score, status_info: _status, ...item }) => item,
+      );
+      const seen = new Set<string>();
+      suggestions = [...near, ...searched].filter((x) => !seen.has(x.id) && seen.add(x.id)).slice(0, 5);
+    }
+    const message = resolved.candidates.length
+      ? `'${input}' past bij ${resolved.candidates.length} pagina's; geef het volledige pad of de uuid.`
+      : !target
+        ? `'${input}' is geen adres op rvo.nl en geen pad of slug van een RVO-pagina.`
+        : onSite
+          ? `Geen pagina '${input}' in de RVO-catalogus (open data), maar rvo.nl heeft er wel een: ${onSite.url}${onSite.title ? ` ('${onSite.title}')` : ""}. ` +
+            (onSite.status_data
+              ? "Die staat niet in de open data en is hier niet verder gelezen: status, periode en budget staan op de pagina zelf."
+              : "Die staat niet in de open data, en in haar paginagegevens staan geen status, periode of budget.")
+          : redirect
+            ? `Geen pagina '${input}' in de RVO-catalogus (open data); rvo.nl stuurt dat adres door naar een andere pagina: ${redirect}. Die is niet in plaats daarvan gelezen.`
+            : `Geen pagina '${input}' in de RVO-catalogus (open data)${target.kind === "path" ? ", en rvo.nl heeft op dat pad geen pagina" : ""}.`;
+    return {
+      notFound: true,
+      message: gap && !resolved.candidates.length ? `${message} ${gap}` : message,
+      ...(onSite ? { site_page: onSite.url } : {}),
+      ...(redirect ? { redirects_to: redirect } : {}),
+      suggestions,
+      endpoint: RVO_SUBSIDIES_ENDPOINT,
+      params: { id: input, ...(onSite ? { site_page: onSite.url } : {}), ...(redirect ? { redirects_to: redirect } : {}) },
+    };
+  }
+
+  /** Read one page by its uuid: the open data detail, and the public page unless read_page is false. */
+  private async getById(
+    args: RvoSubsidieGetArgs,
+    input: string,
+    id: string,
+    pageRead?: Promise<RvoPageRead>,
+    foundNote?: string,
+  ): Promise<RvoSubsidieGetResult> {
+    const maxChars = Math.min(RVO_TEXT_MAX_CHARS, Math.max(1, Math.floor(args.maxChars ?? RVO_TEXT_DEFAULT_CHARS)));
+    const readPage = args.readPage !== false;
     const endpoint = `${RVO_SUBSIDIES_ENDPOINT}/${encodeURIComponent(id)}`;
-    const pageRead = readPage && known ? this.readPage(known) : undefined;
     let detail: Record<string, unknown> | undefined;
     try {
       const { data } = await getJson<unknown>(endpoint, { connector: RVO_SUBSIDIES_CONNECTOR, timeoutMs: TIMEOUT_MS, retries: RETRIES });
@@ -1839,6 +2036,7 @@ export class RvoSubsidiesSource {
     const page = readPage ? await (pageRead ?? this.readPage(item)) : undefined;
 
     const notes: string[] = [BASE_NOTE];
+    if (foundNote) notes.push(foundNote);
     let lines: string[];
     let htmls: string[];
     let downloads: RvoLink[] = [];

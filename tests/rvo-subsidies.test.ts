@@ -13,6 +13,9 @@ import {
   rvoFlightTextRows,
   rvoHtmlLines,
   rvoLegalReferences,
+  rvoBudgetClosedSentences,
+  rvoIdTarget,
+  rvoPageNodeId,
   rvoStatusCode,
   rvoStatusFromNode,
   summarizeRvoGet,
@@ -665,7 +668,8 @@ describe("rvoStatusFromNode", () => {
 
     const none = rvoStatusFromNode({ ...FVO_NODE, subsidyStatus: null }, url, NOW);
     expect(none.status).toBe("onbekend");
-    expect(none.status_note).toBe("De pagina toont geen statuslabel.");
+    // Without a label the page text's own closing sentence is quoted (see rvoBudgetClosedSentences).
+    expect(none.status_note).toBe('De pagina toont geen statuslabel. De paginatekst zegt: "U kunt niet meer aanvragen.".');
 
     expect(rvoStatusCode("Op aanvraag")).toBe("overig");
     expect(rvoStatusCode(" open voor AANVRAGEN ")).toBe("open");
@@ -784,9 +788,129 @@ describe("text and references", () => {
   });
 });
 
+describe("rvoIdTarget", () => {
+  it("reads a URL (with or without scheme) or a multi-segment input as an exact path, one segment as a slug", () => {
+    expect(rvoIdTarget("https://www.rvo.nl/subsidies-financiering/bmkb/extra-steun")).toEqual({ kind: "path", path: "/subsidies-financiering/bmkb/extra-steun" });
+    expect(rvoIdTarget("www.rvo.nl/subsidies-financiering/MCZ/?utm=x#aanvragen")).toEqual({ kind: "path", path: "/subsidies-financiering/MCZ" });
+    expect(rvoIdTarget("rvo.nl/subsidies-financiering/mcz")).toEqual({ kind: "path", path: "/subsidies-financiering/mcz" });
+    expect(rvoIdTarget("https://www.rvo.nl/mcz")).toEqual({ kind: "path", path: "/mcz" });
+    expect(rvoIdTarget("/subsidies-financiering/dumava/")).toEqual({ kind: "path", path: "/subsidies-financiering/dumava" });
+    expect(rvoIdTarget("bmkb/aanvragen?x=1")).toEqual({ kind: "path", path: "/bmkb/aanvragen" });
+    expect(rvoIdTarget("DUMAVA")).toEqual({ kind: "slug", slug: "dumava" });
+    expect(rvoIdTarget("/mcz/")).toEqual({ kind: "slug", slug: "mcz" });
+    expect(rvoIdTarget("https://www.example.org/subsidies-financiering/mcz")).toBeUndefined();
+    expect(rvoIdTarget("https://www.rvo.nl/")).toBeUndefined();
+  });
+});
+
+describe("rvoBudgetClosedSentences", () => {
+  it("quotes sentences that say the budget is used up, the plafond reached or applications closed, year included", () => {
+    expect(
+      rvoBudgetClosedSentences([
+        "Met de subsidie SIB Marktentree kunt u in uw doelland een expert inhuren.Let op: het budget voor 2026 is uitgeput. Vanaf januari 2027 is er nieuw budget beschikbaar.",
+      ]),
+    ).toEqual(["Let op: het budget voor 2026 is uitgeput."]);
+    expect(rvoBudgetClosedSentences(["Het budget voor 2026 van deze regeling is op."])).toEqual(["Het budget voor 2026 van deze regeling is op."]);
+    expect(rvoBudgetClosedSentences(['"Let op: op 1 oktober 2026 raakte het AanZET-budget overtekend."'])).toEqual(["Let op: op 1 oktober 2026 raakte het AanZET-budget overtekend."]);
+    expect(rvoBudgetClosedSentences(["Het budget voor deze regeling is op 2 juni overtekend."])).toEqual(["Het budget voor deze regeling is op 2 juni overtekend."]);
+    expect(rvoBudgetClosedSentences(["Het subsidieplafond is bereikt. Wij nemen geen aanvragen meer in behandeling."])).toEqual(["Het subsidieplafond is bereikt."]);
+    expect(rvoBudgetClosedSentences(["Deze subsidieregeling is gesloten; u kunt geen aanvraag meer indienen."])).toEqual(["Deze subsidieregeling is gesloten; u kunt geen aanvraag meer indienen."]);
+    expect(rvoBudgetClosedSentences(["- U kunt niet meer aanvragen."])).toEqual(["U kunt niet meer aanvragen."]);
+    // An earlier year is quoted as it stands, not hidden.
+    expect(rvoBudgetClosedSentences(["In 2025 was er veel belangstelling. Het budget voor 2025 was uitgeput in mei."])).toEqual(["Het budget voor 2025 was uitgeput in mei."]);
+    // The same sentence twice (intro and a notice) once; at most `max`.
+    expect(rvoBudgetClosedSentences(["Het budget is op.", "Het budget is op."])).toEqual(["Het budget is op."]);
+    expect(rvoBudgetClosedSentences(["Het budget is op. De regeling is gesloten. U kunt niet meer aanvragen."], 2)).toHaveLength(2);
+  });
+
+  it("does not count conditions, questions, headings, negations or other uses of the words", () => {
+    const none = [
+      "De hoogst gerangschikte investeringsfondsen ontvangen een lening, totdat het budget is uitgeput.",
+      "Wij verlenen subsidie tot het budget op is.",
+      "Zijn er meer aanvragen dan er budget is? Dan is het budget overtekend.",
+      "Ontvangen wij op dezelfde dag zoveel aanvragen dat daarmee het beschikbare budget wordt uitgeput?",
+      "Als het subsidieplafond is bereikt, is er geen subsidie meer beschikbaar voor uw project.",
+      "### Mijn aanvraag is afgewezen omdat het subsidieplafond is bereikt. Wat kan ik doen?",
+      "Het budget voor CO2-reductie is nog niet overtekend.",
+      "Voor inruilprojecten was het budget niet overtekend.",
+      "Het budget is bijna op.",
+      "Het budget is per 4 augustus opgehoogd van € 3.000.000 naar €4.500.000.",
+      "Dit budget is verdeeld over de 4e, 5e en 6e ronde.",
+      "4 | Stichting Ambachtnederland.nl | Kies voor vakwerk | 27 | uitgeput | Dit projectvoorstel is als gemiddeld beoordeeld.",
+      "Voor de onderstaande calls heeft de overheid eerder cofinanciering beschikbaar gesteld. U kunt hiervoor geen aanvraag meer doen.",
+      "U kunt de extra betaling dus niet meer aanvragen voor een nieuwe of andere jonge landbouwer in uw bedrijf.",
+      "- Staatscourant subsidieplafond bereikt SAH 1 december 2025",
+    ];
+    for (const text of none) expect(rvoBudgetClosedSentences([text]), text).toEqual([]);
+  });
+});
+
+describe("rvoStatusFromNode: what the page text says about the budget", () => {
+  const url = "https://www.rvo.nl/subsidies-financiering/sib/marktentree";
+  const sib = {
+    ...DDP_NODE,
+    intro:
+      '<p>Met de subsidie SIB Marktentree kunt u in uw doelland een expert inhuren.</p>\n<p><span class="marking-warning">Let op: het budget voor 2026 is uitgeput. Vanaf januari 2027 is er nieuw budget beschikbaar.</span></p>',
+    startDate: "2026-01-01T09:00:00+01:00",
+    endDate: "2026-12-31T17:00:00+01:00",
+  };
+
+  it("keeps the label and quotes the sentence in status_note", () => {
+    const s = rvoStatusFromNode(sib, url, NOW);
+    expect(s.status).toBe("open");
+    expect(s.status_label).toBe("Open voor aanvragen");
+    expect(s.period_state).toBe("running");
+    expect(s.status_note).toBe(`Label 'Open voor aanvragen' ongewijzigd overgenomen, maar de paginatekst zegt: "Let op: het budget voor 2026 is uitgeput.".`);
+  });
+
+  it("reads the blocks and the change notice too, and adds nothing to a closed label", () => {
+    const fromBlocks = rvoStatusFromNode(
+      {
+        ...SWIM_NODE,
+        notifications: { changes: "Het budget voor deze regeling is overtekend." },
+        contentElements: [{ id: "c1", type: "wysiwyg", text: "<p>Het subsidieplafond is bereikt.</p>" }],
+      },
+      url,
+      NOW,
+    );
+    expect(fromBlocks.status).toBe("tijdelijk_gesloten");
+    expect(fromBlocks.status_note).toBe(
+      `Label 'Tijdelijk gesloten voor aanvragen' ongewijzigd overgenomen, maar de paginatekst zegt: "Het budget voor deze regeling is overtekend."; "Het subsidieplafond is bereikt.".`,
+    );
+    const closed = rvoStatusFromNode(FVO_NODE, url, NOW);
+    expect(closed.status).toBe("gesloten");
+    expect(closed.status_note).toBeUndefined();
+  });
+
+  it("is shown in the search results' status too (the page is read there anyway)", async () => {
+    serve({ pages: { ...fixturePages(), [pathOf(STUDI_WATERSTOF_ID)]: rvoNodePage(pathOf(STUDI_WATERSTOF_ID), STUDI_WATERSTOF_ID, { ...sib, id: STUDI_WATERSTOF_ID }) } });
+    const out = await new RvoSubsidiesSource(testConfig).search({ query: "waterstof" });
+    const studi = out.items.find((x) => x.id === STUDI_WATERSTOF_ID)!;
+    expect(studi.status_info?.status_label).toBe("Open voor aanvragen");
+    expect(studi.status_info?.status_note).toContain('de paginatekst zegt: "Let op: het budget voor 2026 is uitgeput."');
+  });
+});
+
+describe("rvoPageNodeId", () => {
+  it("finds the page's own node by its url or last breadcrumb, not another node", () => {
+    const path = "/subsidies-financiering/dumava";
+    const flight = rvoFlight({ id: DUMAVA_ID, node: { ...DUMAVA_NODE, url: path }, textRows: DUMAVA_TEXT_ROWS });
+    expect(rvoPageNodeId(flight, path)).toBe(DUMAVA_ID);
+    expect(rvoPageNodeId(flight, "/subsidies-financiering/DUMAVA/")).toBe(DUMAVA_ID);
+    expect(rvoPageNodeId(flight, "/subsidies-financiering/andere")).toBeUndefined();
+    const crumbs = rvoFlight({
+      id: FVO_ID,
+      node: { ...FVO_NODE, breadcrumbs: [{ title: "Home", uri: "/" }, { title: "FVO", uri: "/subsidies-financiering/fvo" }] },
+    });
+    expect(rvoPageNodeId(crumbs, "/subsidies-financiering/fvo")).toBe(FVO_ID);
+  });
+});
+
 describe("RvoSubsidiesSource.get", () => {
   function getRouter(extraPages: Record<string, string> = {}) {
-    return serve({ pages: { ...fixturePages(), ...extraPages }, details: { [DUMAVA_ID]: DUMAVA_DETAIL, [BMKB_ID]: BMKB_DETAIL } });
+    // Every fixture row has a detail record; DUMAVA and BMKB with their body.
+    const details = Object.fromEntries(RVO_ROWS.map((r) => [String(r.id), r]));
+    return serve({ pages: { ...fixturePages(), ...extraPages }, details: { ...details, [DUMAVA_ID]: DUMAVA_DETAIL, [BMKB_ID]: BMKB_DETAIL } });
   }
 
   it("reads one regeling by uuid: the page's blocks as text, status, references and downloads", async () => {
@@ -851,8 +975,13 @@ describe("RvoSubsidiesSource.get", () => {
         "('Investeringssubsidie duurzame energie en energiebesparing (ISDE)'). Die staat niet in de open data, en in haar paginagegevens staan geen status, periode of budget.",
     });
     expect(net.pageCalls()).toContain("https://www.rvo.nl/subsidies-financiering/isde");
-    // A page that redirects to another one says nothing about the slug asked; another host is never asked.
-    expect(await source.get({ id: "oud" })).toMatchObject({ notFound: true, message: "Geen pagina 'oud' in de RVO-catalogus (open data)." });
+    // A page that redirects to another one is named, not read in place of the slug asked; another host is never asked.
+    expect(await source.get({ id: "oud" })).toMatchObject({
+      notFound: true,
+      redirects_to: "https://www.rvo.nl/subsidies-financiering/isde",
+      message:
+        "Geen pagina 'oud' in de RVO-catalogus (open data); rvo.nl stuurt dat adres door naar een andere pagina: https://www.rvo.nl/subsidies-financiering/isde. Die is niet in plaats daarvan gelezen.",
+    });
     const before = net.calls.length;
     expect(await source.get({ id: "https://www.example.org/subsidies-financiering/isde" })).toMatchObject({ notFound: true });
     expect(net.calls.slice(before).filter((c) => !c.startsWith("https://www.rvo.nl/"))).toEqual([]);
@@ -907,6 +1036,84 @@ describe("RvoSubsidiesSource.get", () => {
     const gone = (await new RvoSubsidiesSource(testConfig).get({ id: BMKB_ID })) as RvoSubsidieGetFound;
     expect(gone.status_info).toMatchObject({ status: "onbekend", status_note: "Status onbekend: de pagina bestaat niet (meer) (HTTP 404)." });
     expect(gone.text_source).toBe("api");
+  });
+
+  it("reads a URL or path as exactly that page, never another page with the same last segment", async () => {
+    const net = getRouter({
+      // rvo.nl redirects an old path to another page.
+      "/subsidies-financiering/bmkb/extra-steun": rvoPageHtml({ path: "/subsidies-financiering/bmkb/extra-steun", canonical: "https://www.rvo.nl/subsidies-financiering/bmkb" }),
+    });
+    const source = new RvoSubsidiesSource(testConfig);
+    // The only page ending in /nederwiek-i-a is /onderwerpen/windenergie-op-zee/nederwiek-i-a: a slug finds it, a path elsewhere does not.
+    expect(((await source.get({ id: "nederwiek-i-a", readPage: false })) as RvoSubsidieGetFound).item.id).toBe(NEDERWIEK_ID);
+    expect(((await source.get({ id: "https://www.rvo.nl/onderwerpen/windenergie-op-zee/nederwiek-i-a", readPage: false })) as RvoSubsidieGetFound).item.id).toBe(NEDERWIEK_ID);
+    for (const id of ["https://www.rvo.nl/subsidies-financiering/bmkb/nederwiek-i-a", "/subsidies-financiering/bmkb/nederwiek-i-a", "bmkb/nederwiek-i-a"]) {
+      const out = await source.get({ id, readPage: false });
+      expect(out, id).toMatchObject({ notFound: true, message: `Geen pagina '${id}' in de RVO-catalogus (open data), en rvo.nl heeft op dat pad geen pagina.` });
+      // The nearest page above the path comes first among the suggestions.
+      expect(("notFound" in out ? out.suggestions : [])[0]?.id).toBe(BMKB_ID);
+    }
+    expect(net.pageCalls()).toContain("https://www.rvo.nl/subsidies-financiering/bmkb/nederwiek-i-a");
+
+    const redirected = await source.get({ id: "https://www.rvo.nl/subsidies-financiering/bmkb/extra-steun" });
+    expect(redirected).toMatchObject({
+      notFound: true,
+      redirects_to: "https://www.rvo.nl/subsidies-financiering/bmkb",
+      message:
+        "Geen pagina 'https://www.rvo.nl/subsidies-financiering/bmkb/extra-steun' in de RVO-catalogus (open data); rvo.nl stuurt dat adres door naar een andere pagina: https://www.rvo.nl/subsidies-financiering/bmkb. Die is niet in plaats daarvan gelezen.",
+      params: { redirects_to: "https://www.rvo.nl/subsidies-financiering/bmkb" },
+    });
+    expect(("notFound" in redirected ? redirected.suggestions : [])[0]?.id).toBe(BMKB_ID);
+
+    // Query, fragment, trailing slash, case and a host without scheme do not matter.
+    for (const id of ["www.rvo.nl/subsidies-financiering/DUMAVA/?utm_source=x#aanvragen", "rvo.nl/subsidies-financiering/dumava"]) {
+      expect(((await source.get({ id, readPage: false })) as RvoSubsidieGetFound).item.id, id).toBe(DUMAVA_ID);
+    }
+  });
+
+  it("matches a full path to a shared slug as that path, and checks rvo.nl for exactly that path", async () => {
+    const net = getRouter();
+    const source = new RvoSubsidiesSource(testConfig);
+    const dei = await source.get({ id: "https://www.rvo.nl/subsidies-financiering/dei/waterstof-en-groene-chemie", readPage: false });
+    expect((dei as RvoSubsidieGetFound).item.id).toBe(DEI_WATERSTOF_ID);
+
+    const id = "https://www.rvo.nl/subsidies-financiering/wbso/voorwaarden/waterstof-en-groene-chemie";
+    const other = await source.get({ id });
+    expect(other).toMatchObject({ notFound: true, message: `Geen pagina '${id}' in de RVO-catalogus (open data), en rvo.nl heeft op dat pad geen pagina.` });
+    expect("notFound" in other && other.message).not.toContain("past bij");
+    expect(net.pageCalls()).toEqual(["https://www.rvo.nl/subsidies-financiering/wbso/voorwaarden/waterstof-en-groene-chemie"]);
+  });
+
+  it("reads a page the catalogue as read lacks through the id in its page data", async () => {
+    const path = "/subsidies-financiering/dumava";
+    const page = rvoNodePage(path, DUMAVA_ID, { ...DUMAVA_NODE, url: path }, { ...DUMAVA_TEXT_ROWS, ...DUMAVA_INTRO_ROW });
+    // List page 1, which holds every fixture row, fails: the catalogue is incomplete.
+    const fillers = Array.from({ length: 50 }, (_, i) => fillerRow(i));
+    const net = serve({ rows: [...fillers, ...RVO_ROWS], failPages: [1], pages: { [path]: page }, details: { [DUMAVA_ID]: DUMAVA_DETAIL } });
+    const source = new RvoSubsidiesSource(testConfig);
+    const out = await source.get({ id: "https://www.rvo.nl/subsidies-financiering/dumava" });
+    expect("notFound" in out).toBe(false);
+    const found = out as RvoSubsidieGetFound;
+    expect(found.item.id).toBe(DUMAVA_ID);
+    expect(found.status_info?.status_label).toBe("Open voor aanvragen");
+    expect(found.text_source).toBe("pagina");
+    expect(found.access_note).toContain(
+      `'https://www.rvo.nl/subsidies-financiering/dumava' stond niet in de ingelezen catalogus (die was onvolledig); de pagina is op rvo.nl gevonden en via haar id ${DUMAVA_ID} uit de open data gelezen.`,
+    );
+    expect(net.pageCalls().filter((c) => c.endsWith(path))).toHaveLength(1); // the page is read once
+
+    // A slug rvo.nl has no page for: the message says the catalogue was incomplete.
+    const unknown = await source.get({ id: "waterstof-xyz" });
+    expect("notFound" in unknown && unknown.message).toContain("De catalogus is nu onvolledig ingelezen");
+  });
+
+  it("links a page whose id the open data does not know, as before", async () => {
+    const path = "/subsidies-financiering/isde";
+    const nodeId = "99999999-2222-4333-8444-555555555555";
+    serve({ pages: { [path]: rvoNodePage(path, nodeId, { ...SWIM_NODE, id: nodeId, url: path }) }, details: {} });
+    const out = await new RvoSubsidiesSource(testConfig).get({ id: "isde" });
+    expect(out).toMatchObject({ notFound: true, site_page: "https://www.rvo.nl/subsidies-financiering/isde" });
+    expect("notFound" in out && out.message).toContain("Die staat niet in de open data en is hier niet verder gelezen");
   });
 
   it("refuses an empty id", async () => {
