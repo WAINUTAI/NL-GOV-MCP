@@ -301,6 +301,9 @@ export class SessionRegistry<T> {
   }
 }
 
+/** The JSON-RPC code the MCP SDK itself uses for an unknown session (with HTTP 404). */
+const SESSION_NOT_FOUND = -32001;
+
 function jsonRpcError(code: number, message: string): object {
   return { jsonrpc: "2.0", error: { code, message }, id: null };
 }
@@ -453,7 +456,7 @@ export async function startSseServer(overrides: Partial<HttpServerOptions> = {})
     }
     const session = sessions.get(sessionId);
     if (!session) {
-      res.status(404).send("Unknown sessionId");
+      res.status(404).json(jsonRpcError(SESSION_NOT_FOUND, "Session not found"));
       return;
     }
     res.on("close", sessions.acquire(sessionId));
@@ -562,8 +565,8 @@ export async function startStreamableHttpServer(overrides: Partial<HttpServerOpt
     if (sessionId) {
       const session = sessions.get(sessionId);
       if (!session) {
-        // Invalid session ID
-        res.status(404).json({ error: "Unknown session" });
+        // Unknown or closed session: 404 tells the client to start a new one with initialize.
+        res.status(404).json(jsonRpcError(SESSION_NOT_FOUND, "Session not found"));
         return;
       }
       // Existing session — route to its transport; an open GET stream keeps it active.

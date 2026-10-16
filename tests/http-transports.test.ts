@@ -234,6 +234,7 @@ describe("HTTP transports", () => {
       body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }),
     });
     expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ jsonrpc: "2.0", error: { code: -32001, message: "Session not found" }, id: null });
   });
 
   it("closes streamable-http sessions that stay idle past the TTL", async () => {
@@ -335,7 +336,7 @@ describe("HTTP transports", () => {
     expect(handle!.sessionCount!()).toBe(1);
     await expect(b.listTools()).resolves.toBeDefined();
     // The first session was closed to make room, so its messages are refused.
-    await expect(a.listTools()).rejects.toThrow(/404|Unknown sessionId/);
+    await expect(a.listTools()).rejects.toThrow(/404|Session not found/);
     await b.close();
     await a.close();
   });
