@@ -173,7 +173,7 @@ npm ci
 npm run build
 npm run dev                    # start stdio server (for Claude Desktop / Claude Code)
 npm run dev:sse                # SSE/HTTP server on port 3333
-npm run dev:streamable-http    # Streamable HTTP server on port 3333 (MCP spec 2025-03-26)
+npm run dev:streamable-http    # Streamable HTTP server on port 3333
 ```
 
 To verify your setup:
@@ -212,7 +212,7 @@ npm run start:sse  # production
 | `GET /health` | Server health check |
 | `GET /health/sources` | Per-connector runtime health snapshot |
 
-#### Streamable HTTP (MCP spec 2025-03-26)
+#### Streamable HTTP
 
 ```bash
 npm run dev:streamable-http    # development
@@ -227,11 +227,13 @@ npm run start:streamable-http  # production
 | `GET /health` | Server health check |
 | `GET /health/sources` | Per-connector runtime health snapshot |
 
-Session management uses the `mcp-session-id` header.
+The server negotiates MCP protocol versions 2024-10-07 up to 2025-11-25. Session management uses the `mcp-session-id` header. Replies to `POST /mcp` come as an SSE stream; set `NL_GOV_HTTP_JSON_RESPONSE=true` to get plain `application/json` replies instead.
+
+Sessions are optional in the MCP spec. Some clients, gateways, proxies and load balancers do not pass the `mcp-session-id` header back, and then every request after `initialize` fails with `400 Server not initialized`. For those, set `NL_GOV_HTTP_STATELESS=true`: each `POST /mcp` is then served on its own, with or without a preceding `initialize` and without a session header, and `GET` and `DELETE /mcp` answer `405`. Nothing is lost, because this server keeps no per-session state. Each request builds its own server instance (about 15 MB, briefly), so `NL_GOV_HTTP_MAX_CONCURRENT` caps how many run at once; more get `503` with `Retry-After`.
 
 #### Security for the HTTP transports
 
-The SSE and Streamable HTTP transports have no authentication and listen on all interfaces by default, so Docker and network clients such as Open WebUI can reach them. For local use, bind to this machine only with `NL_GOV_HTTP_HOST=127.0.0.1`. When browsers can reach the server, set `NL_GOV_ALLOWED_ORIGINS` to the origins of your own clients so other websites cannot call it. Idle sessions are closed after `NL_GOV_SESSION_TTL_MS` and the number of sessions is capped by `NL_GOV_MAX_SESSIONS`; malformed or oversized request bodies (limit 1 MB) get a JSON-RPC error.
+The SSE and Streamable HTTP transports have no authentication and listen on all interfaces by default, so Docker and network clients such as Open WebUI can reach them. For local use, bind to this machine only with `NL_GOV_HTTP_HOST=127.0.0.1`. When browsers can reach the server, set `NL_GOV_ALLOWED_ORIGINS` to the origins of your own clients so other websites cannot call it. Idle sessions are closed after `NL_GOV_SESSION_TTL_MS` and the number of sessions is capped by `NL_GOV_MAX_SESSIONS`; malformed or oversized request bodies (limit 1 MB) get a JSON-RPC error. At startup the server logs a warning when it listens on all interfaces without an Origin allowlist. In stateless mode there is no session cap to bound the load, so put a reverse proxy with rate limiting (and authentication) in front of a server that a network can reach. `/health/sources` shows which upstream sources fail; set `NL_GOV_HTTP_SOURCE_HEALTH=false` to answer it with `404`.
 
 #### Selecting transport via environment
 
@@ -290,6 +292,10 @@ Restart Claude Desktop after saving.
 | `NL_GOV_ALLOWED_ORIGINS` | — | Comma-separated allowlist of browser origins (e.g. `http://localhost:8080`) for the HTTP transports. When set, a request whose `Origin` header is not on the list gets `403`; requests without an `Origin` header are allowed |
 | `NL_GOV_SESSION_TTL_MS` | `1800000` (30 min) | HTTP sessions with no request and no open stream for this long are closed |
 | `NL_GOV_MAX_SESSIONS` | `100` | Most concurrent HTTP sessions per transport; when full, the least recently used session is closed. Each session holds roughly 14 MB, so lower this on small containers |
+| `NL_GOV_HTTP_STATELESS` | `false` | `true` serves Streamable HTTP without sessions: no `mcp-session-id`, every `POST /mcp` stands alone, `GET`/`DELETE /mcp` answer `405`. For clients, gateways and proxies that drop the session header |
+| `NL_GOV_HTTP_JSON_RESPONSE` | `false` | `true` answers Streamable HTTP POSTs with `application/json` instead of an SSE stream, with or without sessions |
+| `NL_GOV_HTTP_MAX_CONCURRENT` | `50` | Most requests served at once in stateless mode (each takes about 15 MB while it runs); more get `503` with `Retry-After` |
+| `NL_GOV_HTTP_SOURCE_HEALTH` | `true` | `false` answers `GET /health/sources` with `404`; `/health` stays |
 | `NL_GOV_TIMEZONE` | `Europe/Amsterdam` | Default timezone used by `nl_gov_ask` for natural date parsing |
 | `KNMI_API_KEY` | — | Required for KNMI weather tools ([get a free token](https://developer.dataplatform.knmi.nl/open-data-api#token)) |
 | `OVERHEID_API_KEY` | — | Required for API register tool ([request a key](https://apis.developer.overheid.nl/apis/key-aanvragen)) |

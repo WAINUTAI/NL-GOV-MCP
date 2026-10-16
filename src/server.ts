@@ -39,8 +39,10 @@ export interface ServerHandle {
   httpServer?: HttpServer;
   /** Close all active MCP transports and McpServers. Idempotent-safe. */
   closeConnections: () => Promise<void>;
-  /** Number of open MCP sessions (only for the SSE/streamable-http transports). */
+  /** Number of open MCP sessions (only for the SSE/streamable-http transports; always 0 when stateless). */
   sessionCount?: () => number;
+  /** Requests being served right now (only for the stateless Streamable HTTP mode). */
+  inFlightCount?: () => number;
 }
 
 interface Closeable {
@@ -94,6 +96,8 @@ function trackSession(transport: Transport, server: McpServer, onClosed: () => v
 
 export const DEFAULT_SESSION_TTL_MS = 30 * 60_000;
 export const DEFAULT_MAX_SESSIONS = 100;
+/** Each stateless request builds its own McpServer (~15 MB while it runs), so this caps memory like the session cap. */
+export const DEFAULT_MAX_CONCURRENT = 50;
 const JSON_BODY_LIMIT = "1mb";
 
 export interface HttpServerOptions {
@@ -111,6 +115,25 @@ export interface HttpServerOptions {
   maxSessions: number;
   /** How often idle sessions are swept; defaults to half the TTL, between 1 s and 60 s. */
   sweepIntervalMs?: number;
+  /**
+   * Streamable HTTP without sessions (NL_GOV_HTTP_STATELESS): each POST is served by a fresh McpServer,
+   * no Mcp-Session-Id is issued or required, and GET and DELETE /mcp answer 405. Default false.
+   */
+  stateless?: boolean;
+  /** Answer Streamable HTTP POSTs with application/json instead of an SSE stream (NL_GOV_HTTP_JSON_RESPONSE). Default false. */
+  jsonResponse?: boolean;
+  /** Most requests served at once in stateless mode; more get 503 with Retry-After (NL_GOV_HTTP_MAX_CONCURRENT). */
+  maxConcurrent?: number;
+  /** Serve GET /health/sources (NL_GOV_HTTP_SOURCE_HEALTH). Default true; false answers 404. */
+  sourceHealth?: boolean;
+}
+
+function booleanEnv(name: string, fallback: boolean): boolean {
+  const raw = process.env[name]?.trim().toLowerCase();
+  if (raw === undefined || raw === "") return fallback;
+  if (["true", "1", "yes", "on"].includes(raw)) return true;
+  if (["false", "0", "no", "off"].includes(raw)) return false;
+  throw new Error(`Invalid ${name}: ${process.env[name]} (expected true or false)`);
 }
 
 function positiveIntegerEnv(name: string, fallback: number): number {
@@ -138,7 +161,26 @@ export function resolveHttpOptions(overrides: Partial<HttpServerOptions> = {}): 
     sessionTtlMs: overrides.sessionTtlMs ?? positiveIntegerEnv("NL_GOV_SESSION_TTL_MS", DEFAULT_SESSION_TTL_MS),
     maxSessions: overrides.maxSessions ?? positiveIntegerEnv("NL_GOV_MAX_SESSIONS", DEFAULT_MAX_SESSIONS),
     sweepIntervalMs: overrides.sweepIntervalMs,
+    stateless: overrides.stateless ?? booleanEnv("NL_GOV_HTTP_STATELESS", false),
+    jsonResponse: overrides.jsonResponse ?? booleanEnv("NL_GOV_HTTP_JSON_RESPONSE", false),
+    maxConcurrent: overrides.maxConcurrent ?? positiveIntegerEnv("NL_GOV_HTTP_MAX_CONCURRENT", DEFAULT_MAX_CONCURRENT),
+    sourceHealth: overrides.sourceHealth ?? booleanEnv("NL_GOV_HTTP_SOURCE_HEALTH", true),
   };
+}
+
+const ALL_INTERFACES = new Set(["", "0.0.0.0", "::", "[::]"]);
+
+/**
+ * The startup warning for a server that every network client can reach and every website could call
+ * from a browser: bound to all interfaces without an Origin allowlist. Undefined otherwise.
+ */
+export function exposureWarning(options: Pick<HttpServerOptions, "host" | "allowedOrigins">): string | undefined {
+  if (!ALL_INTERFACES.has((options.host ?? "").trim()) || options.allowedOrigins.length > 0) return undefined;
+  return (
+    "The HTTP transport listens on all interfaces without an Origin allowlist and has no authentication. " +
+    "Set NL_GOV_HTTP_HOST=127.0.0.1 for local use, or set NL_GOV_ALLOWED_ORIGINS to the origins of your clients " +
+    "and put authentication in front of the server when a network can reach it."
+  );
 }
 
 export type EvictionReason = "idle" | "capacity";
@@ -312,6 +354,8 @@ function startSweeper(registry: SessionRegistry<unknown>, options: HttpServerOpt
 }
 
 function listen(app: express.Express, options: HttpServerOptions, label: string): HttpServer {
+  const warning = exposureWarning(options);
+  if (warning) logger.warn({ host: options.host ?? "all interfaces" }, warning);
   const onListening = () => {
     const address = httpServer.address();
     const bound = typeof address === "object" && address ? address : undefined;
@@ -416,7 +460,7 @@ export async function startSseServer(overrides: Partial<HttpServerOptions> = {})
     await session.transport.handlePostMessage(req, res, req.body);
   });
 
-  addHealthRoutes(app, config);
+  addHealthRoutes(app, config, options);
   app.use(jsonRpcErrorHandler);
 
   const httpServer = listen(app, options, "SSE");
@@ -424,14 +468,72 @@ export async function startSseServer(overrides: Partial<HttpServerOptions> = {})
 }
 
 /* ------------------------------------------------------------------ */
-/*  Streamable HTTP (MCP spec 2025-03-26)                              */
+/*  Streamable HTTP (protocol versions 2024-10-07 up to 2025-11-25)    */
 /* ------------------------------------------------------------------ */
+
+/**
+ * Stateless Streamable HTTP: each POST gets its own McpServer and transport, closed when the response
+ * ends, so no Mcp-Session-Id is needed (sessions are optional in the spec). This keeps working behind
+ * proxies and gateways that drop that header. The server keeps no per-session state, so nothing is lost.
+ */
+function addStatelessMcpRoutes(app: express.Express, options: HttpServerOptions): () => number {
+  const maxConcurrent = options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
+  let inFlight = 0;
+
+  app.post("/mcp", async (req, res) => {
+    if (inFlight >= maxConcurrent) {
+      res.status(503).set("Retry-After", "1").json(jsonRpcError(-32000, "Server busy: too many concurrent requests"));
+      return;
+    }
+    inFlight++;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      inFlight--;
+    };
+    // 'close' fires after the response is sent, on a client abort and after an error response alike.
+    res.on("close", release);
+    if (res.destroyed) {
+      release();
+      return;
+    }
+
+    const server = createServer();
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+      enableJsonResponse: options.jsonResponse,
+    });
+    trackSession(transport, server, release);
+    res.on("close", () => {
+      transport.close().catch(() => undefined);
+    });
+
+    await server.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+  });
+
+  // Without sessions there is no stream to open (GET) and nothing to terminate (DELETE).
+  app.all("/mcp", (_req, res) => {
+    res.status(405).set("Allow", "POST").json(jsonRpcError(-32000, "Method not allowed: this server is stateless, use POST"));
+  });
+
+  return () => inFlight;
+}
 
 export async function startStreamableHttpServer(overrides: Partial<HttpServerOptions> = {}): Promise<ServerHandle> {
   printBanner();
   const config = loadConfig();
   const options = resolveHttpOptions(overrides);
   const app = createHttpApp(options);
+
+  if (options.stateless) {
+    const inFlightCount = addStatelessMcpRoutes(app, options);
+    addHealthRoutes(app, config, options);
+    app.use(jsonRpcErrorHandler);
+    const httpServer = listen(app, options, "Streamable HTTP (stateless)");
+    return { httpServer, closeConnections, sessionCount: () => 0, inFlightCount };
+  }
 
   const sessions = new SessionRegistry<{ server: McpServer; transport: StreamableHTTPServerTransport }>({
     ttlMs: options.sessionTtlMs,
@@ -479,6 +581,7 @@ export async function startStreamableHttpServer(overrides: Partial<HttpServerOpt
     const server = createServer();
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
+      enableJsonResponse: options.jsonResponse,
     });
 
     trackSession(transport, server, () => {
@@ -499,7 +602,7 @@ export async function startStreamableHttpServer(overrides: Partial<HttpServerOpt
     }
   });
 
-  addHealthRoutes(app, config);
+  addHealthRoutes(app, config, options);
   app.use(jsonRpcErrorHandler);
 
   const httpServer = listen(app, options, "Streamable HTTP");
@@ -514,10 +617,13 @@ interface HealthConfig {
   server: { name: string; version: string };
 }
 
-function addHealthRoutes(app: express.Express, config: HealthConfig): void {
+function addHealthRoutes(app: express.Express, config: HealthConfig, options: Pick<HttpServerOptions, "sourceHealth">): void {
   app.get("/health", (_req, res) => {
     res.json({ ok: true, name: config.server.name, version: config.server.version });
   });
+
+  // NL_GOV_HTTP_SOURCE_HEALTH=false hides which upstream sources fail, for deployments that should not share that.
+  if (options.sourceHealth === false) return;
 
   app.get("/health/sources", (_req, res) => {
     res.json({
