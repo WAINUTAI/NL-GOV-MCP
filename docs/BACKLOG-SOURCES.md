@@ -284,6 +284,8 @@ Beoordeeld met de vaste regel: alleen officiële, open bronnen. Een bron die een
 - **`tweede_kamer_document_get`**: een onbekend document (HTTP 404) komt terug als `http_error`, niet als leeg resultaat met uitleg zoals bij de andere get-tools.
 - **`isError`**: fouten op toolniveau (`error`-vorm) komen terug zonder `isError: true`; de MCP-spec suggereert dat wel. Voorlopig bewust zo gelaten.
 - **LiDO-route in `nl_gov_ask`**: 'uitspraken die verwijzen naar <ECLI>' leest nu de uitspraak zelf en verwijst naar `lido_verwijzingen_lijst`; een eigen route die de verwijzingen direct ophaalt ontbreekt.
+- **MCP TypeScript SDK v2**: de server draait op SDK v1 (`@modelcontextprotocol/sdk` 1.x, protocolversies tot en met 2025-11-25). De MCP-specificatie 2026-07-28 (stateless, zonder `initialize` en `Mcp-Session-Id`) komt alleen in SDK v2 (`@modelcontextprotocol/server`); v1 krijgt die versie niet en krijgt bugfixes tot minstens zes maanden na 27 juli 2026. Migreren vóór eind januari 2027, of eerder als een client de nieuwe versie eist. Let op: v2 bedient de oude HTTP+SSE-transport niet meer (alleen via het bevroren legacy-pakket) en vraagt zod 4.
+- **Optionele API key voor de HTTP-transports**: een eenvoudige sleutelcontrole (bijvoorbeeld `NL_GOV_HTTP_API_KEY`, header) voor kleine installaties zonder reverse proxy. Alleen bouwen bij een concrete vraag; OAuth en per-gebruiker-toegang horen in de proxy of gateway van de installatie, niet in de server.
 
 ## Subsidies en financiering (oktober 2026)
 
