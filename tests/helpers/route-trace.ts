@@ -79,6 +79,8 @@ export function sourceOfUrl(raw: string): string {
   // search on type gemeente) and the address or place for the DSO.
   if (host === "api.pdok.nl") return url.searchParams.get("fq") === "type:gemeente" ? "brp_gewaspercelen" : "dso_omgevingsdocumenten";
   if (host.endsWith("omgevingswet.overheid.nl")) return "dso_omgevingsdocumenten";
+  // Gehoord.de: transcripts of live and today's debates and the Eerste Kamer (with GEHOORD_KEY).
+  if (host === "gehoord.de") return "gehoord";
   if (host === "data.overheid.nl") return "data_overheid";
   return host;
 }

@@ -166,6 +166,7 @@ describe("nl_gov_ask routing over the labelled corpus", () => {
     // No keys from the environment: the plan and the routes depend on them.
     vi.stubEnv("OVERHEID_API_KEY", "");
     vi.stubEnv("KNMI_API_KEY", "");
+    vi.stubEnv("GEHOORD_KEY", "");
     for (const c of cases) {
       vi.stubEnv("DSO_API_KEY", c.dsoKey ? "test-key" : "");
       const plan = await harness.plan(c.question);

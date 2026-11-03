@@ -121,6 +121,8 @@ export interface RouteFacts {
   subsidies: string[] | undefined;
   /** What was said in a Tweede Kamer debate (detectDebatIntent). */
   debat: boolean;
+  /** Debates now or today, or what was said in the Eerste Kamer, with GEHOORD_KEY set (detectGehoordIntent). */
+  gehoord: boolean;
   /** The algorithms of a government body (detectAlgoritmeIntent). */
   algoritme: boolean;
   /** Two or more planner sources and a multi-source signal: they run side by side. */
@@ -148,6 +150,7 @@ export type RouteId =
   | "ecli_buitenland"
   | "wet_artikel"
   | "debat"
+  | "gehoord"
   | "algoritme"
   | "rekenkamer"
   | "scp"
@@ -197,6 +200,8 @@ export const ROUTES: readonly Route[] = [
   { id: "ecli_buitenland", matches: (f) => f.foreignEcli, sources: () => [] },
   { id: "wet_artikel", matches: (f) => f.wetArtikel, sources: one("wetten_bwb") },
   { id: "debat", matches: (f) => f.debat, sources: one("tweede_kamer_debatten") },
+  // Live and today's debates and the Eerste Kamer: the verslagen do not have them (only with GEHOORD_KEY).
+  { id: "gehoord", matches: (f) => f.gehoord, sources: one("gehoord") },
   { id: "algoritme", matches: (f) => f.algoritme, sources: one("algoritmeregister") },
   // A research body named in the question: its own publications.
   { id: "rekenkamer", matches: (f) => f.research === "rekenkamer", sources: one("rekenkamer") },

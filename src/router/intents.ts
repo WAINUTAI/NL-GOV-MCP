@@ -563,7 +563,7 @@ const DEBAT_WORD = /(?<![\p{L}\p{N}])(\p{L}*?)debat(?:ten)?(?![\p{L}\p{N}])/u;
 const DEBAT_KIND_PREFIXES = new Set(["", "kamer", "commissie", "plenair", "plenaire", "tweeminuten", "dertigleden", "begrotings", "wetgevings", "nota", "spoed", "interpellatie", "het"]);
 
 /** Another body than the Tweede Kamer, or a question about the agenda, votes or moties: other routes. */
-const DEBAT_OTHER = /\b(?:gemeenteraad|raadsvergadering|raadsleden|raadslid|provinciale staten|statenvergadering|statenleden|eerste kamer|senaat|europees parlement|waterschap|wanneer|agenda|gepland|stem(?:de|den|ming|mingen)|motie|moties|amendement|amendementen|aangenomen|verworpen)\b/;
+const DEBAT_OTHER = /\b(?:gemeenteraad|raadsvergadering|raadsleden|raadslid|provinciale staten|statenvergadering|statenleden|eerste kamer(?:lid|leden)?|senaat|senator(?:en)?|europees parlement|waterschap|wanneer|agenda|gepland|stem(?:de|den|ming|mingen)|motie|moties|amendement|amendementen|aangenomen|verworpen)\b/;
 
 const DEBAT_SPREKER_FUNCTIES: Array<[RegExp, string]> = [
   [/\b(?:premier|minister-president)\b/, "minister-president"],
@@ -592,30 +592,117 @@ export function detectDebatIntent(question: string): DebatIntent | undefined {
   if (!(debatWord && (speech || DEBAT_IN.test(q))) && !(speech && inKamer)) return undefined;
 
   const intent: DebatIntent = {};
-  const fracties = DEBAT_FRACTIES.filter(([re]) => re.test(text)).map(([, name]) => name);
-  if (fracties.length === 1) intent.fractie = fracties[0];
-  const functie = DEBAT_SPREKER_FUNCTIES.find(([re]) => re.test(q));
-  if (functie) intent.spreker = functie[1];
-  if (!intent.spreker) {
-    // "Wat zei Klaver …", "Wat heeft Van Campen gezegd …": a capitalised name after the verb.
-    const name = /\b(?:zei|zegt|sprak|heeft|hebben|had)\s+((?:(?:van|de|der|den|ten|ter)\s+)*[A-Z][\p{L}'-]+(?:\s+(?:(?:van|de|der|den|ten|ter)\s+)*[A-Z][\p{L}'-]+)?)/u.exec(text);
-    const candidate = name?.[1];
-    if (candidate && !DEBAT_FRACTIES.some(([re]) => re.test(candidate)) && !/^(?:De|Het|Een|Er|Ik|Je|U|Wij|We|Zij|Ze|Tweede|Kamer)\b/.test(candidate)) {
-      intent.spreker = candidate;
-    }
-  }
+  const who = debatSpeaker(text, q);
+  if (who.fractie) intent.fractie = who.fractie;
+  if (who.spreker) intent.spreker = who.spreker;
   const prefix = debatWord?.[1] ?? "";
   if (prefix.length >= 4 && !DEBAT_KIND_PREFIXES.has(prefix)) intent.debat = prefix;
 
-  // The topic: what follows "over", up to where the question goes on about the debate, the Kamer or the time.
-  const over = /\bover\s+(.+?)(?=\s+(?:in|tijdens|bij|gezegd|gesproken|vorige|afgelopen|deze|dit|vandaag|gisteren|eergisteren)\b|[?.!]|$)/u.exec(text);
-  if (over) {
-    const topic = parseTkQuery(over[1].replace(/\b(?:het|de|een)\s+\p{L}*debat(?:ten)?\b/giu, " ")).terms
-      .map((t) => (t.mode === "word" && /\s/.test(t.text) ? `"${t.text}"` : t.text))
-      .join(" ");
-    if (topic) intent.query = topic;
-  }
+  const topic = debatTopic(text);
+  if (topic) intent.query = topic;
   return intent.query || intent.debat || intent.fractie || intent.spreker ? intent : undefined;
+}
+
+/** The fractie (only when the question names one) and the speaker (a function, else a capitalised name after the verb). */
+function debatSpeaker(text: string, q: string): { fractie?: string; spreker?: string } {
+  const out: { fractie?: string; spreker?: string } = {};
+  const fracties = DEBAT_FRACTIES.filter(([re]) => re.test(text)).map(([, name]) => name);
+  if (fracties.length === 1) out.fractie = fracties[0];
+  const functie = DEBAT_SPREKER_FUNCTIES.find(([re]) => re.test(q));
+  if (functie) out.spreker = functie[1];
+  if (!out.spreker) {
+    // "Wat zei Klaver …", "Wat heeft Van Campen gezegd …": a capitalised name after the verb.
+    const name = /\b(?:zei|zegt|sprak|heeft|hebben|had)\s+((?:(?:van|de|der|den|ten|ter)\s+)*[A-Z][\p{L}'-]+(?:\s+(?:(?:van|de|der|den|ten|ter)\s+)*[A-Z][\p{L}'-]+)?)/u.exec(text);
+    const candidate = name?.[1];
+    // "de Eerste Kamer", "de Kamer": the lowercase article is taken as a name particle; the Kamer is no speaker.
+    const core = candidate?.replace(/^(?:(?:van|de|der|den|ten|ter)\s+)+/, "");
+    if (
+      candidate &&
+      !DEBAT_FRACTIES.some(([re]) => re.test(candidate)) &&
+      !/^(?:De|Het|Een|Er|Ik|Je|U|Wij|We|Zij|Ze|Tweede|Eerste|Kamer)\b/.test(candidate) &&
+      !/^(?:tweede|eerste|kamer|senaat|parlement)\b/i.test(core ?? "")
+    ) {
+      out.spreker = candidate;
+    }
+  }
+  return out;
+}
+
+/** The topic: what follows "over", up to where the question goes on about the debate, the Kamer or the time. */
+function debatTopic(text: string, alsoBesproken = false): string | undefined {
+  // For Gehoord also up to "besproken" and "nu" ("Wat wordt er over X besproken", "over X nu").
+  const over = (alsoBesproken
+    ? /\bover\s+(.+?)(?=\s+(?:in|tijdens|bij|gezegd|gesproken|besproken|bespreekt|bespreken|vorige|afgelopen|deze|dit|vandaag|gisteren|eergisteren|nu)\b|[?.!]|$)/u
+    : /\bover\s+(.+?)(?=\s+(?:in|tijdens|bij|gezegd|gesproken|vorige|afgelopen|deze|dit|vandaag|gisteren|eergisteren)\b|[?.!]|$)/u).exec(text);
+  if (!over) return undefined;
+  const topic = parseTkQuery(over[1].replace(/\b(?:het|de|een)\s+\p{L}*debat(?:ten)?\b/giu, " ")).terms
+    .map((t) => (t.mode === "word" && /\s/.test(t.text) ? `"${t.text}"` : t.text))
+    .join(" ");
+  return topic || undefined;
+}
+
+/**
+ * The one phrase Gehoord.de searches for a topic: the API takes the whole
+ * string as one literal phrase, so of several terms the longest (a quoted
+ * phrase counts as one term). "stikstof \"medische isotopen\"" → "medische isotopen".
+ */
+export function gehoordPhrase(query: string): string {
+  const parts = [...query.matchAll(/"([^"]+)"|(\S+)/g)].map((m) => (m[1] ?? m[2] ?? "").trim()).filter(Boolean);
+  return [...parts].sort((a, b) => b.length - a.length)[0] ?? "";
+}
+
+export type GehoordIntent =
+  /** Which debates run now (status live) or ran today, in a kamer or both. */
+  | { kind: "list"; kamer?: "tk" | "ek"; status?: "live" }
+  /** What was said about a topic: in the Eerste Kamer, or now/today in either Kamer ("nu": nu is true, search today only). */
+  | { kind: "search"; kamer?: "tk" | "ek"; query: string; fractie?: string; spreker?: string; nu?: true };
+
+/** Another body than the Kamers, or a question about the agenda, votes or moties: other routes. */
+const GEHOORD_OTHER = /\b(?:gemeenteraad|raadsvergadering|raadsleden|raadslid|provinciale staten|statenvergadering|statenleden|europees parlement|waterschap|wanneer|agenda|gepland|stem(?:de|den|ming|mingen)|motie|moties|amendement|amendementen|aangenomen|verworpen)\b/;
+const GEHOORD_EK = /\b(?:eerste kamer(?:lid|leden)?|senaat|senator(?:en)?)\b/;
+/** "nu", "op dit moment", "live": a debate that is running. */
+const GEHOORD_NOW = /\b(?:nu|op dit moment|momenteel|live|op dit ogenblik)\b/;
+const GEHOORD_TODAY = /\bvandaag\b/;
+/** Courts: "uitspraak" there is a ruling, not something said in the Kamer. */
+const GEHOORD_RECHT = /\b(?:rechter\w*|rechtbank\w*|gerechtshof|hoge raad|raad van state|vonnis\w*|arrest\w*|ecli|jurisprudentie|rechtspraak)\b/;
+/** A sitting: a debate word, debating, or being discussed, met or under way. */
+const GEHOORD_SESSION = /(?<![\p{L}\p{N}])(?:\p{L}*debat(?:ten)?|debatte\p{L}*|besproken|bespreekt|bespreken|vergader\p{L}*|aan de orde|gaande|bezig|loopt|lopen)(?![\p{L}\p{N}])/u;
+const GEHOORD_KAMER = /\b(?:tweede kamer|eerste kamer(?:lid|leden)?|senaat|senator(?:en)?|kamer|parlement)\b|kamerdebat/;
+
+/**
+ * A debate question for Gehoord.de that the verslagen cannot answer (see
+ * detectDebatIntent for those): which debates run now or ran today ("Welk
+ * debat is er nu live in de Tweede Kamer?", "Wat wordt er vandaag besproken in
+ * de Kamer?"), what is said about a topic now or today, and what was said in
+ * the Eerste Kamer ("Wat zei de minister in de Eerste Kamer over embryo's?").
+ * Precision first: never about another body, the agenda, votes, moties or
+ * amendementen, nor longer than DEBAT_QUESTION_MAX_CHARS. The router only asks
+ * with GEHOORD_KEY set.
+ */
+export function detectGehoordIntent(question: string): GehoordIntent | undefined {
+  const text = String(question ?? "").trim();
+  if (!text || text.length > DEBAT_QUESTION_MAX_CHARS) return undefined;
+  const q = text.toLowerCase();
+  if (GEHOORD_OTHER.test(q) || !GEHOORD_KAMER.test(q)) return undefined;
+  const ek = GEHOORD_EK.test(q);
+  const kamer: "tk" | "ek" | undefined = ek ? "ek" : /\btweede kamer\b/.test(q) ? "tk" : undefined;
+  const speech = DEBAT_SPEECH.test(q);
+  const session = GEHOORD_SESSION.test(q);
+  const now = GEHOORD_NOW.test(q);
+  const today = GEHOORD_TODAY.test(q);
+  if (!speech && !session) return undefined;
+  // "Welke uitspraken deed de rechter …": a ruling, unless someone said something or a debate is named.
+  if (!session && GEHOORD_RECHT.test(q) && !DEBAT_SPEECH.test(q.replace(/\buitspra(?:ak|ken)\b/g, " "))) return undefined;
+  if (!ek && !now && !today) return undefined;
+  // The Eerste Kamer transcripts have no punctuation: "embryo's" is said as "embryos".
+  const rawTopic = debatTopic(text, true);
+  const topic = rawTopic ? gehoordPhrase(ek ? rawTopic.replace(/[^\p{L}\p{N}\s"]/gu, "") : rawTopic) : "";
+  if (topic) {
+    const who = debatSpeaker(text, q);
+    return { kind: "search", kamer, query: topic, ...(who.fractie ? { fractie: who.fractie } : {}), ...(who.spreker ? { spreker: who.spreker } : {}), ...(now && !today ? { nu: true as const } : {}) };
+  }
+  // No topic: which debates (run now, ran today, or in the Eerste Kamer in the period asked).
+  return { kind: "list", ...(kamer ? { kamer } : {}), ...(now ? { status: "live" as const } : {}) };
 }
 
 const ALGORITME_QUESTION_MAX_CHARS = 300;

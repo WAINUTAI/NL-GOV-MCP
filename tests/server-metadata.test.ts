@@ -45,5 +45,6 @@ describe("server metadata in initialize and tools/list", () => {
     expect(desc("nl_gov_ask")).toMatch(/^Use this when the best source is unclear/);
     expect(desc("dso_omgevingsdocumenten_search")).toContain("Requires DSO_API_KEY");
     expect(desc("dso_omgevingsdocument_tekst")).toContain("Requires DSO_API_KEY");
+    for (const name of ["gehoord_debatten_search", "gehoord_debatten_list", "gehoord_debat_get"]) expect(desc(name)).toContain("Requires GEHOORD_KEY");
   });
 });
