@@ -28,7 +28,7 @@ function urlOf(fetchMock: ReturnType<typeof vi.fn>, call = 0): URL {
 const MOTIE = {
   Id: "eb749f13-9fed-43b6-b869-04027676d08a",
   Soort: "Motie",
-  DocumentNummer: "2026D47851",
+  Nummer: "2026D47851",
   Titel: "Vaststelling van de begrotingsstaat van het Ministerie van Financiën (IXB) voor het jaar 2027",
   Onderwerp: "Motie van het lid Van Eijk c.s. over de aanpassing van het heffingsvrij resultaat ",
   Datum: "2026-10-01T00:00:00+02:00",
@@ -38,7 +38,7 @@ const MOTIE = {
 const BIJLAGE = {
   Id: "3f0c2a71-5b6e-4d2a-9a41-1c7e8b2d4f60",
   Soort: "Bijlage",
-  DocumentNummer: "2025D41007",
+  Nummer: "2025D41007",
   Titel: null,
   Onderwerp: "Beslisnota bij Kamerbrief over wachtlijsten in de jeugdzorg",
   Datum: "2025-10-06T00:00:00+02:00",
@@ -163,9 +163,9 @@ describe("tweede_kamer_search", () => {
       Soort: "Motie",
       Titel: "Evaluatie Schipholbeleid",
       Onderwerp: "Motie van het lid Van der Plas over de gevolgen van stikstofbeleid",
-      GestartOp: "2026-09-29T00:00:00+02:00",
+      Datum: "2026-09-29T00:00:00+02:00",
       Status: "Vrijgegeven",
-      Document: [{ Id: "d-9", DocumentNummer: "2026D47272", Soort: "Motie" }],
+      Document: [{ Id: "d-9", Nummer: "2026D47272", Soort: "Motie" }],
     };
     const fetchMock = vi.fn(async () => jsonResponse({ "@odata.count": 1, value: [zaak] }));
     vi.stubGlobal("fetch", fetchMock);
@@ -176,7 +176,7 @@ describe("tweede_kamer_search", () => {
     expect(url.pathname.endsWith("/Zaak")).toBe(true);
     const filter = url.searchParams.get("$filter")!;
     expect(filter).toContain("contains(Onderwerp,'stikstof')");
-    expect(filter).toContain("GestartOp ge 2026-07-01T00:00:00+02:00");
+    expect(filter).toContain("Datum ge 2026-07-01T00:00:00+02:00");
     expect(payload.records[0].title).toBe(zaak.Onderwerp);
     expect(payload.records[0].canonical_url).toBe("https://www.tweedekamer.nl/kamerstukken/detail?id=2026Z20455&did=2026D47272");
     expect(payload.provenance.total_results).toBe(1);
@@ -282,7 +282,7 @@ describe("tweede_kamer_search — meeting date of Agendapunt, Besluit and Stemmi
   const besluit = (id: string, agendapunt: string | null) => ({
     Id: id,
     Agendapunt_Id: agendapunt,
-    BesluitSoort: "Stemmen - aangenomen",
+    Soort: "Stemmen - aangenomen",
     BesluitTekst: "Aangenomen.",
     GewijzigdOp: CHANGED,
     Verwijderd: false,
@@ -317,7 +317,7 @@ describe("tweede_kamer_search — meeting date of Agendapunt, Besluit and Stemmi
     expect(fetchMock).toHaveBeenCalledTimes(2);
     const search = urlOf(fetchMock, 0);
     expect(search.searchParams.get("$expand")).toBeNull();
-    expect(search.searchParams.get("$orderby")).toBe("GewijzigdOp desc");
+    expect(search.searchParams.get("$orderby")).toBe("GewijzigdOp desc,Id");
     const lookup = urlOf(fetchMock, 1);
     expect(entitySet(lookup.href)).toBe("Agendapunt");
     expect(lookup.searchParams.get("$filter")).toBe(`Id in (${AGENDAPUNT_A},${AGENDAPUNT_B})`);
@@ -371,12 +371,12 @@ describe("tweede_kamer_search — meeting date of Agendapunt, Besluit and Stemmi
   });
 
   it("dates a Stemming by its voting session and an Agendapunt by its Activiteit", async () => {
-    const vote = (id: string) => ({ Id: id, Besluit_Id: BESLUIT, Soort: "Voor", ActorFractie: "D66", GewijzigdOp: CHANGED });
+    const vote = (id: string) => ({ Id: id, Besluit_Id: BESLUIT, Soort: "Voor", FractieNaam: "D66", GewijzigdOp: CHANGED });
     const votes = serve([vote("s-1"), vote("s-2")], () =>
       jsonResponse({ value: [{ Id: BESLUIT, Agendapunt: { Id: AGENDAPUNT_A, Activiteit: { Id: ACTIVITEIT, Datum: "2026-07-02T13:30:00+02:00" } } }] }),
     );
     vi.stubGlobal("fetch", votes);
-    const voted = await callTool("tweede_kamer_search", { entity: "Stemming", filter: "ActorFractie eq 'D66'", top: 2 });
+    const voted = await callTool("tweede_kamer_search", { entity: "Stemming", filter: "FractieNaam eq 'D66'", top: 2 });
     expect(votes).toHaveBeenCalledTimes(2);
     const voteLookup = urlOf(votes, 1);
     expect(entitySet(voteLookup.href)).toBe("Besluit");
@@ -441,9 +441,9 @@ describe("tweede_kamer_votes", () => {
   const BESLUIT_ID = "c32bfbe5-f046-48f3-bd56-4a074d4a5ae7";
   const besluit = {
     Id: BESLUIT_ID,
-    BesluitSoort: "Stemmen - verworpen",
+    Soort: "Stemmen - verworpen",
     BesluitTekst: "Verworpen.",
-    StemmingsSoort: "Met handopsteken",
+    Tekst: "Met handopsteken",
     Status: "Besluit",
     Zaak: [
       {
@@ -452,7 +452,7 @@ describe("tweede_kamer_votes", () => {
         Soort: "Motie",
         Titel: "Evaluatie Schipholbeleid",
         Onderwerp: "Gewijzigde motie van de leden Kröger en Kostić over de MER",
-        Document: [{ Id: "d-1", DocumentNummer: "2026D34153", Soort: "Motie (gewijzigd/nader)" }],
+        Document: [{ Id: "d-1", Nummer: "2026D34153", Soort: "Motie (gewijzigd/nader)" }],
       },
     ],
     Agendapunt: {
@@ -466,8 +466,8 @@ describe("tweede_kamer_votes", () => {
     Besluit_Id: BESLUIT_ID,
     Soort: soort,
     FractieGrootte: size,
-    ActorNaam: actor,
-    ActorFractie: actor,
+    Naam: actor,
+    FractieNaam: actor,
     Vergissing: false,
     GewijzigdOp: "2026-10-02T10:09:24.86+02:00",
   });
@@ -541,7 +541,7 @@ describe("tweede_kamer_votes", () => {
 
     expect(payload.error).toBeUndefined();
     expect(payload.records).toHaveLength(1);
-    expect(payload.records[0].data).toMatchObject({ ActorFractie: "VVD", Soort: "Tegen", besluit_id: BESLUIT_ID, uitslag: null });
+    expect(payload.records[0].data).toMatchObject({ FractieNaam: "VVD", Soort: "Tegen", besluit_id: BESLUIT_ID, uitslag: null });
     expect(payload.access_note).toContain("konden niet (allemaal) worden opgehaald");
     // All votes on this page: the decision count covers them all.
     expect(payload.summary).toBe("1 van 1 stemmingen over 1 besluit");

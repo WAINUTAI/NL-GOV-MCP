@@ -3,11 +3,29 @@
  *
  * Gehoord.de is the search index and the fallback; the verslag of the Tweede
  * Kamer (VLOS, Gegevensmagazijn) is the text. For every Tweede Kamer hit this
- * finds the vergadering of its debate, reads the verslag (cached, see
+ * finds its debate in a verslag (cached, see
  * TweedeKamerDebattenSource.getVerslag) and picks the fragment of the same
  * person (Gehoord speakerLabel = TK Persoon GUID = <spreker objectid>) that
  * overlaps the hit most in time. When there is none, the hit keeps its
  * transcript and gets an honest status.
+ *
+ * Two routes, the direct one first (methode on the Koppeling):
+ * - debat_id: Gehoord's tkDebateId (the Debat Direct id) is the objectid of
+ *   the debate's <activiteit> in the verslag, exactly. The verslagen of the
+ *   candidate vergaderingen of its day are searched for it and the fragment is
+ *   matched inside that activiteit: the parts of a begrotingsdebat split
+ *   over the day, or two debates in one zaal, cannot take each other's
+ *   fragment. Gehoord's debate boundaries are not always VLOS's (Gehoord can
+ *   file the Stemmingen after a debate under it): a hit that is not in the
+ *   activiteit and runs outside its span (aanvang-eind, beyond the tolerance)
+ *   is looked for in the whole verslag. The id is not in the OData API (tkActivityId, the Activiteit Id,
+ *   has no way to its Vergadering or Verslag), and tkActivityNumber / parlisid
+ *   is no key: the parts of a split begroting share one, Gehoord often has none
+ *   for a plenary debate, and a cancelled and a held debate shared one.
+ * - zaal_tijd: the vergadering by zaal and start time, the fragment by
+ *   speaker and time across the whole verslag. For a hit without a
+ *   tkDebateId, with a stale one (no activiteit has it: 2 of 84 held debates
+ *   measured) or of a debate without a verslag yet.
  *
  * Facts this rests on (measured November 2026 on the debates of October):
  * - Times line up to the second: Gehoord gives UTC, the verslag local
@@ -22,24 +40,31 @@
  *   compared on Gehoord's locationId ('klompezaal'), the Gegevensmagazijn
  *   Zaal folded to the same key ("Klompézaal" → klompezaal), else on hall.
  *   Its verslag follows 2-12 days later.
- * - Gehoord's tkActivityId is the Activiteit in the Gegevensmagazijn, but an
- *   Activiteit has no navigation to its Vergadering or Verslag (only an equal
- *   Aanvangstijd), so zaal and time stay the link; tkActivityNumber does give
- *   the commissievergadering page directly.
+ * - The day of a debate is the date in its Debat Direct url
+ *   (debatdirect.tweedekamer.nl/2026-10-28/...), else vergaderDag. A plenary
+ *   debate after midnight is also looked for on the day before (night sitting).
+ * - Of a vergadering the most corrected, then newest verslag is read:
+ *   tussenpublicaties are cumulative (pickVerslag). A plenary verslag appears
+ *   the same day or the next, a committee verslag days later: before that
+ *   there is nothing to link.
+ * - The commissievergadering page comes from Gehoord's tkActivityNumber, else
+ *   from the parlisid of the activiteit in the verslag (only for that page).
  * - Technische briefings, procedurevergaderingen, rondetafelgesprekken and
- *   constituerende vergaderingen never get a verslag; every hit carries its
- *   debate's debateType, so no lookup is needed. A cancelled debate is not held.
+ *   constituerende vergaderingen get no verslag with text (at most an empty
+ *   casco, which is never read); every hit carries its debate's debateType, so
+ *   no lookup is needed. A cancelled debate is not held.
  * - The Eerste Kamer has no VLOS; its speakerLabel is the Eerste Kamer's own
  *   person id, not a TK GUID.
  *
  * Budgets cap what costs a request, not the hits: the vergaderingen of at
  * most KOPPELING_MAX_DAGEN days and KOPPELING_MAX_VERSLAGEN verslagen per
- * call; every hit whose verslag is read is linked. Everything runs within
+ * call, each listed or read once per call and shared by its hits; every hit
+ * whose verslag is read is linked. Everything runs within
  * KOPPELING_DEADLINE_MS, each request with the time left and no retry, so
  * nothing keeps a connector slot after it. Every failure leaves the hit with
  * its transcript.
  */
-import type { DebatFragment, DebatVergadering, DebatVerslag, TweedeKamerDebattenSource } from "./tweede-kamer-debatten.js";
+import type { DebatActiviteit, DebatFragment, DebatVergadering, DebatVerslag, TweedeKamerDebattenSource } from "./tweede-kamer-debatten.js";
 import type { GehoordContribution, GehoordDebateRef } from "./gehoord.js";
 import { foldText } from "./dso-regeltekst.js";
 import { logger } from "../utils/logger.js";
@@ -59,8 +84,10 @@ export const KOPPELING_DEADLINE_MS = 25_000;
 
 export type KoppelingStatus = "officieel" | "nog_geen_verslag" | "geen_verslag_verwacht" | "eerste_kamer" | "niet_gekoppeld";
 export type KoppelingMode = "officieel" | "uit";
+/** How the hit found its verslag: the debate's id in the verslag, or zaal and start time. */
+export type KoppelingMethode = "debat_id" | "zaal_tijd";
 
-/** Debate types that never get a verslag in the Gegevensmagazijn. */
+/** Debate types that get no verslag with text in the Gegevensmagazijn (at most an empty casco). */
 export const GEEN_VERSLAG_TYPES = new Set(["technische briefing", "procedurevergadering", "rondetafelgesprek", "constituerende vergadering"]);
 
 const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -69,7 +96,11 @@ export interface Koppeling {
   status: KoppelingStatus;
   /** Why it is not officieel (or a detail of the match). */
   reden?: string;
+  /** How the verslag was found; absent when none was. */
+  methode?: KoppelingMethode;
   vergadering?: DebatVergadering;
+  /** The activiteit (debate) of the verslag the hit is in: by its id (debat_id) or around the fragment (zaal_tijd). */
+  activiteit?: Pick<DebatActiviteit, "objectid" | "parlisid" | "titel" | "soort">;
   verslag?: Pick<DebatVerslag, "verslag_id" | "status" | "publicatie">;
   fragment?: DebatFragment;
   /** Seconds the Gehoord hit and the official fragment overlap. */
@@ -152,6 +183,23 @@ export function vergaderDag(debate: DebateWhere, fallback?: string): string | un
   return amsterdamDay(isPlenair(debate) ? t - NACHT_GRENS_MS : t);
 }
 
+/** The meeting day in a Debat Direct url: "https://debatdirect.tweedekamer.nl/2026-10-28/..." → "2026-10-28". */
+export function debatDirectDag(url: string | undefined): string | undefined {
+  const m = /^https?:\/\/debatdirect\.tweedekamer\.nl\/(\d{4}-\d{2}-\d{2})(?:[/?#]|$)/i.exec(url ?? "");
+  return m?.[1];
+}
+
+/**
+ * The days whose vergaderingen may hold a debate's activiteit: the day in its
+ * Debat Direct url, else vergaderDag; for a plenary debate after midnight
+ * vergaderDag adds the day before (a night sitting is the vergadering of the
+ * day it began). Each day once.
+ */
+export function debatDagen(debate: DebateWhere & Pick<GehoordDebateRef, "url">, fallback?: string): string[] {
+  const days = [debatDirectDag(debate.url), vergaderDag(debate, fallback)].filter((d): d is string => Boolean(d));
+  return [...new Set(days)];
+}
+
 /** "14:25" in Amsterdam time. */
 function amsterdamClock(epochMs: number): string {
   return new Intl.DateTimeFormat("nl-NL", { timeZone: "Europe/Amsterdam", hour: "2-digit", minute: "2-digit" }).format(new Date(epochMs));
@@ -210,6 +258,51 @@ export function matchVergadering(
     .map((v) => ({ v, d: Math.abs(Date.parse(v.aanvangstijd ?? "") - start) }))
     .filter((x) => Number.isFinite(x.d) && x.d <= KOPPELING_START_WINDOW_MS)
     .sort((a, b) => a.d - b.d)[0]?.v;
+}
+
+/** How far an instant lies outside a vergadering's span [Aanvangstijd, Eindtijd] (open while Eindtijd is empty); NaN without a start. */
+function afstandTotVergadering(v: DebatVergadering, t: number): number {
+  const start = Date.parse(v.aanvangstijd ?? "");
+  if (!Number.isFinite(start)) return Number.NaN;
+  if (t < start) return start - t;
+  const end = Date.parse(v.eindtijd ?? "");
+  return Number.isFinite(end) && t > end ? t - end : 0;
+}
+
+/**
+ * The vergaderingen whose verslag may hold a debate's activiteit, in the
+ * order to read them: the zaal-and-time match first; plenary, the other
+ * Plenair vergaderingen of its days; otherwise the Commissie vergaderingen in
+ * the same zaal, then those in another zaal, each only when the debate starts
+ * within KOPPELING_START_WINDOW_MS of its span, nearest first.
+ */
+export function debatKandidaten(debate: DebateWhere, vergaderingen: DebatVergadering[], primary?: DebatVergadering): DebatVergadering[] {
+  const out: DebatVergadering[] = primary ? [primary] : [];
+  const add = (v: DebatVergadering) => {
+    if (!out.some((x) => x.vergadering_id === v.vergadering_id)) out.push(v);
+  };
+  if (isPlenair(debate)) {
+    for (const v of vergaderingen) if (v.soort === "Plenair") add(v);
+    return out;
+  }
+  const start = Date.parse(debatStart(debate) ?? "");
+  if (!Number.isFinite(start)) return out;
+  const near = vergaderingen
+    .filter((v) => v.soort === "Commissie")
+    .map((v) => ({ v, d: afstandTotVergadering(v, start), zelfde: sameZaal(v.zaal, debate) }))
+    .filter((x) => Number.isFinite(x.d) && x.d <= KOPPELING_START_WINDOW_MS)
+    .sort((a, b) => Number(b.zelfde) - Number(a.zelfde) || a.d - b.d);
+  for (const { v } of near) add(v);
+  return out;
+}
+
+/** The innermost activiteit whose block holds this fragment (its index in verslag.fragments). */
+export function activiteitVanFragment(verslag: Pick<DebatVerslag, "activiteiten">, index: number): DebatActiviteit | undefined {
+  let best: DebatActiviteit | undefined;
+  for (const a of verslag.activiteiten ?? []) {
+    if (index >= a.fragmentVan && index < a.fragmentTot && (!best || a.fragmentTot - a.fragmentVan <= best.fragmentTot - best.fragmentVan)) best = a;
+  }
+  return best;
 }
 
 interface Interval {
@@ -302,6 +395,103 @@ function short(error: unknown): string {
   return msg.replace(/\s+/g, " ").slice(0, 120);
 }
 
+/** The debate id to look for in the verslagen: a GUID tkDebateId, for a speaker with a TK Persoon id (else nothing could be matched). */
+function debatIdVan(c: GehoordContribution): string | undefined {
+  const id = c.debate.tkDebateId?.trim();
+  return id && GUID_RE.test(id) && GUID_RE.test(c.persoonId) ? id.toLowerCase() : undefined;
+}
+
+/** A debate that will have no verslag with text: its type says so, or Gehoord marks it cancelled. */
+function zonderVerslag(c: GehoordContribution): boolean {
+  const type = c.debate.debateType?.toLowerCase();
+  return Boolean(type && GEEN_VERSLAG_TYPES.has(type)) || c.debate.status === "cancelled";
+}
+
+/** The status of a hit whose debate has no vergadering (with a verslag) to read: its type, status and date decide. */
+function zonderVergadering(c: GehoordContribution, nowMs: number): Koppeling {
+  const type = c.debate.debateType;
+  const status = c.debate.status;
+  const plenair = isPlenair(c.debate);
+  const startMs = Date.parse(debatStart(c.debate) ?? c.startTime ?? "");
+  const ageDays = Number.isFinite(startMs) ? (nowMs - startMs) / 86_400_000 : 0;
+  if (type && GEEN_VERSLAG_TYPES.has(type.toLowerCase())) {
+    return { status: "geen_verslag_verwacht", reden: `een ${type.toLowerCase()} krijgt geen verslag met tekst in het Gegevensmagazijn` };
+  }
+  if (status === "cancelled") {
+    return { status: "geen_verslag_verwacht", reden: "Gehoord.de meldt dit debat als geschrapt (cancelled): het is niet doorgegaan" };
+  }
+  if (status === "live" || ageDays <= KOPPELING_RECENT_DAYS) {
+    return {
+      status: "nog_geen_verslag",
+      reden: status === "live"
+        ? "het debat is nog bezig; het verslag volgt"
+        : plenair
+          ? "nog geen verslag van deze plenaire vergadering"
+          : "nog geen verslag van dit debat (een commissiedebat krijgt het na 2 tot 12 dagen)",
+    };
+  }
+  return { status: "niet_gekoppeld", reden: `geen vergadering met verslag gevonden${plenair ? " (plenaire zaal)" : ` in de ${c.debate.hall ?? "zaal"} rond het begin van het debat`}` };
+}
+
+/**
+ * The fragment of this hit among fragments[van .. tot - 1] of a verslag (the
+ * whole verslag, or the block of the debate's activiteit), with the status
+ * when there is none: a verslag that may still grow and does not reach the
+ * moment yet is nog_geen_verslag.
+ */
+function koppelFragment(
+  c: GehoordContribution,
+  v: DebatVergadering,
+  verslag: DebatVerslag,
+  intervals: Array<Interval | undefined>,
+  scope: { methode: KoppelingMethode; van: number; tot: number; activiteit?: DebatActiviteit },
+): Koppeling {
+  const start = amsterdamLocalToEpoch(c.startTime) as number;
+  const end = Math.max(start, amsterdamLocalToEpoch(c.endTime) ?? start);
+  const meta = { verslag_id: verslag.verslag_id, status: verslag.status ?? v.verslag_status, publicatie: verslag.publicatie ?? v.verslag_soort };
+  const best = bestFragment({ persoonId: c.persoonId, start, end }, verslag.fragments.slice(scope.van, scope.tot), intervals.slice(scope.van, scope.tot));
+  const base = { methode: scope.methode, vergadering: v, verslag: meta };
+  if (best) {
+    const activiteit = scope.activiteit ?? activiteitVanFragment(verslag, best.fragment.volgnummer - 1);
+    return {
+      status: "officieel",
+      ...base,
+      ...(activiteit ? { activiteit: activiteitRef(activiteit) } : {}),
+      fragment: best.fragment,
+      overlap_s: Math.round(best.overlapMs / 1000),
+      positie: best.positie,
+    };
+  }
+  const activiteit = scope.activiteit ? { activiteit: activiteitRef(scope.activiteit) } : {};
+  const reach = verslagReach(intervals);
+  // Only a verslag that may still grow promises more: not an eindpublicatie, not one that holds the Sluiting.
+  const complete = meta.publicatie === "Eindpublicatie" || Boolean(verslag.sluiting);
+  if (!complete && (reach === undefined || reach + KOPPELING_TOLERANCE_MS < start)) {
+    return {
+      status: "nog_geen_verslag",
+      ...base,
+      ...activiteit,
+      reden: reach === undefined ? "het verslag bevat nog geen tekst" : `het verslag (${meta.publicatie ?? "publicatie"}) loopt nog maar tot ${amsterdamClock(reach)}; dit fragment is van ${amsterdamClock(start)}`,
+    };
+  }
+  const afloop = complete && reach !== undefined && reach + KOPPELING_TOLERANCE_MS < start ? ` (het verslag is compleet en loopt tot ${amsterdamClock(reach)}; dit fragment is van ${amsterdamClock(start)})` : "";
+  const waar = scope.activiteit ? "in dit debat in het verslag" : "in het verslag";
+  return { status: "niet_gekoppeld", ...base, ...activiteit, reden: `geen fragment van deze spreker rond dit tijdstip ${waar}${afloop}` };
+}
+
+/** Whether the hit runs outside the activiteit's span [aanvang, eind], beyond the tolerance (an open end bounds nothing). */
+function buitenActiviteit(c: GehoordContribution, a: DebatActiviteit): boolean {
+  const start = amsterdamLocalToEpoch(c.startTime) as number;
+  const end = Math.max(start, amsterdamLocalToEpoch(c.endTime) ?? start);
+  const aanvang = amsterdamLocalToEpoch(a.aanvang);
+  const eind = amsterdamLocalToEpoch(a.eind);
+  return (aanvang !== undefined && start < aanvang - KOPPELING_TOLERANCE_MS) || (eind !== undefined && end > eind + KOPPELING_TOLERANCE_MS);
+}
+
+function activiteitRef(a: DebatActiviteit): NonNullable<Koppeling["activiteit"]> {
+  return { objectid: a.objectid, parlisid: a.parlisid, titel: a.titel, soort: a.soort };
+}
+
 /**
  * Links the Tweede Kamer hits to their official fragments. Returns one
  * Koppeling per contribution, in the same order. Never throws.
@@ -317,17 +507,24 @@ export async function koppelGehoord(contributions: GehoordContribution[], deps: 
   // Each request gets the time left, at least a second, and no retry: a request the deadline gave up on must not hold a slot.
   const budget = () => ({ timeoutMs: Math.max(1_000, deadlineAt - Date.now()), retries: 0 });
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
   const deadline = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Deadline("time-out")), deadlineMs);
+    timer = setTimeout(() => {
+      timedOut = true;
+      reject(new Deadline("time-out"));
+    }, deadlineMs);
   });
   deadline.catch(() => undefined);
 
   try {
     // 1. What needs no lookup: the Eerste Kamer, a hit without a time. A speaker without a
-    //    TK Persoon id (a guest at a briefing) still gets the status of the debate.
+    //    TK Persoon id (a guest at a briefing) still gets the status of the debate. A hit
+    //    with a debate id may also look on the day of its Debat Direct url and, for a night
+    //    sitting, the day before, when the day budget allows.
     const todo: number[] = [];
     const dayOf = (c: GehoordContribution) => vergaderDag(c.debate, c.startTime) as string;
     const days: string[] = [];
+    const dagenVan = new Map<number, string[]>();
     contributions.forEach((c, i) => {
       if (c.debate.chamber === "ek") {
         out[i] = { status: "eerste_kamer", reden: "De Eerste Kamer heeft geen verslag in het Gegevensmagazijn; citeer uit de Handelingen (officiele_bekendmakingen_search, type Handelingen)." };
@@ -345,6 +542,15 @@ export async function koppelGehoord(contributions: GehoordContribution[], deps: 
           days.push(day);
         }
         todo.push(i);
+        if (debatIdVan(c)) {
+          const own = debatDagen(c.debate, c.startTime).filter((d) => {
+            if (days.includes(d)) return true;
+            if (days.length >= maxDagen) return false;
+            days.push(d);
+            return true;
+          });
+          dagenVan.set(i, own);
+        }
       }
     });
 
@@ -360,9 +566,10 @@ export async function koppelGehoord(contributions: GehoordContribution[], deps: 
       }),
     );
 
-    // 3. Each hit to its vergadering; for a debate without one its type, status and date decide.
+    // 3. Each hit to its vergadering by zaal and time; a hit with a debate id also to the
+    //    vergaderingen whose verslag may hold its activiteit, that one first.
     const vergaderingOf = new Map<number, DebatVergadering>();
-    const unmatched = new Map<string, number[]>();
+    const kandidaten = new Map<number, DebatVergadering[]>();
     for (const i of todo) {
       const c = contributions[i];
       const list = perDay.get(dayOf(c));
@@ -372,100 +579,112 @@ export async function koppelGehoord(contributions: GehoordContribution[], deps: 
       }
       const v = matchVergadering(c.debate, list ?? [], amsterdamLocalToEpoch(c.startTime));
       if (v) vergaderingOf.set(i, v);
-      else unmatched.set(String(c.debate.id), [...(unmatched.get(String(c.debate.id)) ?? []), i]);
-    }
-
-    for (const indices of unmatched.values()) {
-      const c = contributions[indices[0]];
-      const type = c.debate.debateType;
-      const status = c.debate.status;
-      const plenair = isPlenair(c.debate);
-      const startMs = Date.parse(debatStart(c.debate) ?? c.startTime ?? "");
-      const ageDays = Number.isFinite(startMs) ? (now() - startMs) / 86_400_000 : 0;
-      let k: Koppeling;
-      if (type && GEEN_VERSLAG_TYPES.has(type.toLowerCase())) {
-        k = { status: "geen_verslag_verwacht", reden: `een ${type.toLowerCase()} krijgt geen verslag in het Gegevensmagazijn` };
-      } else if (status === "cancelled") {
-        k = { status: "geen_verslag_verwacht", reden: "Gehoord.de meldt dit debat als geschrapt (cancelled): het is niet doorgegaan" };
-      } else if (status === "live" || ageDays <= KOPPELING_RECENT_DAYS) {
-        k = {
-          status: "nog_geen_verslag",
-          reden: status === "live"
-            ? "het debat is nog bezig; het verslag volgt"
-            : plenair
-              ? "nog geen verslag van deze plenaire vergadering"
-              : "nog geen verslag van dit debat (een commissiedebat krijgt het na 2 tot 12 dagen)",
-        };
-      } else {
-        k = { status: "niet_gekoppeld", reden: `geen vergadering met verslag gevonden${plenair ? " (plenaire zaal)" : ` in de ${c.debate.hall ?? "zaal"} rond het begin van het debat`}` };
+      const own = dagenVan.get(i);
+      if (own) {
+        // A debate without a verslag with text spends no extra verslag on its id.
+        const all = own.flatMap((d) => {
+          const l = perDay.get(d);
+          return Array.isArray(l) ? l : [];
+        });
+        kandidaten.set(i, zonderVerslag(c) ? (v ? [v] : []) : debatKandidaten(c.debate, all, v));
       }
-      for (const i of indices) out[i] = { ...k };
     }
 
-    // 4. The verslagen, at most maxVerslagen, side by side; the hits of the others keep their transcript.
-    //    A speaker without a TK Persoon id cannot be linked: that hit spends no verslag.
-    const verslagIds: string[] = [];
-    for (const i of todo) {
-      const v = vergaderingOf.get(i);
-      if (v && GUID_RE.test(contributions[i].persoonId) && !verslagIds.includes(v.verslag_id)) verslagIds.push(v.verslag_id);
-    }
-    const allowed = new Set(verslagIds.slice(0, maxVerslagen));
+    // 4. The verslagen, at most maxVerslagen, each once, side by side. First the zaal-and-time
+    //    vergadering of each hit; then, while the budget lasts, the next candidate of each
+    //    debate id not found yet. A speaker
+    //    without a TK Persoon id cannot be linked: that hit spends no verslag.
     const loaded = new Map<string, DebatVerslag | Error>();
-    const loads = [...allowed].map(async (id) => {
-      const v = [...vergaderingOf.values()].find((x) => x.verslag_id === id) as DebatVergadering;
-      try {
-        loaded.set(id, await withDeadline(deps.debatten.getVerslag(v, budget()), deadline));
-      } catch (error) {
-        loaded.set(id, error instanceof Error ? error : new Error(String(error)));
+    const attempted = new Set<string>();
+    const vergaderingVan = new Map<string, DebatVergadering>();
+    const gevonden = new Map<string, { verslagId: string; activiteit: DebatActiviteit }>();
+    const load = async (list: DebatVergadering[]) => {
+      for (const v of list) {
+        attempted.add(v.verslag_id);
+        vergaderingVan.set(v.verslag_id, v);
       }
-    });
-    await Promise.all(loads);
+      await Promise.all(
+        list.map(async (v) => {
+          try {
+            const verslag = await withDeadline(deps.debatten.getVerslag(v, budget()), deadline);
+            loaded.set(v.verslag_id, verslag);
+            for (const a of verslag.activiteiten ?? []) {
+              const key = a.objectid.toLowerCase();
+              if (!gevonden.has(key)) gevonden.set(key, { verslagId: v.verslag_id, activiteit: a });
+            }
+          } catch (error) {
+            loaded.set(v.verslag_id, error instanceof Error ? error : new Error(String(error)));
+          }
+        }),
+      );
+    };
+    const first: DebatVergadering[] = [];
+    for (const i of todo) {
+      // Only the zaal-and-time vergaderingen: a speculative candidate must not take the slot of another hit's verslag.
+      const v = GUID_RE.test(contributions[i].persoonId) ? vergaderingOf.get(i) : undefined;
+      if (v && !first.some((x) => x.verslag_id === v.verslag_id) && first.length < maxVerslagen) first.push(v);
+    }
+    await load(first);
+    while (attempted.size < maxVerslagen && !timedOut) {
+      const next: DebatVergadering[] = [];
+      for (const [i, list] of kandidaten) {
+        if (gevonden.has(debatIdVan(contributions[i]) as string)) continue;
+        const v = list.find((x) => !attempted.has(x.verslag_id));
+        if (v && !next.some((x) => x.verslag_id === v.verslag_id)) next.push(v);
+      }
+      if (!next.length) break;
+      await load(next.slice(0, maxVerslagen - attempted.size));
+    }
     verslagen = [...loaded.values()].filter((v) => !(v instanceof Error)).length;
 
-    // 5. The fragment of the same person with the largest overlap.
+    // 5. Each hit: inside its debate's activiteit when the id was found (debat_id), else
+    //    across the verslag of its zaal-and-time vergadering (zaal_tijd), else its status.
     const intervalCache = new Map<string, Array<Interval | undefined>>();
-    for (const [i, v] of vergaderingOf) {
+    const intervalsOf = (verslag: DebatVerslag) => {
+      let intervals = intervalCache.get(verslag.verslag_id);
+      if (!intervals) {
+        intervals = fragmentIntervals(verslag.fragments);
+        intervalCache.set(verslag.verslag_id, intervals);
+      }
+      return intervals;
+    };
+    for (const i of todo) {
+      if (out[i]) continue;
       const c = contributions[i];
-      if (!GUID_RE.test(c.persoonId)) {
-        out[i] = { status: "niet_gekoppeld", vergadering: v, reden: "spreker zonder persoon-id van de Tweede Kamer" };
+      const id = debatIdVan(c);
+      const hit = id ? gevonden.get(id) : undefined;
+      const hitVerslag = hit ? loaded.get(hit.verslagId) : undefined;
+      if (hit && hitVerslag && !(hitVerslag instanceof Error)) {
+        const a = hit.activiteit;
+        const hv = vergaderingVan.get(hit.verslagId) as DebatVergadering;
+        const k = koppelFragment(c, hv, hitVerslag, intervalsOf(hitVerslag), { methode: "debat_id", van: a.fragmentVan, tot: a.fragmentTot, activiteit: a });
+        // Gehoord's debate boundaries are not VLOS's (the Stemmingen after a debate, say): a hit that
+        // runs outside its activiteit's span and is not in it is looked for in the whole verslag.
+        out[i] = k.status !== "officieel" && buitenActiviteit(c, a)
+          ? koppelFragment(c, hv, hitVerslag, intervalsOf(hitVerslag), { methode: "debat_id", van: 0, tot: hitVerslag.fragments.length })
+          : k;
         continue;
       }
-      if (!allowed.has(v.verslag_id)) {
-        out[i] = { status: "niet_gekoppeld", vergadering: v, reden: `limiet: per aanroep worden hooguit ${maxVerslagen} verslagen gelezen` };
+      const v = vergaderingOf.get(i);
+      if (!v) {
+        // No zaal-and-time vergadering and the id not found (in the candidates the budget reached): as before the id.
+        out[i] = zonderVergadering(c, now());
+        continue;
+      }
+      if (!GUID_RE.test(c.persoonId)) {
+        out[i] = { status: "niet_gekoppeld", methode: "zaal_tijd", vergadering: v, reden: "spreker zonder persoon-id van de Tweede Kamer" };
+        continue;
+      }
+      if (!attempted.has(v.verslag_id)) {
+        out[i] = { status: "niet_gekoppeld", methode: "zaal_tijd", vergadering: v, reden: `limiet: per aanroep worden hooguit ${maxVerslagen} verslagen gelezen` };
         continue;
       }
       const verslag = loaded.get(v.verslag_id);
       if (!verslag || verslag instanceof Error) {
-        out[i] = { status: "niet_gekoppeld", vergadering: v, reden: `verslag niet gelezen: ${short(verslag)}` };
+        out[i] = { status: "niet_gekoppeld", methode: "zaal_tijd", vergadering: v, reden: `verslag niet gelezen: ${short(verslag)}` };
         continue;
       }
-      let intervals = intervalCache.get(v.verslag_id);
-      if (!intervals) {
-        intervals = fragmentIntervals(verslag.fragments);
-        intervalCache.set(v.verslag_id, intervals);
-      }
-      const start = amsterdamLocalToEpoch(c.startTime) as number;
-      const end = Math.max(start, amsterdamLocalToEpoch(c.endTime) ?? start);
-      const meta = { verslag_id: verslag.verslag_id, status: verslag.status ?? v.verslag_status, publicatie: verslag.publicatie ?? v.verslag_soort };
-      const best = bestFragment({ persoonId: c.persoonId, start, end }, verslag.fragments, intervals);
-      if (best) {
-        out[i] = { status: "officieel", vergadering: v, verslag: meta, fragment: best.fragment, overlap_s: Math.round(best.overlapMs / 1000), positie: best.positie };
-        continue;
-      }
-      const reach = verslagReach(intervals);
-      // Only a verslag that may still grow promises more: not an eindpublicatie, not one that holds the Sluiting.
-      const complete = meta.publicatie === "Eindpublicatie" || Boolean(verslag.sluiting);
-      if (!complete && (reach === undefined || reach + KOPPELING_TOLERANCE_MS < start)) {
-        out[i] = {
-          status: "nog_geen_verslag",
-          vergadering: v,
-          verslag: meta,
-          reden: reach === undefined ? "het verslag bevat nog geen tekst" : `het verslag (${meta.publicatie ?? "publicatie"}) loopt nog maar tot ${amsterdamClock(reach)}; dit fragment is van ${amsterdamClock(start)}`,
-        };
-      } else {
-        const afloop = complete && reach !== undefined && reach + KOPPELING_TOLERANCE_MS < start ? ` (het verslag is compleet en loopt tot ${amsterdamClock(reach)}; dit fragment is van ${amsterdamClock(start)})` : "";
-        out[i] = { status: "niet_gekoppeld", vergadering: v, verslag: meta, reden: `geen fragment van deze spreker rond dit tijdstip in het verslag${afloop}` };
-      }
+      out[i] = koppelFragment(c, v, verslag, intervalsOf(verslag), { methode: "zaal_tijd", van: 0, tot: verslag.fragments.length });
     }
   } catch (error) {
     logger.warn({ err: short(error) }, "debat-koppeling failed");

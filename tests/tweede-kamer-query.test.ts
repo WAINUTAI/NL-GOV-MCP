@@ -362,7 +362,7 @@ describe("query plans", () => {
     const plan = tk.planDocuments({ top: 5 });
     // Tombstones (every field null but Id and GewijzigdOp) counted toward the total.
     expect(plan.params.$filter).toBe("Verwijderd eq false");
-    expect(plan.params.$orderby).toBe("Datum desc");
+    expect(plan.params.$orderby).toBe("Datum desc,Id");
     // Text terms never match a tombstone: no extra filter.
     expect(tk.planDocuments({ query: "parkeerbeleid", top: 5 }).params.$filter).not.toContain("Verwijderd");
   });
@@ -392,7 +392,7 @@ describe("query plans", () => {
     const plan = tk.planSearch({ entity: "zaak", query: "stikstof", top: 5, date_from: "2026-07-01", filter: "Soort eq 'Motie'" });
     expect(plan.entity).toBe("Zaak");
     expect(plan.params.$filter).toBe(
-      "((contains(Titel,'stikstof') or contains(Onderwerp,'stikstof'))) and (GestartOp ge 2026-07-01T00:00:00+02:00) and (Soort eq 'Motie')",
+      "((contains(Titel,'stikstof') or contains(Onderwerp,'stikstof'))) and (Datum ge 2026-07-01T00:00:00+02:00) and (Soort eq 'Motie')",
     );
   });
 
@@ -431,7 +431,7 @@ describe("query plans", () => {
     expect(filter).toContain("Besluit/Agendapunt/Activiteit/Datum ge 2026-07-02T00:00:00+02:00");
     expect(filter).toContain("Besluit/Agendapunt/Activiteit/Datum lt 2026-07-03T00:00:00+02:00");
     expect(filter).toContain("Besluit/Zaak/any(z: z/Nummer eq '2026Z15215')");
-    expect(plan.params.$orderby).toBe("Besluit/Agendapunt/Activiteit/Datum desc,Besluit_Id,ActorFractie");
+    expect(plan.params.$orderby).toBe("Besluit/Agendapunt/Activiteit/Datum desc,Besluit_Id,FractieNaam,Id");
     // Decision details come from one Besluit lookup per page, not an expand on every vote row.
     expect(plan.params.$expand).toBeUndefined();
   });
@@ -448,7 +448,7 @@ describe("query plans", () => {
       date_to: "2026-07-02",
       filter: "Soort eq 'Voor' and Vergissing eq false",
     });
-    expect(sp.params.$filter).toContain("contains(concat(concat(' ',ActorFractie),' '),' SP ')");
+    expect(sp.params.$filter).toContain("contains(concat(concat(' ',FractieNaam),' '),' SP ')");
     expect(sp.params.$filter).toContain("(Soort eq 'Voor' and Vergissing eq false)");
   });
 

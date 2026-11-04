@@ -52,7 +52,7 @@ const DOC_ID = "eb749f13-9fed-43b6-b869-04027676d08a";
 const DOC = {
   Id: DOC_ID,
   Soort: "Brief regering",
-  DocumentNummer: "2026D40001",
+  Nummer: "2026D40001",
   Titel: "Openbaar vervoer",
   Onderwerp: "Toekomst van het OV in de regio",
   Datum: "2026-09-30T00:00:00+02:00",
@@ -275,7 +275,7 @@ describe("links are looked up by Id after the search", () => {
     expect(lookup.pathname.endsWith("/Document")).toBe(true);
     expect(lookup.searchParams.get("$filter")).toBe(`Id in (${DOC_ID})`);
     expect(lookup.searchParams.get("$select")).toBe("Id");
-    expect(lookup.searchParams.get("$expand")).toBe("Zaak($select=Id,Nummer,Soort;$top=3)");
+    expect(lookup.searchParams.get("$expand")).toBe("Zaak($select=Id,Nummer,Soort;$orderby=Nummer desc;$top=3)");
 
     const rec = payload.records[0];
     expect(rec.canonical_url).toBe("https://www.tweedekamer.nl/kamerstukken/detail?id=2026Z18001&did=2026D40001");
@@ -288,7 +288,7 @@ describe("links are looked up by Id after the search", () => {
       isProbe(input)
         ? counted(147_778)
         : isLookup(input)
-          ? jsonResponse({ value: [{ Id: ZAAK_ID, Document: [{ Id: "d-9", DocumentNummer: "2026D47272", Soort: "Motie" }] }] })
+          ? jsonResponse({ value: [{ Id: ZAAK_ID, Document: [{ Id: "d-9", Nummer: "2026D47272", Soort: "Motie" }] }] })
           : jsonResponse({ "@odata.count": 1, value: [ZAAK] }),
     );
     vi.stubGlobal("fetch", fetchMock);

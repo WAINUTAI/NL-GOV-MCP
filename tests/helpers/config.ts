@@ -18,7 +18,7 @@ export const testConfig: AppConfig = {
     dataOverheid: "https://data.overheid.nl/data/api/3/action",
     cbsV4: "https://odata4.cbs.nl/CBS",
     cbsV3: "https://opendata.cbs.nl/ODataApi/OData",
-    tweedeKamer: "https://gegevensmagazijn.tweedekamer.nl/OData/v4/2.0",
+    tweedeKamer: "https://gegevensmagazijn.tweedekamer.nl/OData/v5",
     bekendmakingenSru: "https://repository.overheid.nl/sru",
     rijksoverheid: "https://opendata.rijksoverheid.nl/v1",
     knmi: "https://api.dataplatform.knmi.nl/open-data/v1",

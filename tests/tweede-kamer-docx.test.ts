@@ -185,7 +185,7 @@ describe("TweedeKamerSource.getDocument with Word resources", () => {
     return new Response(
       JSON.stringify({
         Id: id,
-        DocumentNummer: "2026D40115",
+        Nummer: "2026D40115",
         Titel: null,
         Onderwerp: "Antwoord op vragen over de jeugdzorg",
         ContentType: contentType,

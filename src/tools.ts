@@ -291,6 +291,7 @@ function koppelingData(k: Koppeling): Record<string, unknown> {
   return {
     status: k.status,
     reden: k.reden,
+    methode: k.methode,
     vergadering_id: k.vergadering?.vergadering_id,
     verslag_id: k.verslag?.verslag_id ?? k.vergadering?.verslag_id,
     verslag_status: k.verslag?.status,
@@ -374,20 +375,21 @@ async function koppelHits(items: GehoordContribution[]): Promise<KoppelingResult
 /**
  * The official page per vergadering of the officieel hits: the plenary verslag
  * on tweedekamer.nl; a commissiedebat's page straight from the Gehoord
- * debate's tkActivityNumber (debates[i], parallel to koppelingen), else when
+ * debate's tkActivityNumber (debates[i], parallel to koppelingen) or, when
+ * Gehoord has none, the parlisid of its activiteit in the verslag; else when
  * its activiteit is found in what is left of the koppeling's deadline (else
  * the verslag itself).
  */
 export async function koppelingPages(koppelingen: Koppeling[], deadlineAt: number, debates: Array<Pick<GehoordDebateRef, "tkActivityNumber"> | undefined> = []): Promise<Map<string, string | undefined>> {
   const pages = new Map<string, string | undefined>();
-  // Vergaderingen whose page came from a tkActivityNumber: a lookup never overrides it.
+  // Vergaderingen whose page came from a tkActivityNumber or parlisid: a lookup never overrides it.
   const direct = new Set<string>();
   const lookups: Array<Promise<void>> = [];
   const left = deadlineAt - Date.now();
   for (const [i, k] of koppelingen.entries()) {
     const v = k.status === "officieel" ? k.vergadering : undefined;
     if (!v || direct.has(v.vergadering_id)) continue;
-    const nummer = v.soort === "Commissie" ? debates[i]?.tkActivityNumber : undefined;
+    const nummer = v.soort === "Commissie" ? debates[i]?.tkActivityNumber ?? k.activiteit?.parlisid : undefined;
     if (nummer) {
       pages.set(v.vergadering_id, commissieUrlVoorNummer(nummer));
       direct.add(v.vergadering_id);
@@ -909,7 +911,7 @@ export function registerTools(server: McpServer): void {
     } catch(e){ return toMcpToolPayload(mapTweedeKamerError(e)); }
   });
 
-  server.registerTool("tweede_kamer_search", { description: "Advanced OData search on Tweede Kamer entities (Document, Zaak, Activiteit, Agendapunt, Besluit, Stemming, Persoon, Fractie, Commissie, Kamerstukdossier, Vergadering, Toezegging, and the other entity sets of the Gegevensmagazijn). 'query' is an AND keyword search on the entity's text fields (Document and Zaak: Titel and Onderwerp; same word rules as tweede_kamer_documents) and is optional when 'filter' or a date is given. 'filter' and 'orderby' take raw OData v4 expressions with the entity's field names. date_from/date_to filter the entity's own date (Document.Datum, Zaak.GestartOp, Activiteit.Datum, Vergadering.Datum, Toezegging.Aanmaakdatum, Agendapunt/Besluit/Stemming via the meeting or voting session). Agendapunt, Besluit and Stemming records carry that meeting date as 'vergaderdatum', which is also their record date; GewijzigdOp is when the record last changed. An unknown entity, an unsupported query/date or a rejected expression returns an explicit error, never an unfiltered fallback.", inputSchema: { query: z.string().optional().describe("Topic keywords, all required. Examples: 'zorg', 'migratie', 'ICT onderwijs'. Do NOT pass full questions. Optional when filter or a date is given."), entity: z.string().default("Document").describe("Entity set, e.g. Document, Zaak, Activiteit, Besluit, Stemming, Persoon, Fractie, Kamerstukdossier (case-insensitive)."), top: z.number().int().min(1).max(config.limits.maxRows).default(25), filter: z.string().optional().describe("Raw OData $filter, e.g. \"Soort eq 'Motie'\". Combined with query using AND."), orderby: z.string().optional().describe("Raw OData $orderby; default 'GewijzigdOp desc'. To sort by meeting date: 'Activiteit/Datum desc' (Agendapunt), 'Agendapunt/Activiteit/Datum desc' (Besluit), 'Besluit/Agendapunt/Activiteit/Datum desc' (Stemming)."), skip: z.number().int().min(0).optional(), date_from: z.string().optional().describe("YYYY-MM-DD, on or after (Dutch local date) on the entity's date field."), date_to: z.string().optional().describe("YYYY-MM-DD, on or before (Dutch local date) on the entity's date field."), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) }, annotations: TOOL_ANNOTATIONS }, async ({ query, entity, top, filter, orderby, skip, date_from, date_to, offset, limit, outputFormat, verbose, dryRun }) => {
+  server.registerTool("tweede_kamer_search", { description: "Advanced OData search on Tweede Kamer entities (Document, Zaak, Activiteit, Agendapunt, Besluit, Stemming, Persoon, Fractie, Commissie, Kamerstukdossier, Vergadering, Toezegging, and the other entity sets of the Gegevensmagazijn). 'query' is an AND keyword search on the entity's text fields (Document and Zaak: Titel and Onderwerp; same word rules as tweede_kamer_documents) and is optional when 'filter' or a date is given. 'filter' and 'orderby' take raw OData expressions with the entity's field names in API version v5 of the Gegevensmagazijn (e.g. Document.Nummer, Zaak.Datum, Stemming.FractieNaam, Besluit.Soort; field list: https://gegevensmagazijn.tweedekamer.nl/OData/v5/$metadata); names of the old v4/2.0 API (DocumentNummer, GestartOp, ActorFractie, BesluitSoort, ...) are translated and the access_note says so, a field v5 dropped is an explicit error. date_from/date_to filter the entity's own date (Document.Datum, Zaak.Datum, Activiteit.Datum, Vergadering.Datum, Toezegging.Aanmaakdatum, Agendapunt/Besluit/Stemming via the meeting or voting session). Agendapunt, Besluit and Stemming records carry that meeting date as 'vergaderdatum', which is also their record date; GewijzigdOp is when the record last changed. An unknown entity, an unsupported query/date or a rejected expression returns an explicit error, never an unfiltered fallback.", inputSchema: { query: z.string().optional().describe("Topic keywords, all required. Examples: 'zorg', 'migratie', 'ICT onderwijs'. Do NOT pass full questions. Optional when filter or a date is given."), entity: z.string().default("Document").describe("Entity set, e.g. Document, Zaak, Activiteit, Besluit, Stemming, Persoon, Fractie, Kamerstukdossier (case-insensitive)."), top: z.number().int().min(1).max(config.limits.maxRows).default(25), filter: z.string().optional().describe("Raw OData $filter, e.g. \"Soort eq 'Motie'\". Combined with query using AND."), orderby: z.string().optional().describe("Raw OData $orderby; default 'GewijzigdOp desc,Id'. To sort by meeting date: 'Activiteit/Datum desc' (Agendapunt), 'Agendapunt/Activiteit/Datum desc' (Besluit), 'Besluit/Agendapunt/Activiteit/Datum desc' (Stemming)."), skip: z.number().int().min(0).optional(), date_from: z.string().optional().describe("YYYY-MM-DD, on or after (Dutch local date) on the entity's date field."), date_to: z.string().optional().describe("YYYY-MM-DD, on or before (Dutch local date) on the entity's date field."), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) }, annotations: TOOL_ANNOTATIONS }, async ({ query, entity, top, filter, orderby, skip, date_from, date_to, offset, limit, outputFormat, verbose, dryRun }) => {
     const effectiveOffset = skip ?? offset;
     const effectiveLimit = limit ?? top;
     try {

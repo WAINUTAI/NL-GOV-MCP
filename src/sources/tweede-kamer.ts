@@ -8,6 +8,9 @@ import type { AppConfig, MCPErrorResponse } from "../types.js";
 /** Public website; document and zaak pages live under /kamerstukken. */
 export const TK_WEB_BASE = "https://www.tweedekamer.nl";
 
+/** Field names per entity, for error hints (the API base itself is config.endpoints.tweedeKamer). */
+export const TK_METADATA_URL = "https://gegevensmagazijn.tweedekamer.nl/OData/v5/$metadata";
+
 /**
  * The Gegevensmagazijn rejects any $filter with more than 100 nodes ("The node
  * count limit of '100' has been exceeded"); exactly 100 passes. Filters are
@@ -63,7 +66,7 @@ const LOOKUP_RETRIES = 1;
 /** Nodes kept free when a plan with an estimated caller filter is rebuilt after HTTP 400. */
 const RETRY_EXTRA_RESERVE = 20;
 
-/** Entity sets published by the Gegevensmagazijn OData v4 service ($metadata). */
+/** Entity sets published by the Gegevensmagazijn OData service, API version v5 ($metadata). */
 export const TK_ENTITIES = [
   "Activiteit",
   "ActiviteitActor",
@@ -118,13 +121,13 @@ export const TK_QUERY_FIELDS: Record<string, string[]> = {
   Commissie: ["NaamNL", "Afkorting"],
   Vergadering: ["Titel"],
   Toezegging: ["Tekst"],
-  Stemming: ["ActorNaam", "ActorFractie"],
+  Stemming: ["Naam", "FractieNaam"],
 };
 
 /** The date that `date_from`/`date_to` filter on, per entity. */
 export const TK_DATE_FIELDS: Record<string, string> = {
   Document: "Datum",
-  Zaak: "GestartOp",
+  Zaak: "Datum",
   Activiteit: "Datum",
   Vergadering: "Datum",
   // Agendapunt.Aanvangstijd is empty in practice; the meeting date lives on its Activiteit.
@@ -142,8 +145,12 @@ export const TK_DATE_FIELDS: Record<string, string> = {
  * lookup takes under a second).
  */
 const LINK_EXPANDS: Record<string, { nav: string; expand: string }> = {
-  Document: { nav: "Zaak", expand: "Zaak($select=Id,Nummer,Soort;$top=3)" },
-  Zaak: { nav: "Document", expand: "Document($select=Id,DocumentNummer,Soort,Datum;$orderby=Datum desc;$top=1)" },
+  // The order is explicit: the service's default order is not part of its
+  // contract (it changed with API v5). A document with several zaken links to
+  // the newest one, usually the zaak of the document itself; a zaak to its
+  // newest document, and of one day the highest number.
+  Document: { nav: "Zaak", expand: "Zaak($select=Id,Nummer,Soort;$orderby=Nummer desc;$top=3)" },
+  Zaak: { nav: "Document", expand: "Document($select=Id,Nummer,Soort,Datum;$orderby=Datum desc,Nummer desc;$top=1)" },
 };
 /** Ids per lookup; keeps the URL short (25 ids ≈ 1.3 kB). */
 const LOOKUP_BATCH = 25;
@@ -183,9 +190,11 @@ const SESSION_DATE_LOOKUPS: Record<
  * expanding this on the vote query took 8–52 s (often past the timeout) where
  * the same query without it took 1–13 s and this lookup under 1 s.
  */
-const BESLUIT_DETAIL_SELECT = "Id,BesluitSoort,BesluitTekst,StemmingsSoort,Status";
+// API v5 names: Soort was BesluitSoort, Tekst (the kind of vote, e.g. "Met
+// handopsteken") was StemmingsSoort. BesluitTekst kept its name.
+const BESLUIT_DETAIL_SELECT = "Id,Soort,BesluitTekst,Tekst,Status";
 const BESLUIT_DETAIL_EXPAND =
-  "Zaak($select=Id,Nummer,Soort,Titel,Onderwerp;$expand=Document($select=Id,DocumentNummer,Soort,Datum;$orderby=Datum desc;$top=1))," +
+  "Zaak($select=Id,Nummer,Soort,Titel,Onderwerp;$orderby=Nummer desc;$expand=Document($select=Id,Nummer,Soort,Datum;$orderby=Datum desc,Nummer desc;$top=1))," +
   "Agendapunt($select=Id,Onderwerp;$expand=Activiteit($select=Id,Datum,Soort))";
 
 /**
@@ -560,7 +569,7 @@ interface WordPattern {
  * around the term. Padding the field with spaces through concat() lets one
  * pattern also match the term at the start or end of the field and a field
  * that is exactly the term: "Bos" in Persoon.Achternaam, "SP" in
- * Stemming.ActorFractie. A separate `eq` pattern used to do that and was the
+ * Stemming.FractieNaam. A separate `eq` pattern used to do that and was the
  * first to be cut when the node budget was tight.
  */
 function wordPatterns(field: string, text: string): WordPattern[] {
@@ -927,7 +936,7 @@ export function tkDownloadUrl(documentNummer?: string): string | undefined {
 export function tkSubjectTitle(item: Record<string, unknown>, fallback = "Document"): string {
   const titel = str(item.Titel);
   const onderwerp = str(item.Onderwerp);
-  if (!onderwerp) return titel || str(item.DocumentNummer) || str(item.Nummer) || str(item.Id) || fallback;
+  if (!onderwerp) return titel || str(item.Nummer) || str(item.Id) || fallback;
   if (!titel) return onderwerp;
   const lo = onderwerp.toLowerCase();
   const lt = titel.toLowerCase();
@@ -960,15 +969,16 @@ export function tkRecordView(entity: string, item: Record<string, unknown>, apiB
     case "Document": {
       const title = tkSubjectTitle(item);
       const dossier = str(item.Titel);
-      const snippet = [str(item.Soort), str(item.DocumentNummer), dossier && !title.includes(dossier) ? `dossier: ${dossier}` : ""]
+      const snippet = [str(item.Soort), str(item.Nummer), dossier && !title.includes(dossier) ? `dossier: ${dossier}` : ""]
         .filter(Boolean)
         .join(" · ");
       return { title, url, snippet, date: str(item.Datum) };
     }
     case "Zaak": {
+      // API v5 dropped Zaak.Status ("Vrijgegeven" on nearly every zaak); Afgedaan says more.
       const title = tkSubjectTitle(item, "Zaak");
-      const snippet = [str(item.Soort), str(item.Nummer), str(item.Status)].filter(Boolean).join(" · ");
-      return { title, url, snippet, date: str(item.GestartOp) || str(item.GewijzigdOp) };
+      const snippet = [str(item.Soort), str(item.Nummer), item.Afgedaan === true ? "afgedaan" : ""].filter(Boolean).join(" · ");
+      return { title, url, snippet, date: str(item.Datum) || str(item.GewijzigdOp) };
     }
     case "Persoon": {
       const name = [item.Roepnaam, item.Tussenvoegsel, item.Achternaam].map(str).filter(Boolean).join(" ");
@@ -980,13 +990,13 @@ export function tkRecordView(entity: string, item: Record<string, unknown>, apiB
     // vergaderdatum: the meeting date tweede_kamer_search adds (SESSION_DATE_LOOKUPS).
     case "Besluit":
       return {
-        title: str(item.BesluitTekst) || str(item.BesluitSoort) || str(item.Id) || "Besluit",
+        title: str(item.BesluitTekst) || str(item.Soort) || str(item.Id) || "Besluit",
         url,
-        snippet: str(item.BesluitSoort),
+        snippet: str(item.Soort),
         date: str(item.vergaderdatum) || str(item.GewijzigdOp),
       };
     case "Stemming": {
-      const actor = str(item.ActorFractie) || str(item.ActorNaam) || "Stemming";
+      const actor = str(item.FractieNaam) || str(item.Naam) || "Stemming";
       return { title: `${actor}: ${str(item.Soort) || "stemming"}`, url, snippet: str(item.Soort), date: str(item.vergaderdatum) || str(item.GewijzigdOp) };
     }
     case "Toezegging":
@@ -1006,14 +1016,14 @@ function withLinks(entity: string, item: Record<string, unknown>, apiBase: strin
 
   if (entity === "Document") {
     const zaak = firstObject(item.Zaak);
-    const web = tkKamerstukUrl(str(zaak?.Nummer), str(item.DocumentNummer));
-    const download = tkDownloadUrl(str(item.DocumentNummer));
+    const web = tkKamerstukUrl(str(zaak?.Nummer), str(item.Nummer));
+    const download = tkDownloadUrl(str(item.Nummer));
     if (web) out.web_url = web;
     if (download) out.download_url = download;
     if (id) out.resource_url = `${apiBase}/Document(${id})/Resource`;
   } else if (entity === "Zaak") {
     const doc = firstObject(item.Document);
-    const web = tkKamerstukUrl(str(item.Nummer), str(doc?.DocumentNummer));
+    const web = tkKamerstukUrl(str(item.Nummer), str(doc?.Nummer));
     if (web) out.web_url = web;
   }
   return out;
@@ -1026,6 +1036,206 @@ function voteOutcome(besluitSoort: string, besluitTekst: string): string | null 
     if (hay.includes(word)) return word;
   }
   return null;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Field names of the old API version (v4/2.0)                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Fields renamed in API v5 whose old name exists on no v5 entity, with one
+ * new name wherever they occurred (diff of both $metadata documents, November
+ * 2026). Such a name can only be meant the old way, so it is replaced anywhere
+ * in a caller's filter or orderby, also behind a path ("Zaak/GestartOp",
+ * "z/DocumentNummer"). Case-only renames (OmschrijvingNl → OmschrijvingNL,
+ * Voortouwcommissie_Id → VoortouwCommissie_Id) need nothing: the service
+ * matches field names case-insensitively.
+ */
+const V4_RENAMED: Record<string, string> = {
+  // Activiteit, Agendapunt
+  Noot: "Notitie",
+  Voortouwnaam: "VoortouwCommissieNaam",
+  Voortouwafkorting: "VoortouwCommissieAfkorting",
+  Voortouwkortenaam: "VoortouwCommissieKorteNaam",
+  // ActiviteitActor, DocumentActor, ZaakActor, Stemming
+  ActorNaam: "Naam",
+  ActorFractie: "FractieNaam",
+  ActorAfkorting: "Afkorting",
+  Relatie: "Rol",
+  // Besluit
+  StemmingsSoort: "Tekst",
+  BesluitSoort: "Soort",
+  AgendapuntZaakBesluitVolgorde: "Volgorde",
+  // Document, Zaak
+  DocumentNummer: "Nummer",
+  Volgnummer: "Ondernummer",
+  Organisatie: "Kamer",
+  GestartOp: "Datum",
+  Grondslagvoorhang: "Voorhang",
+  // DocumentVersie, Kamerstukdossier, Vergadering
+  Extensie: "Bestandsformaat",
+  HoogsteVolgnummer: "AantalDocumenten",
+  VergaderingNummer: "Nummer",
+  Sluiting: "Eindtijd",
+  // PersoonNevenfunctie
+  PersoonId: "Persoon_Id",
+  PeriodeVan: "Van",
+  PeriodeTotEnMet: "TotEnMet",
+  IsActief: "Actief",
+  VergoedingSoort: "Soort",
+  VergoedingToelichting: "Toelichting",
+};
+
+/** Fields API v5 dropped whose name exists on no v5 entity. */
+const V4_DROPPED = new Set(
+  [
+    "VRSNummer", "SidVoortouw", "SidActor", "SidActorLid", "SidActorFractie", "NaamWebNL", "NaamWebEN", "Inhoudsopgave",
+    "DatumRegistratie", "DatumOntvangst", "KenmerkAfzender", "HuidigeBehandelstatus", "GrootProject", "SysCode",
+    "StatusCode", "StatusNaam", "Notities",
+  ].map((n) => n.toLowerCase()),
+);
+
+/**
+ * Old names that are still a field elsewhere in v5 ("Status" on Besluit,
+ * "Gewicht" on PersoonGeschenk, "Opmerking" on PersoonNevenfunctieInkomsten),
+ * so they are only translated as a field of an entity known from context: the
+ * entity searched itself, or behind a path whose step names the entity
+ * ("Besluit/Opmerking", "Zaak/any(z:z/Status ...)"; see V4_NAV_ENTITY).
+ * `null`: dropped without replacement.
+ */
+const V4_ENTITY_FIELDS: Record<string, Record<string, string | null>> = {
+  Agendapunt: { Status: null },
+  Zaak: { Status: null },
+  DocumentVersie: { Status: null },
+  Besluit: { Opmerking: "Notitie" },
+  Reservering: { Nummer: null, ActiviteitNummer: null },
+  CommissieZetel: { Gewicht: null },
+  FractieZetel: { Gewicht: null },
+  PersoonContactinformatie: { Gewicht: null },
+  PersoonLoopbaan: { Gewicht: "Volgorde" },
+  PersoonNevenfunctie: { Gewicht: "Volgorde" },
+  PersoonOnderwijs: { Gewicht: "Volgorde" },
+  PersoonReis: { Gewicht: "Volgorde" },
+};
+
+/**
+ * Navigation properties not named after the entity they lead to, for the
+ * entities above (v5 $metadata). Other steps are taken as the entity's name;
+ * a step that names no entity of V4_ENTITY_FIELDS translates nothing.
+ */
+const V4_NAV_ENTITY: Record<string, string> = {
+  huidigedocumentversie: "DocumentVersie",
+  gerelateerdnaar: "Zaak",
+  gerelateerdvanuit: "Zaak",
+};
+
+const V4_ENTITY_FIELDS_LOWER = new Map(
+  Object.entries(V4_ENTITY_FIELDS).map(([entity, fields]) => [
+    entity.toLowerCase(),
+    new Map(Object.entries(fields).map(([from, to]) => [from.toLowerCase(), to])),
+  ]),
+);
+
+/**
+ * Document.Kamer was a number in v4 and is text in v5, the former
+ * Organisatie (v4 Kamer 2 = Organisatie 'Tweede Kamer', 3 = 'Eerste Kamer en
+ * Tweede Kamer'; checked against both versions, November 2026).
+ */
+const V4_DOCUMENT_KAMER: Record<string, string> = {
+  "1": "Eerste Kamer",
+  "2": "Tweede Kamer",
+  "3": "Eerste Kamer en Tweede Kamer",
+};
+
+const V4_RENAMED_LOWER = new Map(Object.entries(V4_RENAMED).map(([from, to]) => [from.toLowerCase(), to]));
+
+export interface V4FieldMigration {
+  expr: string;
+  renamed: Array<{ from: string; to: string }>;
+  /** Old fields that v5 no longer has. */
+  dropped: string[];
+}
+
+/**
+ * Translate the field names of API version v4/2.0 in a caller's $filter or
+ * $orderby for `entity` to their v5 names. Text in string literals is left
+ * alone, as are function names ("contains(") and anything inside a literal
+ * date, time or GUID. With the old names, v5 answers HTTP 400 ("Could not
+ * find a property named ..."), so translating spares callers that learned
+ * the old names a failed request.
+ */
+export function migrateV4FieldNames(entity: string, expr: string): V4FieldMigration {
+  // Lambda variables and the navigation they range over: "Zaak/any(z:" binds z to Zaak.
+  const lambdaNav = new Map<string, string>();
+  for (const m of expr.replace(/'(?:[^']|'')*'/g, "''").matchAll(/([A-Za-z_]\w*)\s*\/\s*(?:any|all)\s*\(\s*([A-Za-z_]\w*)\s*:/gi)) {
+    lambdaNav.set(m[2].toLowerCase(), m[1].toLowerCase());
+  }
+  /** The entity whose field the word at `at` is, when known: the one searched, or the one a path step names. */
+  const entityAt = (at: number): string | undefined => {
+    if (expr[at - 1] !== "/") return entity.toLowerCase();
+    const step = /([A-Za-z_]\w*)$/.exec(expr.slice(0, at - 1))?.[1].toLowerCase();
+    if (!step) return undefined;
+    const nav = lambdaNav.get(step) ?? step;
+    return V4_NAV_ENTITY[nav] ? V4_NAV_ENTITY[nav].toLowerCase() : nav;
+  };
+  const renamed = new Map<string, string>();
+  const dropped = new Set<string>();
+  let out = "";
+  let i = 0;
+  while (i < expr.length) {
+    const ch = expr[i];
+    if (ch === "'") {
+      // A string literal; '' is an escaped quote inside it.
+      let j = i + 1;
+      while (j < expr.length) {
+        if (expr[j] === "'" && expr[j + 1] === "'") j += 2;
+        else if (expr[j] === "'") break;
+        else j += 1;
+      }
+      out += expr.slice(i, j + 1);
+      i = j + 1;
+      continue;
+    }
+    const m = /^[A-Za-z_][A-Za-z0-9_]*/.exec(expr.slice(i));
+    if (m && !/[A-Za-z0-9_.:+-]/.test(expr[i - 1] ?? "")) {
+      const word = m[0];
+      const next = expr.slice(i + word.length).trimStart()[0];
+      const lower = word.toLowerCase();
+      const owner = entityAt(i);
+      const local = owner ? V4_ENTITY_FIELDS_LOWER.get(owner) : undefined;
+      let replacement: string | null | undefined;
+      if (next !== "(") {
+        if (V4_RENAMED_LOWER.has(lower)) replacement = V4_RENAMED_LOWER.get(lower);
+        else if (V4_DROPPED.has(lower)) replacement = null;
+        else if (local?.has(lower)) replacement = local.get(lower);
+        else if (owner === "document" && lower === "kamer") {
+          // A v4 number compared with what is now text: compare with the text.
+          const cmp = /^(\s+(?:eq|ne)\s+)(\d+)(?![\w.:-])/i.exec(expr.slice(i + word.length));
+          const text = cmp ? V4_DOCUMENT_KAMER[cmp[2]] : undefined;
+          if (cmp && text) {
+            const from = `${word}${cmp[0]}`;
+            const to = `${word}${cmp[1]}'${text}'`;
+            renamed.set(from, to);
+            out += to;
+            i += from.length;
+            continue;
+          }
+        }
+      }
+      if (replacement === null) dropped.add(word);
+      else if (replacement) renamed.set(word, replacement);
+      out += replacement ?? word;
+      i += word.length;
+      continue;
+    }
+    // A token that is not a field name (a number, date, time or GUID, or a lambda
+    // variable after its colon) is copied whole: "T00" in a date is no field.
+    const run = /^[A-Za-z0-9_.:+-]+/.exec(expr.slice(i));
+    const take = run ? run[0].length : 1;
+    out += expr.slice(i, i + take);
+    i += take;
+  }
+  return { expr: out, renamed: [...renamed].map(([from, to]) => ({ from, to })), dropped: [...dropped] };
 }
 
 /* ------------------------------------------------------------------ */
@@ -1047,7 +1257,7 @@ export function mapTweedeKamerError(error: unknown, context: Record<string, unkn
       message:
         "Tweede Kamer OData weigerde de aanvraag (HTTP 400). Meestal een veldnaam die niet bestaat voor deze entity, een ongeldige filter- of orderby-expressie, of een filter met meer dan 100 knopen.",
       suggestion:
-        "Controleer veldnamen (zie https://gegevensmagazijn.tweedekamer.nl/OData/v4/2.0/$metadata), gebruik minder zoektermen of een eenvoudiger filter.",
+        `Controleer veldnamen (zie ${TK_METADATA_URL}; sinds API-versie v5 heten veel velden anders, bijv. Document.Nummer, Zaak.Datum, Stemming.FractieNaam, en is Document.Kamer tekst, bijv. Kamer eq 'Tweede Kamer'), gebruik minder zoektermen of een eenvoudiger filter.`,
       details: { endpoint: error.endpoint, status: 400, ...context },
     });
   }
@@ -1413,6 +1623,43 @@ export class TweedeKamerSource {
   }
 
   /**
+   * A caller's filter and orderby with the field names of the old API version
+   * translated (see migrateV4FieldNames); a note says what was replaced. A
+   * field v5 no longer has is an input error that names it.
+   */
+  private migrateCallerFields(
+    entity: string,
+    filter: string | undefined,
+    orderby: string | undefined,
+    notes: string[],
+  ): { filter?: string; orderby?: string } {
+    const renamed = new Map<string, string>();
+    const dropped = new Set<string>();
+    const migrate = (expr: string | undefined): string | undefined => {
+      const trimmed = expr?.trim();
+      if (!trimmed) return undefined;
+      const out = migrateV4FieldNames(entity, trimmed);
+      for (const r of out.renamed) renamed.set(r.from, r.to);
+      for (const d of out.dropped) dropped.add(d);
+      return out.expr;
+    };
+    const result = { filter: migrate(filter), orderby: migrate(orderby) };
+    if (dropped.size) {
+      const list = [...dropped].join(", ");
+      throw new TweedeKamerInputError(
+        `Het veld ${list} bestaat niet meer in de Tweede Kamer-API (Gegevensmagazijn, API-versie v5).`,
+        `Laat ${dropped.size > 1 ? "die velden" : "dat veld"} weg; de velden per entity staan in ${TK_METADATA_URL}.`,
+      );
+    }
+    if (renamed.size) {
+      notes.push(
+        `Veldnamen van de oude API-versie (v4/2.0) vervangen door die van v5: ${[...renamed].map(([from, to]) => `${from} → ${to}`).join(", ")}.`,
+      );
+    }
+    return result;
+  }
+
+  /**
    * Build (without fetching) the OData request for tweede_kamer_search.
    * `extraReserve` leaves that many more nodes free (used for the retry after
    * the service rejected a plan whose caller filter was underestimated).
@@ -1464,7 +1711,7 @@ export class TweedeKamerSource {
       if (open) notes.push(open);
     }
 
-    const userFilter = args.filter?.trim();
+    const { filter: userFilter, orderby: userOrderby } = this.migrateCallerFields(entity, args.filter, args.orderby, notes);
     if (!parsed.terms.length && entity !== "ToegezegdAan" && !/\bVerwijderd\b/i.test(userFilter ?? "")) {
       parts.unshift(NOT_DELETED);
     }
@@ -1502,8 +1749,10 @@ export class TweedeKamerSource {
     const params: Record<string, string> = {
       $top: String(args.top),
     };
-    // ToegezegdAan has no GewijzigdOp; every other entity does.
-    const orderby = args.orderby?.trim() || (entity === "ToegezegdAan" ? "" : "GewijzigdOp desc");
+    // ToegezegdAan has no GewijzigdOp; every other entity does. Id breaks the
+    // ties (a batch update gives many records one GewijzigdOp), so paging with
+    // skip neither repeats nor skips a record whatever the service's default order.
+    const orderby = userOrderby || (entity === "ToegezegdAan" ? "" : "GewijzigdOp desc,Id");
     if (orderby) params.$orderby = orderby;
     const filter = andJoin(parts);
     if (filter) params.$filter = filter.expr;
@@ -1604,7 +1853,9 @@ export class TweedeKamerSource {
 
     const params: Record<string, string> = {
       $top: String(args.top),
-      $orderby: "Datum desc",
+      // A Datum is a day: Id orders the many documents of one day, so a page
+      // does not depend on the service's default order (changed with API v5).
+      $orderby: "Datum desc,Id",
     };
     const filter = andJoin(parts);
     if (filter) params.$filter = filter.expr;
@@ -1864,7 +2115,8 @@ export class TweedeKamerSource {
       $top: String(args.top),
       // GewijzigdOp is when the record last changed (corrections touch votes
       // from months ago); the session date is when the vote took place.
-      $orderby: "Besluit/Agendapunt/Activiteit/Datum desc,Besluit_Id,ActorFractie",
+      // Id orders the votes of one fractie on one besluit (a roll-call vote).
+      $orderby: "Besluit/Agendapunt/Activiteit/Datum desc,Besluit_Id,FractieNaam,Id",
     };
     if (filter) params.$filter = filter.expr;
     if (typeof args.skip === "number" && args.skip > 0) params.$skip = String(args.skip);
@@ -1923,7 +2175,7 @@ export class TweedeKamerSource {
       const zaken = (Array.isArray(besluit.Zaak) ? (besluit.Zaak as Array<Record<string, unknown>>) : []).map((z) => {
         const doc = firstObject(z.Document);
         const nummer = str(z.Nummer);
-        const docNummer = str(doc?.DocumentNummer);
+        const docNummer = str(doc?.Nummer);
         return {
           id: z.Id ?? null,
           nummer: nummer || null,
@@ -1937,7 +2189,7 @@ export class TweedeKamerSource {
       });
       const zaak = zaken[0];
       const besluitId = str(besluit.Id) || str(stemming.Besluit_Id);
-      const besluitSoort = str(besluit.BesluitSoort);
+      const besluitSoort = str(besluit.Soort);
       const besluitTekst = str(besluit.BesluitTekst);
       const besluitApi = besluitId ? `${this.apiBase}/Besluit(${besluitId})` : undefined;
 
@@ -1947,7 +2199,7 @@ export class TweedeKamerSource {
         besluit_soort: besluitSoort || null,
         besluit_tekst: besluitTekst || null,
         besluit_status: besluit.Status ?? null,
-        stemmingssoort: besluit.StemmingsSoort ?? null,
+        stemmingssoort: besluit.Tekst ?? null,
         uitslag: voteOutcome(besluitSoort, besluitTekst),
         stemming_datum: activiteit?.Datum ?? null,
         agendapunt_onderwerp: agendapunt?.Onderwerp ?? null,
@@ -1982,7 +2234,7 @@ export class TweedeKamerSource {
 
   /** Title, link, snippet and date for a vote row from getVotes. */
   static voteView(item: Record<string, unknown>): TkRecordView {
-    const actor = str(item.ActorFractie) || str(item.ActorNaam) || "Stemming";
+    const actor = str(item.FractieNaam) || str(item.Naam) || "Stemming";
     const soort = str(item.Soort).toLowerCase() || "stemming";
     const subject = str(item.zaak_onderwerp) || str(item.zaak_titel) || str(item.agendapunt_onderwerp) || str(item.besluit_tekst);
     const title = subject ? `${actor} ${soort}: ${subject}` : `${actor} ${soort}`;
@@ -2002,40 +2254,30 @@ export class TweedeKamerSource {
     // 1) Members
     const personsParams: Record<string, string> = {
       $top: String(Math.min(Math.max(args.top * 5, 50), 250)),
-      $orderby: "Achternaam asc",
+      $orderby: "Achternaam asc,Id",
       $filter: "contains(Functie,'Tweede Kamerlid')",
     };
     const personsOut = await this.fetchEntity("Persoon", personsParams);
 
-    // 2) Seating links (person -> seat)
-    const linksParams: Record<string, string> = {
-      $top: "250",
-      $orderby: "GewijzigdOp desc",
-    };
-    if (args.active !== false) {
-      linksParams.$filter = "TotEnMet eq null";
-    }
-    const linksOut = await this.fetchEntity("FractieZetelPersoon", linksParams);
-
-    // 3) Seat -> faction
-    const seatsOut = await this.fetchEntity("FractieZetel", { $top: "250" });
-    const factionsOut = await this.fetchEntity("Fractie", { $top: "200" });
-
-    const seatToFaction = new Map<string, string>();
-    for (const seat of seatsOut.items) {
-      const seatId = String(seat.Id ?? "");
-      const fractieId = String(seat.Fractie_Id ?? "");
-      if (seatId && fractieId) seatToFaction.set(seatId, fractieId);
-    }
-
-    const factionById = new Map<string, Record<string, unknown>>();
-    for (const f of factionsOut.items) {
-      const id = String(f.Id ?? "");
-      if (id) factionById.set(id, f);
-    }
+    // 2) Seating links (person -> seat -> fractie), the newest first. The seat
+    // and its fractie come along: the separate first 250 FractieZetel rows (of
+    // 945) in the service's default order left most members without a fractie.
+    // The open links (one per seat, 150) always come first: the newest 250 of
+    // all 1,229 links reach back only two years, so a member seated earlier
+    // fell outside them. With active=false, a member without an open link gets
+    // the newest of all links.
+    const linksQuery = (filter: string) =>
+      this.fetchEntity("FractieZetelPersoon", {
+        $top: "250",
+        $orderby: "Van desc,Id",
+        $filter: filter,
+        $expand: "FractieZetel($select=Id,Fractie_Id;$expand=Fractie($select=Id,Afkorting,NaamNL,NaamEN))",
+      });
+    const linkPages = [await linksQuery("TotEnMet eq null and Verwijderd eq false")];
+    if (args.active === false) linkPages.push(await linksQuery("Verwijderd eq false"));
 
     const activeLinkByPerson = new Map<string, Record<string, unknown>>();
-    for (const link of linksOut.items) {
+    for (const link of linkPages.flatMap((page) => page.items)) {
       const personId = String(link.Persoon_Id ?? "");
       if (!personId) continue;
       if (!activeLinkByPerson.has(personId)) {
@@ -2049,9 +2291,7 @@ export class TweedeKamerSource {
     for (const p of personsOut.items) {
       const personId = String(p.Id ?? "");
       const link = activeLinkByPerson.get(personId);
-      const seatId = String(link?.FractieZetel_Id ?? "");
-      const factionId = seatToFaction.get(seatId) ?? "";
-      const faction = factionById.get(factionId);
+      const faction = firstObject(firstObject(link?.FractieZetel)?.Fractie);
       const fractieAfkorting = String(faction?.Afkorting ?? "");
       const fractieNaam = String(faction?.NaamNL ?? faction?.NaamEN ?? "");
 

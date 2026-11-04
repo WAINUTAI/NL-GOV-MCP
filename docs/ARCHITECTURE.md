@@ -104,10 +104,10 @@ The tool handler in `tools.ts` maps `items` to `MCPRecord[]` and wraps provenanc
 |-------------|----------|----------------|
 | `data-overheid.ts` | CKAN REST | `data_overheid` |
 | `cbs.ts` | OData v4 + v3 fallback | `cbs` |
-| `tweede-kamer.ts` | OData v4 + REST | `tweede_kamer` |
-| `tweede-kamer-debatten.ts` | OData v4 + VLOS XML (verslagen) | `tweede_kamer` |
+| `tweede-kamer.ts` | OData (Gegevensmagazijn API v5) + REST | `tweede_kamer` |
+| `tweede-kamer-debatten.ts` | OData (Gegevensmagazijn API v5) + VLOS XML (verslagen) | `tweede_kamer` |
 | `gehoord.ts` | REST JSON (key required, third party: automatic transcripts) | `gehoord` |
-| `debat-koppeling.ts` | No I/O of its own: links Gehoord.de hits to their fragment in the official verslag (persoon_id + time overlap, Amsterdam/UTC), with per-call budgets (7 days, 4 verslagen, 25 s) and a status per hit; the debate type, real start (`startedAt`) and zaal key (`locationId`) come with every hit | uses `tweede_kamer`, `gehoord` |
+| `debat-koppeling.ts` | No I/O of its own: links Gehoord.de hits to their fragment in the official verslag: first by debate id (Gehoord `tkDebateId` = the `<activiteit objectid>` in the VLOS, fragment matched inside that activiteit, or in the whole verslag for a hit outside its span; `methode` `debat_id`), else by zaal and start time (`zaal_tijd`); persoon_id + time overlap, Amsterdam/UTC; per-call budgets (7 days, 4 verslagen, 25 s) and a status per hit; the debate type, real start (`startedAt`) and zaal key (`locationId`) come with every hit | uses `tweede_kamer`, `gehoord` |
 | `rechtspraak.ts` | POST JSON (search) + open data XML (one ruling by ECLI) | `rechtspraak` |
 | `bekendmakingen.ts` | SRU/XML | `officiele_bekendmakingen` |
 | `rijksoverheid.ts` | RSS 2.0 XML (`/api/rss`, one platform, several sites in `RSS_SITES`) + REST (school holidays) | `rijksoverheid`, `rekenkamer`, `scp` |

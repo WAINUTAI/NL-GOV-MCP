@@ -19,7 +19,7 @@ import { jsonResponse, xmlResponse } from "./helpers/config.js";
 
 type Payload = Record<string, any>;
 
-const API = "https://gegevensmagazijn.tweedekamer.nl/OData/v4/2.0";
+const API = "https://gegevensmagazijn.tweedekamer.nl/OData/v5";
 
 function spreker(soort: string, voornaam: string, verslagnaam: string, fractie: string | null, functie: string): string {
   return `<spreker soort="${soort}" objectid="s-${verslagnaam}">${fractie ? `<fractie>${fractie}</fractie>` : ""}<aanhef>De heer</aanhef><verslagnaam>${verslagnaam}</verslagnaam><voornaam>${voornaam}</voornaam><functie>${functie}</functie></spreker>`;
@@ -61,7 +61,7 @@ const VERGADERING_COMMISSIE = {
   Titel: "Mensenrechtenbeleid",
   Zaal: "Groen van Prinstererzaal",
   Vergaderjaar: "2026-2027",
-  VergaderingNummer: 10,
+  Nummer: 10,
   Datum: "2026-10-05T00:00:00+02:00",
   Aanvangstijd: "2026-10-05T15:00:00+02:00",
   Verslag: [
@@ -75,7 +75,7 @@ const VERGADERING_PLENAIR = {
   Titel: "90e vergadering, donderdag 2 juli 2026",
   Zaal: "Plenaire zaal",
   Vergaderjaar: "2025-2026",
-  VergaderingNummer: 90,
+  Nummer: 90,
   Datum: "2026-07-02T00:00:00+02:00",
   Aanvangstijd: "2026-07-02T10:15:00+02:00",
   Verslag: [{ Id: "8cb67de1-169d-4c00-a9e8-1c610c32e617", Soort: "Eindpublicatie", Status: "Gecorrigeerd", GewijzigdOp: "2026-10-01T12:51:34+02:00", Verwijderd: false }],
@@ -199,7 +199,7 @@ describe("tweede_kamer_debatten", () => {
     expect(list.searchParams.get("$filter")).toBe(
       "Verwijderd eq false and Verslag/any(v:v/Verwijderd eq false and v/Status ne 'Casco') and Datum ge 2026-07-01T00:00:00+02:00 and Datum lt 2026-10-06T00:00:00+02:00",
     );
-    expect(list.searchParams.get("$orderby")).toBe("Datum desc,Aanvangstijd desc");
+    expect(list.searchParams.get("$orderby")).toBe("Datum desc,Aanvangstijd desc,Id");
     expect(list.searchParams.get("$top")).toBe("20");
 
     expect(payload.records.map((r: Payload) => r.title)).toEqual([

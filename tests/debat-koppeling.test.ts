@@ -395,7 +395,7 @@ describe("koppelGehoord: every status", () => {
     const briefing = { ...COMMISSIE_DEBATE, id: 999, title: "ROB-advies", debateType: "Technische briefing" };
     const r = await koppelGehoord([hit(6, briefing), hit(16, briefing, { speakerLabel: "Melanie Kalis", speakerParty: null })], deps);
     expect(r.koppelingen.map((k) => k.status)).toEqual(["geen_verslag_verwacht", "geen_verslag_verwacht"]);
-    expect(r.koppelingen[0].reden).toBe("een technische briefing krijgt geen verslag in het Gegevensmagazijn");
+    expect(r.koppelingen[0].reden).toBe("een technische briefing krijgt geen verslag met tekst in het Gegevensmagazijn");
   });
 
   it("geen_verslag_verwacht: a debate Gehoord marks cancelled, when no vergadering holds it", async () => {
@@ -565,7 +565,7 @@ async function call(name: string, args: Record<string, unknown>): Promise<Record
   return JSON.parse((await tool.handler(parsed)).content[0].text);
 }
 
-const TK_API = "https://gegevensmagazijn.tweedekamer.nl/OData/v4/2.0";
+const TK_API = "https://gegevensmagazijn.tweedekamer.nl/OData/v5";
 
 function vergaderingRow(v: DebatVergadering, gewijzigd: string) {
   return {
@@ -574,7 +574,7 @@ function vergaderingRow(v: DebatVergadering, gewijzigd: string) {
     Titel: v.titel,
     Zaal: v.zaal,
     Vergaderjaar: v.vergaderjaar,
-    VergaderingNummer: v.vergaderingnummer,
+    Nummer: v.vergaderingnummer,
     Datum: `${v.datum}T00:00:00+01:00`,
     Aanvangstijd: v.aanvangstijd,
     Verslag: [{ Id: v.verslag_id, Soort: v.verslag_soort, Status: v.verslag_status, GewijzigdOp: gewijzigd, Verwijderd: false }],
