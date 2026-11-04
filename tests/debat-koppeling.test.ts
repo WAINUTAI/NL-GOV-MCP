@@ -9,7 +9,6 @@ import { koppelingPages, officialPassage } from "../src/tools.js";
 import {
   KOPPELING_DEADLINE_MS,
   KOPPELING_MAX_DAGEN,
-  KOPPELING_MAX_TYPE_LOOKUPS,
   KOPPELING_MAX_VERSLAGEN,
   amsterdamDay,
   amsterdamLocalToEpoch,
@@ -19,6 +18,7 @@ import {
   koppelGehoord,
   koppelingCounts,
   matchVergadering,
+  sameZaal,
   vergaderDag,
   type KoppelingDeps,
 } from "../src/sources/debat-koppeling.js";
@@ -124,16 +124,14 @@ const VERG_COMMISSIE: DebatVergadering = {
 
 const NOW = Date.parse("2026-11-03T12:00:00Z");
 
-/** Deps without HTTP: vergaderingen per day and verslagen by id, every call counted. */
+/** Deps without HTTP: vergaderingen per day and verslagen by id, every call counted. Gehoord is never asked: each hit carries its debate. */
 function fakeDeps(opts: {
   days?: Record<string, DebatVergadering[]>;
   verslagen?: Record<string, DebatVerslag>;
-  debateType?: string;
   failDays?: boolean;
   failVerslag?: boolean;
-  failDebate?: boolean;
 } = {}) {
-  const calls = { days: [] as string[], verslagen: [] as string[], debates: [] as Array<string | number> };
+  const calls = { days: [] as string[], verslagen: [] as string[] };
   const deps: KoppelingDeps = {
     now: () => NOW,
     debatten: {
@@ -149,11 +147,6 @@ function fakeDeps(opts: {
         if (!verslag) throw new Error("not found");
         return verslag;
       },
-    },
-    getDebate: async (id) => {
-      calls.debates.push(id);
-      if (opts.failDebate) throw new Error("gehoord down");
-      return { debateType: opts.debateType, status: "ended" };
     },
   };
   return { deps, calls };
@@ -277,6 +270,29 @@ describe("matching a Gehoord debate to a vergadering", () => {
     expect(matchVergadering(COMMISSIE_DEBATE, [other, later, VERG_COMMISSIE])).toBe(VERG_COMMISSIE);
   });
 
+  it("compares the zaal on Gehoord's locationId, the Gegevensmagazijn Zaal folded to it, else on hall", () => {
+    // Both write "Klompézaal"; locationId is the key without accents.
+    expect(sameZaal("Klompézaal", { hall: "Klompézaal", locationId: "klompezaal" })).toBe(true);
+    expect(sameZaal("Suze Groenewegzaal", { hall: "Suze Groenewegzaal", locationId: "suze-groenewegzaal" })).toBe(true);
+    // locationId decides when it is there; hall only without it.
+    expect(sameZaal("Thorbeckezaal", { hall: "Thorbecke", locationId: "thorbeckezaal" })).toBe(true);
+    expect(sameZaal("Thorbeckezaal", { hall: "Thorbeckezaal", locationId: "troelstrazaal" })).toBe(false);
+    expect(sameZaal("Klompezaal", { hall: "Klompézaal" })).toBe(true);
+    expect(sameZaal(undefined, { hall: "Klompézaal" })).toBe(false);
+    const accented = { ...VERG_COMMISSIE, zaal: "Klompézaal" };
+    expect(matchVergadering({ ...COMMISSIE_DEBATE, hall: "Klompézaal", locationId: "klompezaal" }, [accented])).toBe(accented);
+    expect(matchVergadering({ ...PLENAIR_DEBATE, hall: undefined, locationId: "plenaire-zaal" }, [VERG_COMMISSIE, VERG_PLENAIR])).toBe(VERG_PLENAIR);
+  });
+
+  it("times a committee debate by its real start (startedAt), not the agenda time (startsAt)", () => {
+    // The agenda said 09:00 local, an hour early; the debate began at 10:00:22.
+    const agendaEarly = { ...COMMISSIE_DEBATE, startsAt: "2026-10-08T07:00:00.000Z", startedAt: "2026-10-08T08:00:22.000Z" };
+    expect(matchVergadering(agendaEarly, [VERG_COMMISSIE])).toBe(VERG_COMMISSIE);
+    expect(matchVergadering({ ...agendaEarly, startedAt: undefined }, [VERG_COMMISSIE])).toBeUndefined();
+    // Not begun: the agenda time is all there is.
+    expect(matchVergadering({ ...COMMISSIE_DEBATE, startedAt: undefined }, [VERG_COMMISSIE])).toBe(VERG_COMMISSIE);
+  });
+
   it("does not match another zaal or a start more than 45 minutes away", () => {
     expect(matchVergadering({ ...COMMISSIE_DEBATE, hall: "Troelstrazaal" }, [VERG_COMMISSIE])).toBeUndefined();
     expect(matchVergadering({ ...COMMISSIE_DEBATE, startsAt: "2026-10-08T09:00:00.000Z" }, [VERG_COMMISSIE])).toBeUndefined();
@@ -298,6 +314,12 @@ describe("vergaderDag: a night sitting belongs to the day it began", () => {
     expect(vergaderDag({ hall: "Plenaire zaal", startsAt: "2026-10-28T23:30:00.000Z" })).toBe("2026-10-28");
     expect(vergaderDag({ hall: "Plenaire zaal", startsAt: "2026-10-28T09:15:00.000Z" })).toBe("2026-10-28");
   });
+  it("takes the real start (startedAt) over the agenda time, and knows the plenary hall by locationId", () => {
+    expect(vergaderDag({ hall: "Plenaire zaal", startsAt: "2026-10-28T09:15:00.000Z", startedAt: "2026-10-28T23:30:00.000Z" })).toBe("2026-10-28");
+    expect(vergaderDag({ hall: "Thorbeckezaal", startsAt: "2026-10-07T21:30:00.000Z", startedAt: "2026-10-08T07:30:00.000Z" })).toBe("2026-10-08");
+    expect(vergaderDag({ locationId: "plenaire-zaal", startedAt: "2026-10-14T22:30:00.000Z" })).toBe("2026-10-14");
+  });
+
   it("keeps a committee debate on its own calendar day and falls back to the hit time", () => {
     expect(vergaderDag({ hall: "Thorbeckezaal", startsAt: "2026-10-08T07:30:00.000Z" })).toBe("2026-10-08");
     expect(vergaderDag({ hall: "Plenaire zaal" }, "2026-10-28T13:25:32.720Z")).toBe("2026-10-28");
@@ -314,7 +336,7 @@ describe("koppelGehoord: every status", () => {
     expect(k.fragment?.tekst).toContain("De heer Prickaertz begint erover");
     expect(k.verslag).toEqual({ verslag_id: VERG_PLENAIR.verslag_id, status: "Ongecorrigeerd", publicatie: "Tussenpublicatie" });
     expect(k.overlap_s).toBe(96);
-    expect(calls).toEqual({ days: ["2026-10-28"], verslagen: [VERG_PLENAIR.verslag_id], debates: [] });
+    expect(calls).toEqual({ days: ["2026-10-28"], verslagen: [VERG_PLENAIR.verslag_id] });
   });
 
   it("officieel: a committee debate in summer time, the zaal written without its accent", async () => {
@@ -347,12 +369,11 @@ describe("koppelGehoord: every status", () => {
   });
 
   it("nog_geen_verslag: a recent commissiedebat without a vergadering yet", async () => {
-    const { deps, calls } = fakeDeps({ debateType: "Commissiedebat" });
-    const recent = { ...COMMISSIE_DEBATE, id: 307212, hall: "Thorbeckezaal", startsAt: "2026-10-29T14:01:30.000Z" };
+    const { deps } = fakeDeps();
+    const recent = { ...COMMISSIE_DEBATE, id: 307212, hall: "Thorbeckezaal", debateType: "Commissiedebat", startsAt: "2026-10-29T14:01:30.000Z" };
     const r = await koppelGehoord([hit(3, recent, { startTime: "2026-10-29T14:30:00Z", endTime: "2026-10-29T14:31:00Z" })], deps);
     expect(r.koppelingen[0].status).toBe("nog_geen_verslag");
     expect(r.koppelingen[0].reden).toMatch(/2 tot 12 dagen/);
-    expect(calls.debates).toEqual(["307212"]);
   });
 
   it("nog_geen_verslag: the tussenpublicatie does not reach the moment yet", async () => {
@@ -362,21 +383,26 @@ describe("koppelGehoord: every status", () => {
     expect(r.koppelingen[0].reden).toBe("het verslag (Tussenpublicatie) loopt nog maar tot 14:28; dit fragment is van 17:00");
   });
 
-  it("nog_geen_verslag: a live debate, without asking Gehoord for the plenary hall's type", async () => {
-    const { deps, calls } = fakeDeps();
+  it("nog_geen_verslag: a live debate", async () => {
+    const { deps } = fakeDeps();
     const live = { ...PLENAIR_DEBATE, status: "live", startsAt: "2026-11-03T09:15:00.000Z" };
     const r = await koppelGehoord([hit(5, live, { startTime: "2026-11-03T10:00:00Z", endTime: "2026-11-03T10:01:00Z" })], deps);
     expect(r.koppelingen[0]).toMatchObject({ status: "nog_geen_verslag", reden: "het debat is nog bezig; het verslag volgt" });
-    expect(calls.debates).toEqual([]);
   });
 
-  it("geen_verslag_verwacht: a technische briefing, for a guest speaker without a persoon-id too", async () => {
-    const { deps, calls } = fakeDeps({ debateType: "Technische briefing" });
-    const briefing = { ...COMMISSIE_DEBATE, id: 999, title: "ROB-advies" };
+  it("geen_verslag_verwacht: a technische briefing by the hit's own debateType, for a guest speaker without a persoon-id too", async () => {
+    const { deps } = fakeDeps();
+    const briefing = { ...COMMISSIE_DEBATE, id: 999, title: "ROB-advies", debateType: "Technische briefing" };
     const r = await koppelGehoord([hit(6, briefing), hit(16, briefing, { speakerLabel: "Melanie Kalis", speakerParty: null })], deps);
     expect(r.koppelingen.map((k) => k.status)).toEqual(["geen_verslag_verwacht", "geen_verslag_verwacht"]);
     expect(r.koppelingen[0].reden).toBe("een technische briefing krijgt geen verslag in het Gegevensmagazijn");
-    expect(calls.debates).toEqual(["999"]);
+  });
+
+  it("geen_verslag_verwacht: a debate Gehoord marks cancelled, when no vergadering holds it", async () => {
+    const { deps } = fakeDeps();
+    const cancelled = { ...COMMISSIE_DEBATE, id: 292952, status: "cancelled", debateType: "Commissiedebat", startsAt: "2026-10-29T14:00:00.000Z" };
+    const r = await koppelGehoord([hit(17, cancelled, { startTime: "2026-10-29T14:30:00Z", endTime: "2026-10-29T14:31:00Z" })], deps);
+    expect(r.koppelingen[0]).toEqual({ status: "geen_verslag_verwacht", reden: "Gehoord.de meldt dit debat als geschrapt (cancelled): het is niet doorgegaan" });
   });
 
   it("eerste_kamer: no lookup at all", async () => {
@@ -384,12 +410,12 @@ describe("koppelGehoord: every status", () => {
     const r = await koppelGehoord([hit(7, EK_DEBATE, { speakerLabel: "vkyyicefojzk" })], deps);
     expect(r.koppelingen[0].status).toBe("eerste_kamer");
     expect(r.koppelingen[0].reden).toContain("officiele_bekendmakingen_search");
-    expect(calls).toEqual({ days: [], verslagen: [], debates: [] });
+    expect(calls).toEqual({ days: [], verslagen: [] });
   });
 
   it("niet_gekoppeld: the verslag has no fragment of this person then, a speaker without a GUID, an old debate without a vergadering", async () => {
-    const { deps } = fakeDeps({ days: { "2026-10-28": [VERG_PLENAIR] }, verslagen: { [VERG_PLENAIR.verslag_id]: plenair }, debateType: "Commissiedebat" });
-    const old = { ...COMMISSIE_DEBATE, id: 1234, startsAt: "2026-06-10T08:00:00.000Z" };
+    const { deps } = fakeDeps({ days: { "2026-10-28": [VERG_PLENAIR] }, verslagen: { [VERG_PLENAIR.verslag_id]: plenair } });
+    const old = { ...COMMISSIE_DEBATE, id: 1234, debateType: "Commissiedebat", startsAt: "2026-06-10T08:00:00.000Z" };
     const r = await koppelGehoord(
       [
         hit(8, PLENAIR_DEBATE, { speakerLabel: MUTLUER }),
@@ -446,12 +472,12 @@ describe("koppelGehoord: budgets", () => {
     expect(r.koppelingen.slice(1).map((k) => k.reden)).not.toContain(`limiet: per aanroep worden hooguit ${KOPPELING_MAX_VERSLAGEN} verslagen gelezen`);
   });
 
-  it(`asks Gehoord the type of at most ${KOPPELING_MAX_TYPE_LOOKUPS} debates; for the others the date decides`, async () => {
-    const { deps, calls } = fakeDeps({ debateType: "Technische briefing" });
-    const hits = Array.from({ length: KOPPELING_MAX_TYPE_LOOKUPS + 2 }, (_, i) => hit(600 + i, { ...COMMISSIE_DEBATE, id: 700 + i, startsAt: "2026-10-29T14:00:00.000Z" }, { startTime: "2026-10-29T14:30:00Z", endTime: "2026-10-29T14:31:00Z" }));
+  it("reads every debate's type from its hit: no lookup and no limit on how many", async () => {
+    const { deps, calls } = fakeDeps();
+    const hits = Array.from({ length: 8 }, (_, i) => hit(600 + i, { ...COMMISSIE_DEBATE, id: 700 + i, debateType: "Technische briefing", startsAt: "2026-10-29T14:00:00.000Z" }, { startTime: "2026-10-29T14:30:00Z", endTime: "2026-10-29T14:31:00Z" }));
     const r = await koppelGehoord(hits, deps);
-    expect(calls.debates).toHaveLength(KOPPELING_MAX_TYPE_LOOKUPS);
-    expect(r.counts).toMatchObject({ geen_verslag_verwacht: KOPPELING_MAX_TYPE_LOOKUPS, nog_geen_verslag: 2 });
+    expect(r.counts).toMatchObject({ geen_verslag_verwacht: 8 });
+    expect(calls).toEqual({ days: ["2026-10-29"], verslagen: [] });
   });
 
   it("gives every request the time left of the deadline and no retry", async () => {
@@ -504,8 +530,8 @@ describe("koppelGehoord: every failure degrades to the transcript", () => {
     expect(r.koppelingen[0]).toMatchObject({ status: "niet_gekoppeld", reden: "verslag niet gelezen: timeout" });
   });
 
-  it("Gehoord cannot tell the debate type: the date decides", async () => {
-    const { deps } = fakeDeps({ failDebate: true });
+  it("a debate without a debateType: the date decides", async () => {
+    const { deps } = fakeDeps();
     const recent = { ...COMMISSIE_DEBATE, startsAt: "2026-11-02T09:00:00.000Z" };
     const r = await koppelGehoord([hit(13, recent, { startTime: "2026-11-02T09:10:00Z", endTime: "2026-11-02T09:11:00Z" })], deps);
     expect(r.koppelingen[0].status).toBe("nog_geen_verslag");
@@ -656,6 +682,23 @@ describe("gehoord_debatten_search with koppeling", () => {
     expect(out.access_note).toContain("zelfde_fragment_als");
   });
 
+  it("links a commissiedebat and gives its page from tkActivityNumber, without an Activiteit lookup", async () => {
+    const v = { ...VERG_COMMISSIE, vergadering_id: "c0000000-0000-4000-8000-0000000000aa", verslag_id: "c0000000-0000-4000-8000-0000000000ab" };
+    const debate = { ...COMMISSIE_DEBATE, hall: "Klompézaal", locationId: "klompezaal", debateType: "Commissiedebat", startedAt: COMMISSIE_DEBATE.startsAt, tkActivityId: "0647302f-4fcf-4dc9-b281-18e9ab406daf", tkActivityNumber: "2026A05087", subtitlesCondensed: false };
+    const urls = mockHttp({
+      contributions: [raw(51, debate, { speakerLabel: MUTLUER, speakerName: "Songül Mutluer", speakerParty: "PRO", text: "Het IMF moet de schulden verlichten.", startTime: "2026-10-08T08:06:00.000Z", endTime: "2026-10-08T08:06:40.000Z" })],
+      vergaderingen: [{ ...vergaderingRow(v, "2026-10-12T10:00:00+02:00"), Datum: "2026-10-08T00:00:00+02:00" }],
+      verslagXml: COMMISSIE_XML,
+    });
+    const out = await call("gehoord_debatten_search", { query: "IMF schulden" });
+    const [r] = out.records;
+    expect(r.data.koppeling.status).toBe("officieel");
+    expect(r.canonical_url).toBe("https://www.tweedekamer.nl/debat_en_vergadering/commissievergaderingen/details?id=2026A05087");
+    expect(r.data.debat_soort).toBe("Commissiedebat");
+    expect(r.data.ondertiteling_samengevat).toBe(false);
+    expect(urls.some((u) => u.pathname.endsWith("/Activiteit"))).toBe(false);
+  });
+
   it("keeps the transcript, with the reason, when the Gegevensmagazijn fails", async () => {
     mockHttp({ contributions: [raw(3, PLENAIR_DEBATE)], tkStatus: 404 });
     const out = await call("gehoord_debatten_search", { query: "natuur" });
@@ -735,6 +778,15 @@ describe("nl_gov_ask answers a Gehoord question with linked hits", () => {
 });
 
 describe("the passage of a long official spreekbeurt", () => {
+  it("centres on the first included term found, ignoring a term that is not there", () => {
+    const filler = "Wij spreken vandaag over de begroting en over veel andere dingen. ".repeat(20);
+    const text = `${filler}De provincie moet meer doen. ${filler}Het stikstofpakket schiet tekort. ${filler}`;
+    expect(officialPassage(text, 400, ["landbouw", "stikstof"], 0).at).toBe(text.indexOf("stikstofpakket"));
+    expect(officialPassage(text, 400, ["stikstof", "provincie"], 0).at).toBe(text.indexOf("provincie"));
+    // A string is still one phrase.
+    expect(officialPassage(text, 400, "stikstof provincie", 0.5).at).toBe(Math.round(text.length / 2));
+  });
+
   const filler = "Wij spreken vandaag over de begroting en over veel andere dingen. ".repeat(20);
   const text = `${filler}Het stikstofpakket van dit kabinet schiet tekort. ${filler}`;
 
@@ -819,9 +871,22 @@ describe("the debate pages after the koppeling", () => {
     expect(seen).toEqual([]);
     expect(late.get(VERG_PLENAIR.vergadering_id)).toBe("https://www.tweedekamer.nl/kamerstukken/plenaire_verslagen/detail/2026-2027/17");
   });
+
+  it("take a commissiedebat's page from the Gehoord debate's tkActivityNumber, with no lookup", async () => {
+    const seen: unknown[] = [];
+    vi.spyOn(TweedeKamerDebattenSource.prototype, "commissieUrl").mockImplementation(async (_v, opts) => (seen.push(opts), "https://example.org/lookup"));
+    const k = { status: "officieel" as const, vergadering: VERG_COMMISSIE };
+    const pages = await koppelingPages([k, k], Date.now() + 5_000, [{ tkActivityNumber: "2026A05087" }, undefined]);
+    expect(pages.get(VERG_COMMISSIE.vergadering_id)).toBe("https://www.tweedekamer.nl/debat_en_vergadering/commissievergaderingen/details?id=2026A05087");
+    expect(seen).toEqual([]);
+    // Without a number the lookup still runs.
+    const looked = await koppelingPages([k], Date.now() + 5_000, [{}]);
+    expect(looked.get(VERG_COMMISSIE.vergadering_id)).toBe("https://example.org/lookup");
+    expect(seen).toHaveLength(1);
+  });
 });
 
-describe("Gehoord getDebate for the koppeling", () => {
+describe("Gehoord getDebate with retries 0", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it("tries once with retries 0, so a 429 does not hold a slot", async () => {

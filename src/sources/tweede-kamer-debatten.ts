@@ -294,6 +294,26 @@ export function phrasePosition(text: string, phrase: string | undefined): number
   return re.exec(foldText(text))?.index ?? -1;
 }
 
+/**
+ * Where the first of several Gehoord.de search terms falls in a text: the
+ * earliest position any of them has (each by phrasePosition), -1 when none is
+ * there. A string is one phrase. Excluded terms are not passed.
+ */
+export function termsPosition(text: string, terms: string | string[] | undefined): number {
+  const list = typeof terms === "string" ? [terms] : terms ?? [];
+  let at = -1;
+  for (const term of list) {
+    const pos = phrasePosition(text, term);
+    if (pos >= 0 && (at < 0 || pos < at)) at = pos;
+  }
+  return at;
+}
+
+/** The page of a commissievergadering on tweedekamer.nl by its Activiteit Nummer ('2026A05087'). */
+export function commissieUrlVoorNummer(nummer: string): string {
+  return `https://www.tweedekamer.nl/debat_en_vergadering/commissievergaderingen/details?id=${encodeURIComponent(nummer)}`;
+}
+
 /** The passage around a position, on word boundaries, with "…" where it is cut. */
 export function snippetAt(text: string, at: number, radius = SNIPPET_RADIUS): string {
   const flat = text.replace(/\s+/g, " ");
@@ -686,7 +706,9 @@ export class TweedeKamerDebattenSource {
    * The page of a commissiedebat on tweedekamer.nl, found through the
    * activiteit that starts at the same moment (the verslag and the agenda do
    * not share an id). Undefined when there is not exactly one such activiteit
-   * or the lookup fails; the caller falls back to the verslag itself.
+   * or the lookup fails; the caller falls back to the verslag itself. A
+   * Gehoord.de hit needs no lookup: its tkActivityNumber is the Nummer
+   * (commissieUrlVoorNummer).
    */
   async commissieUrl(v: Pick<DebatVergadering, "soort" | "aanvangstijd" | "titel">, opts: { timeoutMs?: number } = {}): Promise<string | undefined> {
     if (v.soort !== "Commissie" || !v.aanvangstijd || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/.test(v.aanvangstijd)) {
@@ -707,7 +729,7 @@ export class TweedeKamerDebattenSource {
       const same = rows.filter((r) => titel && foldText(str(r.Onderwerp)).startsWith(titel.slice(0, 40)));
       const pick = same.length === 1 ? same[0] : rows.length === 1 ? rows[0] : undefined;
       const nummer = str(pick?.Nummer);
-      return nummer ? `https://www.tweedekamer.nl/debat_en_vergadering/commissievergaderingen/details?id=${encodeURIComponent(nummer)}` : undefined;
+      return nummer ? commissieUrlVoorNummer(nummer) : undefined;
     } catch {
       return undefined;
     }

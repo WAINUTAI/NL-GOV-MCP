@@ -4,7 +4,7 @@ import { loadConfig, ENV_KEYS } from "./config.js";
 import { DataOverheidSource } from "./sources/data-overheid.js";
 import { CbsSource, cbsCatalogItemUrl } from "./sources/cbs.js";
 import { TweedeKamerSource, mapTweedeKamerError, tkRecordView, tkSubjectTitle } from "./sources/tweede-kamer.js";
-import { DEBAT_DEFAULT_CHARS, DEBAT_DEFAULT_DAYS, DEBAT_MAX_CHARS, DEBAT_MAX_VERSLAGEN, TweedeKamerDebattenSource, phrasePosition, snippetAt, type DebatFragment, type DebatHit, type DebatSearchResult } from "./sources/tweede-kamer-debatten.js";
+import { DEBAT_DEFAULT_CHARS, DEBAT_DEFAULT_DAYS, DEBAT_MAX_CHARS, DEBAT_MAX_VERSLAGEN, TweedeKamerDebattenSource, commissieUrlVoorNummer, snippetAt, termsPosition, type DebatFragment, type DebatHit, type DebatSearchResult } from "./sources/tweede-kamer-debatten.js";
 import { koppelGehoord, koppelingCounts, KOPPELING_MAX_DAGEN, KOPPELING_MAX_VERSLAGEN, type Koppeling, type KoppelingMode, type KoppelingResult } from "./sources/debat-koppeling.js";
 import { BekendmakingenSource, AUTHORITY_TYPES, MAX_TEXT_CHARS, SRU_MAX_START_RECORD, bekendmakingSnippet, normalizeBekendmakingIdentifier, rewriteKeepingSyntax } from "./sources/bekendmakingen.js";
 import { RijksoverheidSource } from "./sources/rijksoverheid.js";
@@ -40,7 +40,7 @@ import { BroOndergrondSource } from "./sources/bro-ondergrond.js";
 import { NedSource } from "./sources/ned.js";
 import { EpOnlineSource } from "./sources/ep-online.js";
 import { NsReisinformatieSource } from "./sources/ns-reisinformatie.js";
-import { GehoordSource, type GehoordContribution, type GehoordDebate, GEHOORD_BASE_NOTE, GEHOORD_LINK_NOTE, GEHOORD_INDEX_NOTE, GEHOORD_DEFAULT_CHARS, GEHOORD_MAX_CHARS, GEHOORD_DEFAULT_CONTEXT, GEHOORD_MAX_CONTEXT, GEHOORD_MAX_LIMIT, GEHOORD_SEGMENT_MAX_PAGES, GEHOORD_FILTER_MAX_PAGES, KAMER_LABEL, gehoordCaveats, gehoordContributionRecord, gehoordDebateRecord, gehoordMissingKey, gehoordSearchNotes, gehoordSnippet, mapGehoordError, summarizeGehoordSearch, type GehoordListArgs, type GehoordSearchArgs } from "./sources/gehoord.js";
+import { GehoordSource, type GehoordContribution, type GehoordDebateRef, GEHOORD_BASE_NOTE, GEHOORD_LINK_NOTE, GEHOORD_INDEX_NOTE, GEHOORD_DEFAULT_CHARS, GEHOORD_MAX_CHARS, GEHOORD_DEFAULT_CONTEXT, GEHOORD_MAX_CONTEXT, GEHOORD_MAX_LIMIT, GEHOORD_SEGMENT_MAX_PAGES, GEHOORD_SPREKER_MAX_PAGES, GEHOORD_MATCHES, GEHOORD_STATUSES, GEHOORD_STATUS_LABEL, gehoordPersoonUrl, KAMER_LABEL, gehoordCaveats, gehoordContributionRecord, gehoordDebateRecord, gehoordMissingKey, gehoordSearchNotes, gehoordSnippet, mapGehoordError, summarizeGehoordSearch, type GehoordListArgs, type GehoordSearchArgs } from "./sources/gehoord.js";
 import { DnbStatisticsSource } from "./sources/dnb-statistics.js";
 import { TenderNedSource, TENDERNED_MAX_REACHABLE, TenderNedInputError, planUpstreamWindow, tenderNedRecordFields } from "./sources/tenderned.js";
 import { KoopCollectieSource } from "./sources/koop-collecties.js";
@@ -263,12 +263,13 @@ function gehoordClient(): GehoordSource | MCPErrorResponse {
 
 /**
  * The passage of an official spreekbeurt to show: all of it when it fits,
- * else maxChars around the search phrase (found as Gehoord finds it, also
- * inside a compound), or around where the middle of the hit falls in time
- * (positie 0..1) when the verslag words it differently.
+ * else maxChars around the first search term found (as Gehoord finds it, also
+ * inside a compound; a string is one phrase, excluded terms are not passed),
+ * or around where the middle of the hit falls in time (positie 0..1) when the
+ * verslag words it differently.
  */
-export function officialPassage(text: string, maxChars: number, query: string | undefined, positie: number): { tekst?: string; ingekort?: true; at: number } {
-  const found = phrasePosition(text, query);
+export function officialPassage(text: string, maxChars: number, terms: string | string[] | undefined, positie: number): { tekst?: string; ingekort?: true; at: number } {
+  const found = termsPosition(text, terms);
   const at = found >= 0 ? found : Math.round(Math.min(1, Math.max(0, positie)) * text.length);
   if (maxChars <= 0) return { at };
   if (text.length <= maxChars) return { tekst: text, at };
@@ -306,7 +307,7 @@ function koppelingData(k: Koppeling): Record<string, unknown> {
 function gehoordLinkedRecord(
   c: GehoordContribution,
   k: Koppeling | undefined,
-  opts: { query?: string; maxChars: number; pageUrl?: string; sameAs?: string | number },
+  opts: { query?: string | string[]; maxChars: number; pageUrl?: string; sameAs?: string | number },
 ): MCPRecord {
   const base = gehoordContributionRecord(c, opts);
   if (!k) return base;
@@ -338,7 +339,9 @@ function gehoordLinkedRecord(
       vergadering: v.titel,
       vergadering_soort: v.soort,
       zaal: v.zaal ?? c.debate.hall ?? null,
+      debat_soort: c.debate.debateType ?? null,
       persoon_id: c.persoonId,
+      persoon_url: gehoordPersoonUrl(c.persoonId),
       spreker: f.spreker,
       fractie: f.fractie ?? null,
       functie: f.functie ?? null,
@@ -354,6 +357,8 @@ function gehoordLinkedRecord(
       tekst_bron: `verslag Tweede Kamer (${[k.verslag?.status, k.verslag?.publicatie].filter(Boolean).join(", ").toLowerCase() || "Gegevensmagazijn"})`,
       verslag_url: verslagUrl,
       gehoord_tekst: transcript,
+      // About the transcript in gehoord_tekst; data.tekst is the verslag's.
+      ondertiteling_samengevat: c.debate.subtitlesCondensed ?? null,
       gehoord_url: c.fragmentUrl,
       debat_url: c.debate.url ?? null,
       bron: "Tweede Kamer, verslag (Gegevensmagazijn); gevonden via Gehoord.de",
@@ -361,28 +366,38 @@ function gehoordLinkedRecord(
   };
 }
 
-/** The koppeling of Gehoord hits, never failing: every lookup error leaves the transcript. */
-async function koppelHits(src: GehoordSource, items: GehoordContribution[], getDebate?: (id: string | number) => Promise<GehoordDebate>): Promise<KoppelingResult> {
-  // The type lookup may fail (the date decides then): no retry, so a 429 does not hold a Gehoord slot.
-  return koppelGehoord(items, { debatten, getDebate: getDebate ?? (async (id) => (await src.getDebate(id, { retries: 0 })).debate) });
+/** The koppeling of Gehoord hits, never failing: every lookup error leaves the transcript. Each hit carries its debate (type, status, start, zaal). */
+async function koppelHits(items: GehoordContribution[]): Promise<KoppelingResult> {
+  return koppelGehoord(items, { debatten });
 }
 
 /**
  * The official page per vergadering of the officieel hits: the plenary verslag
- * on tweedekamer.nl, a commissiedebat's page when its activiteit is found in
- * what is left of the koppeling's deadline (else the verslag itself).
+ * on tweedekamer.nl; a commissiedebat's page straight from the Gehoord
+ * debate's tkActivityNumber (debates[i], parallel to koppelingen), else when
+ * its activiteit is found in what is left of the koppeling's deadline (else
+ * the verslag itself).
  */
-export async function koppelingPages(koppelingen: Koppeling[], deadlineAt: number): Promise<Map<string, string | undefined>> {
+export async function koppelingPages(koppelingen: Koppeling[], deadlineAt: number, debates: Array<Pick<GehoordDebateRef, "tkActivityNumber"> | undefined> = []): Promise<Map<string, string | undefined>> {
   const pages = new Map<string, string | undefined>();
+  // Vergaderingen whose page came from a tkActivityNumber: a lookup never overrides it.
+  const direct = new Set<string>();
   const lookups: Array<Promise<void>> = [];
   const left = deadlineAt - Date.now();
-  for (const k of koppelingen) {
+  for (const [i, k] of koppelingen.entries()) {
     const v = k.status === "officieel" ? k.vergadering : undefined;
-    if (!v || pages.has(v.vergadering_id)) continue;
+    if (!v || direct.has(v.vergadering_id)) continue;
+    const nummer = v.soort === "Commissie" ? debates[i]?.tkActivityNumber : undefined;
+    if (nummer) {
+      pages.set(v.vergadering_id, commissieUrlVoorNummer(nummer));
+      direct.add(v.vergadering_id);
+      continue;
+    }
+    if (pages.has(v.vergadering_id)) continue;
     const plenair = TweedeKamerDebattenSource.plenairUrl(v);
     pages.set(v.vergadering_id, plenair);
     if (!plenair && v.soort === "Commissie" && left >= 1_000 && lookups.length < KOPPELING_MAX_VERSLAGEN) {
-      lookups.push(debatten.commissieUrl(v, { timeoutMs: left }).then((url) => void pages.set(v.vergadering_id, url)));
+      lookups.push(debatten.commissieUrl(v, { timeoutMs: left }).then((url) => void (direct.has(v.vergadering_id) || pages.set(v.vergadering_id, url))));
     }
   }
   if (lookups.length) {
@@ -417,8 +432,8 @@ function koppelingNotes(r: KoppelingResult, duplicates: boolean): string[] {
 }
 
 /** Records for linked hits, the official text of one fragment shown once. */
-async function gehoordLinkedRecords(items: GehoordContribution[], r: KoppelingResult, opts: { query?: string; maxChars: number }): Promise<{ records: MCPRecord[]; duplicates: boolean }> {
-  const pages = await koppelingPages(r.koppelingen, r.deadlineAt);
+async function gehoordLinkedRecords(items: GehoordContribution[], r: KoppelingResult, opts: { query?: string | string[]; maxChars: number }): Promise<{ records: MCPRecord[]; duplicates: boolean }> {
+  const pages = await koppelingPages(r.koppelingen, r.deadlineAt, items.map((c) => c.debate));
   const seen = new Map<string, string | number>();
   let duplicates = false;
   const records = items.map((c, i) => {
@@ -445,9 +460,11 @@ async function gehoordSearchResult(args: GehoordSearchArgs & { max_chars: number
     let notes = gehoordSearchNotes(out, args);
     let records: MCPRecord[];
     let summary = summarizeGehoordSearch(out, args.query.trim());
+    // The snippet and the official passage centre on the first search term found; excluded terms do not count.
+    const terms = out.terms.include;
     if (args.koppeling !== "uit" && out.items.length) {
-      const linked = await koppelHits(src, out.items);
-      const built = await gehoordLinkedRecords(out.items, linked, { query: args.query.trim(), maxChars: args.max_chars });
+      const linked = await koppelHits(out.items);
+      const built = await gehoordLinkedRecords(out.items, linked, { query: terms, maxChars: args.max_chars });
       records = built.records;
       summary += `; officieel verslag gekoppeld: ${linked.counts.officieel} van ${out.items.length}`;
       // With official text: that first, then the provider's caveat scoped to the transcript; the
@@ -461,7 +478,7 @@ async function gehoordSearchResult(args: GehoordSearchArgs & { max_chars: number
         ...rest,
       ];
     } else {
-      records = out.items.map((c) => gehoordContributionRecord(c, { query: args.query, maxChars: args.max_chars }));
+      records = out.items.map((c) => gehoordContributionRecord(c, { query: terms, maxChars: args.max_chars }));
     }
     return successResponse({
       summary,
@@ -513,7 +530,7 @@ async function gehoordDebatResult(args: { debate_id: string; segment_id?: string
   try {
     const detail = await src.getDebate(args.debate_id);
     const d = detail.debate;
-    const label = `'${d.title}' (${[KAMER_LABEL[d.chamber] ?? d.chamber, d.debateType, d.status === "live" ? "live" : d.status === "ended" ? "afgelopen" : d.status].filter(Boolean).join(", ")})`;
+    const label = `'${d.title}' (${[KAMER_LABEL[d.chamber] ?? d.chamber, d.debateType, GEHOORD_STATUS_LABEL[d.status] ?? d.status].filter(Boolean).join(", ")})`;
     const head = gehoordDebateRecord(d, detail.speakers);
     const notes: Array<string | undefined> = [
       GEHOORD_BASE_NOTE,
@@ -528,7 +545,8 @@ async function gehoordDebatResult(args: { debate_id: string; segment_id?: string
       const segment = around.items.find((c) => String(c.id) === String(args.segment_id));
       let segmentRecord: MCPRecord | undefined;
       if (segment && args.koppeling !== "uit") {
-        const linked = await koppelHits(src, [segment], async () => d);
+        // The debate as gehoord_debat_get read it: the koppeling needs nothing more of Gehoord.
+        const linked = await koppelHits([{ ...segment, debate: d }]);
         segmentRecord = (await gehoordLinkedRecords([segment], linked, { maxChars: args.max_chars })).records[0];
         const k = linked.koppelingen[0];
         notes.splice(2, 0, k.status === "officieel"
@@ -1040,30 +1058,32 @@ export function registerTools(server: McpServer): void {
   const gehoordCaveat = "Automatic transcript without human correction: fine for finding, NOT for quoting (quote from the Handelingen: officiele_bekendmakingen_search type Handelingen, or the verslagen: tweede_kamer_debatten). In a live debate speakers and boundaries can still change; vragenuur and big debates may have condensed, non-literal subtitles (subtitlesCondensed); Eerste Kamer text has no capitals or punctuation. Third-party source (Gehoord.de by Jeroen Wollaars), not official. Requires GEHOORD_KEY.";
   const kamerSchema = z.enum(["tk", "ek"]).optional().describe("tk = Tweede Kamer, ek = Eerste Kamer. Default both.");
   const koppelingSchema = z.enum(["officieel", "uit"]).default("officieel").describe(`'officieel' (default): link each Tweede Kamer hit to its fragment in the official verslag (at most ${KOPPELING_MAX_VERSLAGEN} verslagen per call); 'uit' = Gehoord transcript only (faster).`);
-  const koppelingDescription = `Each Tweede Kamer hit is linked to the official verslag by persoon_id and time (koppeling, default); data.koppeling.status: 'officieel' = data.tekst, speaker and url come from the verslag (verslag_status, publicatie in data.koppeling), the transcript passage in data.gehoord_tekst, the video moment in data.gehoord_url; 'nog_geen_verslag' = live or recent, no verslag yet for this moment; 'geen_verslag_verwacht' = technische briefing, procedurevergadering, rondetafelgesprek or constituerende vergadering; 'eerste_kamer' = no verslag exists, quote the Handelingen; 'niet_gekoppeld' = no matching fragment, the limit (${KOPPELING_MAX_VERSLAGEN} verslagen/call) or an error (data.koppeling.reden). Then data.tekst is the transcript, the url the fragment on gehoord.de.`;
+  const koppelingDescription = `Each Tweede Kamer hit is linked to the official verslag by persoon_id and time (koppeling, default); data.koppeling.status: 'officieel' = data.tekst, speaker and url come from the verslag (verslag_status, publicatie in data.koppeling), the transcript passage in data.gehoord_tekst, the video moment in data.gehoord_url; 'nog_geen_verslag' = live or recent, no verslag yet for this moment; 'geen_verslag_verwacht' = technische briefing, procedurevergadering, rondetafelgesprek, constituerende vergadering or a cancelled debate; 'eerste_kamer' = no verslag exists, quote the Handelingen; 'niet_gekoppeld' = no matching fragment, the limit (${KOPPELING_MAX_VERSLAGEN} verslagen/call) or an error (data.koppeling.reden). Then data.tekst is the transcript, the url the fragment on gehoord.de.`;
 
   server.registerTool("gehoord_debatten_search", {
-    description: `Full-text search in what was said in Tweede Kamer and Eerste Kamer debates via Gehoord.de: speech-to-text of the official Kamer video streams of every debate since 31 March 2026, newest first, live debates included. For 'who said what about X', debates the verslagen do not have yet, and the Eerste Kamer. query is ONE literal phrase, case-insensitive: one key word ('stikstof') or an exact spoken phrase ('medische isotopen'), never a question or a list of words (no AND/OR; a word of 4 characters or fewer matches whole words only); search again for each other word. kamer, fractie and spreker are filtered by this server (the API ignores them) over up to ${GEHOORD_FILTER_MAX_PAGES * GEHOORD_MAX_LIMIT} hits per call; access_note says how many it scanned and where to continue. ${koppelingDescription} gehoord_debat_get with segment_id gives the fragments around a hit. ${gehoordCaveat}`, inputSchema: {
-    query: z.string().min(1).max(SEARCH_QUERY_MAX).describe("ONE key word or exact spoken phrase, e.g. 'stikstof', 'Pallas', 'medische isotopen'. Not a question, not several loose words."),
-    date_from: z.string().optional().describe("YYYY-MM-DD: fragments on or after this day (Gehoord starts 2026-03-31)."),
-    date_to: z.string().optional().describe("YYYY-MM-DD: fragments on or before this day."),
+    description: `Full-text search in what was said in Tweede Kamer and Eerste Kamer debates via Gehoord.de: speech-to-text of the official Kamer video streams of every debate since 31 March 2026, newest first, live debates included. For 'who said what about X', debates the verslagen do not have yet, and the Eerste Kamer. query: key words; match 'alle' (default) needs every word in any order, 'een' any one (with both a "quoted phrase" stays together, -word excludes), 'woordgroep' the whole query as one literal phrase; a word of 4 characters or fewer matches whole words only. kamer, fractie, debat_id, the dates (vergaderdag) and a spreker persoon_id are filtered by Gehoord; a spreker name by this server, over up to ${GEHOORD_SPREKER_MAX_PAGES * GEHOORD_MAX_LIMIT} hits per call. ${koppelingDescription} gehoord_debat_get with segment_id gives the fragments around a hit. ${gehoordCaveat}`, inputSchema: {
+    query: z.string().min(1).max(SEARCH_QUERY_MAX).describe("Key words, e.g. 'stikstof', 'stikstof provincie', '\"medische isotopen\" -Pallas'. Not a whole question."),
+    match: z.enum(GEHOORD_MATCHES).default("alle").describe("'alle' (default): every word, any order; 'een': any one of them; 'woordgroep': the whole query as one exact phrase."),
+    date_from: z.string().optional().describe("YYYY-MM-DD: vergaderdag on or after this day, as the Kamer dates it (a night sitting counts for the day it began). Gehoord starts 2026-03-31."),
+    date_to: z.string().optional().describe("YYYY-MM-DD: vergaderdag on or before this day."),
     kamer: kamerSchema,
-    fractie: z.string().optional().describe("Fractie of the speaker, e.g. 'VVD', 'PVV', 'GroenLinks-PvdA' (filtered here)."),
-    spreker: z.string().optional().describe("Words of the speaker's name or function, e.g. 'Klaver', 'van Weel', 'minister' (filtered here)."),
+    fractie: z.string().optional().describe("Party label of the speaker, e.g. 'VVD', 'PVV', 'CU', 'PvdD' (exact, case-insensitive). GroenLinks-PvdA ('GL-PvdA', since late Sept 2026 'PRO': give either) and ChristenUnie ('CU', in the EK 'ChristenUnie') are searched under all their labels."),
+    spreker: z.string().optional().describe("A persoon_id from a hit (TK GUID or Eerste Kamer id), or words of the name or function, e.g. 'Klaver', 'van Weel', 'minister'."),
+    debat_id: z.union([z.string(), z.number()]).optional().describe("Only this debate: debat_id from gehoord_debatten_list or a hit, or its tk_debat_id."),
     max_chars: z.number().int().min(0).max(GEHOORD_MAX_CHARS).default(GEHOORD_DEFAULT_CHARS).describe("Characters of text per fragment in data.tekst (0: only the snippet)."),
     top: z.number().int().min(1).max(GEHOORD_MAX_LIMIT).default(25),
-    offset: z.number().int().min(0).default(0).describe("Skip this many hits (with kamer/fractie/spreker: unfiltered hits; use the offset access_note gives)."),
+    offset: z.number().int().min(0).default(0).describe("Skip this many hits (with a spreker name: hits read upstream; use the offset access_note gives)."),
     koppeling: koppelingSchema,
-  }, annotations: TOOL_ANNOTATIONS }, async ({ query, date_from, date_to, kamer, fractie, spreker, max_chars, top, offset, koppeling }) => {
-    return toMcpToolPayload(await gehoordSearchResult({ query, date_from, date_to, kamer, fractie, spreker, max_chars, top, offset, koppeling }));
+  }, annotations: TOOL_ANNOTATIONS }, async ({ query, match, date_from, date_to, kamer, fractie, spreker, debat_id, max_chars, top, offset, koppeling }) => {
+    return toMcpToolPayload(await gehoordSearchResult({ query, match, date_from, date_to, kamer, fractie, spreker, debat_id, max_chars, top, offset, koppeling }));
   });
 
   server.registerTool("gehoord_debatten_list", {
-    description: `List Tweede Kamer and Eerste Kamer debates transcribed by Gehoord.de, newest first: what is being debated now (status 'live') or was today or on a date, with kamer, debate type (Plenair debat, Commissiedebat, Technische briefing, Procedurevergadering, ...), zaal, start and end, number of fragments, whether the subtitles are condensed, and the official Kamer page as url. For 'wat wordt er nu/vandaag besproken in de Kamer'. Read a debate with gehoord_debat_get, search what was said with gehoord_debatten_search. ${gehoordCaveat}`, inputSchema: {
+    description: `List Tweede Kamer and Eerste Kamer debates transcribed by Gehoord.de, newest first: what is being debated now (status 'live'), was today or on a date, is planned ('scheduled') or was dropped from the agenda ('cancelled'), with kamer, debate type (Plenair debat, Commissiedebat, Technische briefing, Procedurevergadering, ...), zaal, start and end, number of fragments, whether the subtitles are condensed, and the official Kamer page as url. For 'wat wordt er nu/vandaag besproken in de Kamer'. Read a debate with gehoord_debat_get, search what was said with gehoord_debatten_search. ${gehoordCaveat}`, inputSchema: {
     kamer: kamerSchema,
-    status: z.enum(["live", "ended"]).optional().describe("live = still running now; ended = finished. Default both."),
-    date_from: z.string().optional().describe("YYYY-MM-DD: debates on or after this day (today: the same day as date_to)."),
-    date_to: z.string().optional().describe("YYYY-MM-DD: debates on or before this day."),
+    status: z.enum(GEHOORD_STATUSES).optional().describe("live = running now; ended = finished; scheduled = planned, not begun; cancelled = dropped from the agenda, not held. Default: every status."),
+    date_from: z.string().optional().describe("YYYY-MM-DD: debates on or after this vergaderdag (today: the same day as date_to)."),
+    date_to: z.string().optional().describe("YYYY-MM-DD: debates on or before this vergaderdag."),
     top: z.number().int().min(1).max(GEHOORD_MAX_LIMIT).default(25),
     offset: z.number().int().min(0).default(0),
   }, annotations: TOOL_ANNOTATIONS }, async ({ kamer, status, date_from, date_to, top, offset }) => {

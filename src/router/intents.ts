@@ -642,19 +642,38 @@ function debatTopic(text: string, alsoBesproken = false): string | undefined {
 }
 
 /**
- * The one phrase Gehoord.de searches for a topic: the API takes the whole
- * string as one literal phrase, so of several terms the longest (a quoted
- * phrase counts as one term). "stikstof \"medische isotopen\"" → "medische isotopen".
+ * The query Gehoord.de searches for a topic: every meaningful term, with
+ * match 'alle' (the default) all required in any order; a phrase of several
+ * words stays quoted, so it stays together. "stikstof \"medische isotopen\""
+ * stays as it is; "Pallas reactor" → "Pallas reactor".
  */
-export function gehoordPhrase(query: string): string {
-  const parts = [...query.matchAll(/"([^"]+)"|(\S+)/g)].map((m) => (m[1] ?? m[2] ?? "").trim()).filter(Boolean);
-  return [...parts].sort((a, b) => b.length - a.length)[0] ?? "";
+export function gehoordQuery(query: string): string {
+  return [...query.matchAll(/"([^"]+)"|(\S+)/g)]
+    .map((m) => {
+      const term = (m[1] ?? m[2] ?? "").replace(/"/g, "").trim();
+      return m[1] !== undefined && /\s/.test(term) ? `"${term}"` : term;
+    })
+    .filter(Boolean)
+    .join(" ");
+}
+
+/**
+ * The longest term of a query of several (a quoted phrase counts as one), for
+ * one more search when all terms together find nothing: a title or filler word
+ * ("Wet", "toekomst") then no longer blocks the hit. Undefined for one term.
+ * "toekomst pensioenstelsel" → "pensioenstelsel".
+ */
+export function gehoordLongestTerm(query: string): string | undefined {
+  const parts = [...query.matchAll(/"([^"]+)"|(\S+)/g)].map((m) => (m[1] ?? m[2] ?? "").replace(/"/g, "").trim()).filter((t) => t && !t.startsWith("-"));
+  if (parts.length < 2) return undefined;
+  const longest = [...parts].sort((a, b) => b.length - a.length)[0];
+  return /\s/.test(longest) ? `"${longest}"` : longest;
 }
 
 export type GehoordIntent =
   /** Which debates run now (status live) or ran today, in a kamer or both. */
   | { kind: "list"; kamer?: "tk" | "ek"; status?: "live" }
-  /** What was said about a topic: in the Eerste Kamer, or now/today in either Kamer ("nu": nu is true, search today only). */
+  /** What was said about a topic (its terms, all required): in the Eerste Kamer, or now/today in either Kamer ("nu": nu is true, search today only). */
   | { kind: "search"; kamer?: "tk" | "ek"; query: string; fractie?: string; spreker?: string; nu?: true };
 
 /** Another body than the Kamers, or a question about the agenda, votes or moties: other routes. */
@@ -696,7 +715,7 @@ export function detectGehoordIntent(question: string): GehoordIntent | undefined
   if (!ek && !now && !today) return undefined;
   // The Eerste Kamer transcripts have no punctuation: "embryo's" is said as "embryos".
   const rawTopic = debatTopic(text, true);
-  const topic = rawTopic ? gehoordPhrase(ek ? rawTopic.replace(/[^\p{L}\p{N}\s"]/gu, "") : rawTopic) : "";
+  const topic = rawTopic ? gehoordQuery(ek ? rawTopic.replace(/[^\p{L}\p{N}\s"]/gu, "") : rawTopic) : "";
   if (topic) {
     const who = debatSpeaker(text, q);
     return { kind: "search", kamer, query: topic, ...(who.fractie ? { fractie: who.fractie } : {}), ...(who.spreker ? { spreker: who.spreker } : {}), ...(now && !today ? { nu: true as const } : {}) };

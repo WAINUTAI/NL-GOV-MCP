@@ -9,7 +9,7 @@ import { z } from "zod";
 import { ENV_KEYS } from "../config.js";
 import { mapTweedeKamerError, tkRecordView, tkSubjectTitle, type TweedeKamerSource } from "../sources/tweede-kamer.js";
 import { DEBAT_DEFAULT_CHARS, type TweedeKamerDebattenSource, type DebatHit, type DebatSearchResult } from "../sources/tweede-kamer-debatten.js";
-import { GEHOORD_BASE, GEHOORD_DEFAULT_CHARS, type GehoordListArgs, type GehoordSearchArgs } from "../sources/gehoord.js";
+import { GEHOORD_BASE, GEHOORD_DEFAULT_CHARS, GEHOORD_MAX_LIMIT, gehoordDebatesByStatus, type GehoordListArgs, type GehoordSearchArgs } from "../sources/gehoord.js";
 import { rewriteKeepingSyntax, type BekendmakingenSource } from "../sources/bekendmakingen.js";
 import { ApiRegisterSource } from "../sources/api-register.js";
 import { tenderNedRecordFields, type TenderNedSource } from "../sources/tenderned.js";
@@ -41,7 +41,7 @@ import type { KoopCollectieSource } from "../sources/koop-collecties.js";
 import type { BrpGewasperceelSource } from "../sources/brp-gewaspercelen.js";
 import type { VerkiezingsuitslagenSource } from "../sources/verkiezingsuitslagen.js";
 import { matchesTerm, hasTerm, CBS_TERMS, TK_TERMS, OB_TERMS, RIJK_TERMS, RIJK_OFFICE_TERMS, BUDGET_TERMS, DUO_TERMS, API_TERMS, CASE_LAW_TERMS, ENFORCEMENT_TERMS, EXAM_TERMS, SCHOOL_TERMS, duoSector, routeChain, firstRoute, type RouteFacts, type RouteId } from "./routes.js";
-import { extractPlaceName, cbsNarrowingCandidates, extractLuchtComponent, extractVerkiezingHint, detectEuIntent, shouldDeepenTweedeKamerQuery, MUNICIPAL_SCOPE_WORDS, ORGANISATION_WORDS, uitsprakenSense, detectPolicyIntent, detectDebatIntent, detectGehoordIntent, gehoordPhrase, detectAlgoritmeIntent, DSO_DOCUMENT_WORDS_RE, dsoWords, type DsoIntent, detectDsoIntent, toPhraseQuery, toOriQuery, oriPlacePhrase, detectEcliIntent, detectForeignEcliIntent, detectWetArtikelIntent, detectResearchOrgIntent, extractPopulationPlace, extractPopulationYear, type ResearchOrg, detectSubsidieIntent, narrowSubsidieIntent, type SubsidieIntent, type SubsidieSource } from "./intents.js";
+import { extractPlaceName, cbsNarrowingCandidates, extractLuchtComponent, extractVerkiezingHint, detectEuIntent, shouldDeepenTweedeKamerQuery, MUNICIPAL_SCOPE_WORDS, ORGANISATION_WORDS, uitsprakenSense, detectPolicyIntent, detectDebatIntent, detectGehoordIntent, gehoordQuery, gehoordLongestTerm, detectAlgoritmeIntent, DSO_DOCUMENT_WORDS_RE, dsoWords, type DsoIntent, detectDsoIntent, toPhraseQuery, toOriQuery, oriPlacePhrase, detectEcliIntent, detectForeignEcliIntent, detectWetArtikelIntent, detectResearchOrgIntent, extractPopulationPlace, extractPopulationYear, type ResearchOrg, detectSubsidieIntent, narrowSubsidieIntent, type SubsidieIntent, type SubsidieSource } from "./intents.js";
 import { KnmiSource } from "../sources/knmi.js";
 
 /** data.match of a Tweede Kamer record that holds the words of a name apart, not as the phrase (nl_gov_ask). */
@@ -407,6 +407,21 @@ export function registerNlGovAsk(server: McpServer, deps: NlGovAskDeps): void {
   }
 
   // _meta "anthropic/alwaysLoad": Claude Code loads this entry point upfront instead of behind its tool search.
+  /**
+   * A Gehoord.de search for the router; with several terms (all required) and
+   * no hit, once more with only the longest term, so a title or filler word
+   * ("Wet", "toekomst") does not block it. retryNote says so.
+   */
+  const gehoordSearchOrLongest = async (search: GehoordSearchArgs & { max_chars: number }): Promise<{ out: ToolResult; query: string; retryNote?: string }> => {
+    const out = await gehoordSearchResult(search);
+    const longest = "error" in out || out.records.length ? undefined : gehoordLongestTerm(search.query);
+    if (!longest) return { out, query: search.query };
+    const again = await gehoordSearchResult({ ...search, query: longest });
+    if ("error" in again || !again.records.length) return { out, query: search.query };
+    const shown = longest.startsWith('"') ? longest : `'${longest}'`;
+    return { out: again, query: longest, retryNote: `Met alle woorden ('${search.query}') vond Gehoord.de niets; daarna gezocht op alleen het langste woord ${shown}.` };
+  };
+
   server.registerTool("nl_gov_ask", { inputSchema: { question: z.string().min(1, "question is leeg").max(NL_GOV_ASK_QUESTION_MAX_CHARS, `question is te lang: maximaal ${NL_GOV_ASK_QUESTION_MAX_CHARS} tekens; stel een kortere vraag of gebruik de zoektool van de bron`), top: z.number().int().min(1).max(config.limits.maxRows).default(10), reference_now: z.string().optional(), timezone: z.string().optional(), ...paginationInputSchema, outputFormat: outputFormatSchema, verbose: z.boolean().default(false), dryRun: z.boolean().default(false) }, description: "Use this when the best source is unclear: routes a question about Dutch government data to the best source(s); then use that source's own tool for full text. Reads dates ('vorige week', 'since 2020'). Policy questions ('GGZ-beleid gemeente Utrecht') search council records (ORI), publications, Tweede Kamer, Rijksoverheid. An ECLI gives that ruling, 'artikel 3:4 Awb' the law text ('op <datum>' too), Algemene Rekenkamer/SCP/WODC their reports, 'inwoners <gemeente>' a CBS count. Subsidy and funding questions ('welke subsidies zijn er voor waterstof', 'open EU-calls voor zorginnovatie', 'NWO call AI deadline') go to RVO, NWO/ZonMw or the EU Funding & Tenders Portal (topic words in English there); with a gemeente or provincie as funder the document routes answer. With DSO_API_KEY, Omgevingswet document questions go to the DSO first: an omgevingsplan, -visie, -verordening, -programma, waterschapsverordening, voorbereidingsbesluit, projectbesluit or ontwerpregeling with an address, place or body, or asking for a list, the newest or ontwerpen; 'welke regels gelden op <adres/postcode>' ('mag ik een dakkapel plaatsen op ...'); ontwerpen ter inzage of a named body or place. An address covers every bestuurslaag, 'in de provincie X' also its gemeenten; 'gelden op <dag>' sets the day. Questions about the law, procedures, costs, participation or politics, or naming another kind of source (publications, case law, enforcement, permits, tenders, statistics, news) skip the DSO, as do questions over 500 characters. For an address, place or ontwerpen an empty DSO answer stands; if the DSO fails, times out (20 s) or misses the place, other routes answer. With GEHOORD_KEY, debates now or today and the Eerste Kamer go to the Gehoord.de transcripts. Without an answer it falls back to the data.overheid.nl catalogue. access_note names the search terms and the routes tried.", annotations: TOOL_ANNOTATIONS, _meta: { "anthropic/alwaysLoad": true } }, async ({ question, top, reference_now, timezone, offset, limit, outputFormat, verbose, dryRun }) => {
     const decodedQuestion = (() => {
       try { return decodeURIComponent(question.replace(/\+/g, " ")); } catch { return question; }
@@ -1513,12 +1528,14 @@ export function registerNlGovAsk(server: McpServer, deps: NlGovAskDeps): void {
           }
           fallbackSteps.push("tweede_kamer_debatten:no_results");
           // Not in the verslagen read: the Gehoord.de full-text index covers every debate since 31 March 2026, live ones too.
-          const phrase = gehoordKey ? gehoordPhrase(debatArgs.query ?? debatArgs.debat ?? "") : "";
+          // Every term of the topic, all required (match 'alle'), as the verslagen were searched.
+          const phrase = gehoordKey ? gehoordQuery(debatArgs.query ?? debatArgs.debat ?? "") : "";
           let gehoordTried = "";
           if (phrase) {
             const window = out.period.defaulted ? {} : { date_from: debatArgs.date_from, date_to: debatArgs.date_to };
             const started = Date.now();
-            const g = await gehoordSearchResult({ query: phrase, kamer: "tk", fractie: debatArgs.fractie, spreker: debatArgs.spreker, ...window, top, offset: 0, max_chars: GEHOORD_DEFAULT_CHARS });
+            const tried = await gehoordSearchOrLongest({ query: phrase, kamer: "tk", fractie: debatArgs.fractie, spreker: debatArgs.spreker, ...window, top, offset: 0, max_chars: GEHOORD_DEFAULT_CHARS });
+            const g = tried.out;
             requestDebug.push({ connector: "gehoord", request_url: "provenance" in g ? g.provenance.endpoint : "", request_method: "GET", response_time_ms: Date.now() - started, cache_hit: null, cache_ttl_remaining_s: null });
             if (!("error" in g) && g.records.length) {
               return askSuccess({
@@ -1526,7 +1543,8 @@ export function registerNlGovAsk(server: McpServer, deps: NlGovAskDeps): void {
                 records: g.records,
                 provenance: prov("nl_gov_ask", g.provenance.endpoint, g.provenance.query_params, g.records.length, g.provenance.total_results),
                 access_note: mergeAccessNotes(
-                  `Vraag over wat er in een Kamerdebat is gezegd: in de verslagen van de Tweede Kamer (${described}, ${out.searched.length} vergaderingen) niets gevonden; wel in de automatische transcripties van Gehoord.de, gezocht op '${phrase}'${out.period.defaulted ? " in alle debatten sinds 31 maart 2026" : ""}. Elke Tweede Kamer-treffer is waar het kan gekoppeld aan het officiële verslag (data.koppeling.status 'officieel': tekst en link uit het verslag); de andere tonen de transcriptie. Meer: gehoord_debatten_search; citeren: de Handelingen.`,
+                  `Vraag over wat er in een Kamerdebat is gezegd: in de verslagen van de Tweede Kamer (${described}, ${out.searched.length} vergaderingen) niets gevonden; wel in de automatische transcripties van Gehoord.de, gezocht op '${tried.query}'${out.period.defaulted ? " in alle debatten sinds 31 maart 2026" : ""}. Elke Tweede Kamer-treffer is waar het kan gekoppeld aan het officiële verslag (data.koppeling.status 'officieel': tekst en link uit het verslag); de andere tonen de transcriptie. Meer: gehoord_debatten_search; citeren: de Handelingen.`,
+                  tried.retryNote,
                   g.access_note,
                 ),
                 total: g.pagination?.total ?? null,
@@ -1555,8 +1573,28 @@ export function registerNlGovAsk(server: McpServer, deps: NlGovAskDeps): void {
           ? `Vraag welke Kamerdebatten ${gehoordArgs.list.status === "live" ? "nu bezig zijn" : "er zijn geweest"}: de debatten bij Gehoord.de (${described || "alle"}). Lees er een met gehoord_debat_get; zoek in wat er gezegd is met gehoord_debatten_search.`
           : `Vraag over wat er in een Kamerdebat is gezegd${gehoordArgs.search.kamer === "ek" ? " in de Eerste Kamer" : ""}: gezocht in de automatische transcripties van Gehoord.de (${described}). Tweede Kamer-treffers zijn waar het kan gekoppeld aan het officiële verslag (data.koppeling). Meer: gehoord_debatten_search; citeren: de Handelingen.`;
         const started = Date.now();
-        const out = gehoordArgs.kind === "list" ? await gehoordListResult(gehoordArgs.list) : await gehoordSearchResult(gehoordArgs.search);
+        // Which debates, without a status: Gehoord lists the planned ones first (newest id); read the
+        // list whole and put what runs or ran before what is planned.
+        const byStatus = gehoordArgs.kind === "list" && !gehoordArgs.list.status;
+        const tried: { out: ToolResult; retryNote?: string } = gehoordArgs.kind === "list"
+          ? { out: await gehoordListResult(byStatus ? { ...gehoordArgs.list, top: GEHOORD_MAX_LIMIT } : gehoordArgs.list) }
+          : await gehoordSearchOrLongest(gehoordArgs.search);
+        const out = tried.out;
         requestDebug.push({ connector: "gehoord", request_url: "provenance" in out ? out.provenance.endpoint : "", request_method: "GET", response_time_ms: Date.now() - started, cache_hit: null, cache_ttl_remaining_s: null });
+        if (byStatus && !("error" in out) && out.records.length) {
+          const listed = gehoordDebatesByStatus(out.records, top);
+          const more = out.pagination?.has_more === true;
+          return askSuccess({
+            summary: `Router: Gehoord.de — ${listed.shown} debat${listed.shown === 1 ? "" : "ten"}${listed.total > listed.shown ? ` van ${listed.total}` : ""}${more ? ` (de nieuwste ${out.records.length} gelezen)` : ""}: ${listed.counts}`,
+            records: listed.records,
+            provenance: prov("nl_gov_ask", out.provenance.endpoint, out.provenance.query_params, listed.shown, out.provenance.total_results),
+            access_note: mergeAccessNotes(
+              `Vraag welke Kamerdebatten er zijn: de debatten bij Gehoord.de (${described || "alle"}), eerst die nu live zijn, dan de afgelopen, dan de geplande (nog niet begonnen); geschrapte debatten (status cancelled, niet doorgegaan) staan er niet bij. Lees er een met gehoord_debat_get; zoek in wat er gezegd is met gehoord_debatten_search; per status: gehoord_debatten_list met status.`,
+              out.access_note,
+            ),
+            total: more ? out.pagination?.total ?? null : listed.total,
+          });
+        }
         // "Welk debat is er nu live?" with none live: that is the answer.
         const liveAnswer = gehoordArgs.kind === "list" && gehoordArgs.list.status === "live";
         if (!("error" in out) && (out.records.length || liveAnswer)) {
@@ -1564,7 +1602,7 @@ export function registerNlGovAsk(server: McpServer, deps: NlGovAskDeps): void {
             summary: `Router: Gehoord.de — ${out.summary}`,
             records: out.records,
             provenance: prov("nl_gov_ask", out.provenance.endpoint, out.provenance.query_params, out.records.length, out.provenance.total_results),
-            access_note: mergeAccessNotes(what, out.access_note),
+            access_note: mergeAccessNotes(what, tried.retryNote, out.access_note),
             total: out.pagination?.total ?? null,
           });
         }

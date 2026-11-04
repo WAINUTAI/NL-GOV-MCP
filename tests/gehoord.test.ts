@@ -5,11 +5,18 @@ import { clearHttpCache } from "../src/utils/connector-runtime.js";
 import { setCrawlDelaysEnabled } from "../src/utils/http.js";
 import {
   GehoordSource,
+  GEHOORD_PARAMS,
   GEHOORD_SEGMENT_MAX_PAGES,
+  GEHOORD_SPREKER_MAX_PAGES,
   contextWindow,
   gehoordDebateUrl,
   gehoordFragmentUrl,
-  matchesFractie,
+  gehoordParties,
+  gehoordPersoonUrl,
+  gehoordQueryTerms,
+  gehoordSearchNotes,
+  gehoordSnippet,
+  isGehoordPersoonId,
   matchesSpreker,
   parseContribution,
   parseDebate,
@@ -17,7 +24,7 @@ import {
 import { jsonResponse, testConfig } from "./helpers/config.js";
 
 /* ------------------------------------------------------------------ */
-/*  Gehoord.de: the source (parsing, links, client-side filters, the   */
+/*  Gehoord.de: the source (parsing, links, filters, match, the        */
 /*  segment window) and the three tools (missing key, 401/404, notes). */
 /* ------------------------------------------------------------------ */
 
@@ -104,15 +111,132 @@ describe("Gehoord.de parsing and links", () => {
     expect(c.debate.chamber).toBe("ek");
     expect(c.persoonId).toBe("vkyyicefojzk");
   });
+
+  it("keeps the full debate object every hit now carries", () => {
+    const full = {
+      ...TK_ENDED,
+      id: 303748,
+      hall: "Thorbeckezaal",
+      locationId: "thorbeckezaal",
+      debateType: "Commissiedebat",
+      startsAt: "2026-10-28T09:00:00.000Z",
+      startedAt: "2026-10-28T09:01:37.000Z",
+      endedAt: "2026-10-28T11:19:15.000Z",
+      tkDebateId: "117edd5e-a12a-4404-95e8-7cd718e17f42",
+      tkActivityId: "0647302f-4fcf-4dc9-b281-18e9ab406daf",
+      tkActivityNumber: "2026A05087",
+      subtitlesCondensed: false,
+      contributionCount: 112,
+    };
+    const c = parseContribution(contribution(9, full));
+    expect(c.debate).toMatchObject({
+      locationId: "thorbeckezaal",
+      debateType: "Commissiedebat",
+      startedAt: "2026-10-28T09:01:37.000Z",
+      tkDebateId: "117edd5e-a12a-4404-95e8-7cd718e17f42",
+      tkActivityId: "0647302f-4fcf-4dc9-b281-18e9ab406daf",
+      tkActivityNumber: "2026A05087",
+      subtitlesCondensed: false,
+      contributionCount: 112,
+    });
+    // An older answer without the flag: unknown, not false.
+    expect(parseContribution(contribution(10, TK_ENDED)).debate.subtitlesCondensed).toBeUndefined();
+  });
+
+  it("knows a persoon-id Gehoord filters on, and the Eerste Kamer's own person page", () => {
+    expect(isGehoordPersoonId("799bb30d-da26-429a-b10a-f801fcf07659")).toBe(true);
+    expect(isGehoordPersoonId("vkyyicefojzk")).toBe(true);
+    expect(isGehoordPersoonId("Klaver")).toBe(false);
+    expect(isGehoordPersoonId("van Weel")).toBe(false);
+    expect(gehoordPersoonUrl("vkyyicefojzk")).toBe("https://www.eerstekamer.nl/id/vkyyicefojzk");
+    expect(gehoordPersoonUrl("799bb30d-da26-429a-b10a-f801fcf07659")).toBeUndefined();
+    expect(gehoordPersoonUrl("Melanie Kalis")).toBeUndefined();
+    expect(gehoordPersoonUrl(undefined)).toBeUndefined();
+  });
 });
 
-describe("Gehoord.de client-side filters", () => {
-  it("matches a fractie by name, alias or a longer part, never a short substring", () => {
-    expect(matchesFractie("VVD", "vvd")).toBe(true);
-    expect(matchesFractie("GroenLinks-PvdA", "GL-PvdA")).toBe(true);
-    expect(matchesFractie("GroenLinks-PvdA", "groenlinks")).toBe(true);
-    expect(matchesFractie("SGP", "SP")).toBe(false);
-    expect(matchesFractie(undefined, "VVD")).toBe(false);
+describe("Gehoord.de filters and match", () => {
+  it("maps a fractie to every label Gehoord files it under, per kamer, and leaves another label as it is", () => {
+    // GroenLinks-PvdA is 'GL-PvdA' up to late September 2026 and 'PRO' since: one fractie (live, 4 Nov 2026).
+    expect(gehoordParties("GroenLinks-PvdA", "tk")).toEqual(["GL-PvdA", "PRO"]);
+    expect(gehoordParties("groenlinks pvda")).toEqual(["GL-PvdA", "PRO"]);
+    expect(gehoordParties("PRO", "tk")).toEqual(["GL-PvdA", "PRO"]);
+    expect(gehoordParties("GL", "ek")).toEqual(["PRO"]);
+    // The ChristenUnie is 'CU' in the Tweede Kamer, 'ChristenUnie' in the Eerste Kamer.
+    expect(gehoordParties("ChristenUnie", "tk")).toEqual(["CU"]);
+    expect(gehoordParties("ChristenUnie", "ek")).toEqual(["ChristenUnie"]);
+    expect(gehoordParties("CU", "ek")).toEqual(["ChristenUnie"]);
+    expect(gehoordParties("ChristenUnie")).toEqual(["CU", "ChristenUnie"]);
+    expect(gehoordParties("Partij voor de Dieren")).toEqual(["PvdD"]);
+    expect(gehoordParties(" vvd ")).toEqual(["vvd"]);
+  });
+
+  it("asks each label of a fractie with several and merges them newest first, the totals added up", async () => {
+    const pro = { ...PVDD, speakerParty: "PRO", speakerName: "Julian Bushoff" };
+    const gl = { ...PVDD, speakerParty: "GL-PvdA", speakerName: "Jesse Klaver" };
+    const at = (iso: string) => ({ startTime: iso });
+    const calls = mockGehoord((url) => {
+      const party = url.searchParams.get("party");
+      if (party === "PRO") return page([contribution(11, TK_LIVE, { ...pro, ...at("2026-11-04T09:05:00Z") }), contribution(12, TK_LIVE, { ...pro, ...at("2026-10-01T09:00:00Z") }), contribution(13, TK_LIVE, { ...pro, ...at("2026-09-10T09:00:00Z") })], 47, 0, 3);
+      return page([contribution(21, TK_ENDED, { ...gl, ...at("2026-09-21T16:02:00Z") }), contribution(22, TK_ENDED, { ...gl, ...at("2026-09-01T10:00:00Z") }), contribution(23, TK_ENDED, { ...gl, ...at("2026-08-01T10:00:00Z") })], 63, 0, 3);
+    });
+    const src = new GehoordSource(testConfig, "k");
+    const out = await src.search({ query: "stikstof", kamer: "tk", fractie: "GroenLinks-PvdA", top: 3, offset: 0 });
+    expect(calls.map((c) => c.url.searchParams.get("party")).sort()).toEqual(["GL-PvdA", "PRO"]);
+    expect(calls.map((c) => [c.url.searchParams.get("limit"), c.url.searchParams.get("offset")])).toEqual([["3", "0"], ["3", "0"]]);
+    expect(out.items.map((c) => c.id)).toEqual([11, 12, 21]);
+    expect(out).toMatchObject({ parties: ["GL-PvdA", "PRO"], upstreamTotal: 110, hasMore: true, nextOffset: 3 });
+    expect(out.labelsCapped).toBeUndefined();
+    const notes = gehoordSearchNotes(out, { query: "stikstof", kamer: "tk", fractie: "GroenLinks-PvdA", offset: 0 }).join(" ");
+    expect(notes).toContain("'GL-PvdA' en 'PRO' (GL-PvdA heet sinds eind september 2026 'PRO'): elk label apart gevraagd en samengevoegd");
+
+    // The Eerste Kamer: one label, one request.
+    await src.search({ query: "embryo", kamer: "ek", fractie: "ChristenUnie", top: 3, offset: 0 });
+    expect(calls[2].url.searchParams.get("party")).toBe("ChristenUnie");
+    expect(calls).toHaveLength(3);
+  });
+
+  it("filters a fractie with several labels here when a spreker name is filtered here too", async () => {
+    const hits = [
+      contribution(1, TK_ENDED, { ...PVDD, speakerParty: "PRO", speakerName: "Habtamu de Hoop" }),
+      contribution(2, TK_ENDED, { ...PVDD, speakerParty: "GL-PvdA", speakerName: "Habtamu de Hoop" }),
+      contribution(3, TK_ENDED, { ...PVDD, speakerParty: "VVD", speakerName: "Hans de Hoop" }),
+    ];
+    const calls = mockGehoord(() => page(hits, 3, 0));
+    const out = await new GehoordSource(testConfig, "k").search({ query: "woningbouw", kamer: "tk", fractie: "GL-PvdA", spreker: "de Hoop", top: 5, offset: 0 });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url.searchParams.get("party")).toBeNull();
+    expect(out.items.map((c) => c.id)).toEqual([1, 2]);
+  });
+
+  it("stops merging labels past the first 200 hits of a label and says to continue per label", async () => {
+    const many = (party: string, base: number, startHour: number) =>
+      Array.from({ length: 200 }, (_, i) => contribution(base + i, TK_ENDED, { ...PVDD, speakerParty: party, startTime: new Date(Date.UTC(2026, 9, 30, startHour) - i * 60_000 * (party === "PRO" ? 1 : 3)).toISOString() }));
+    mockGehoord((url) => (url.searchParams.get("party") === "PRO" ? page(many("PRO", 1000, 12), 500, 0) : page(many("GL-PvdA", 5000, 11), 500, 0)));
+    const out = await new GehoordSource(testConfig, "k").search({ query: "stikstof", fractie: "PRO", kamer: "tk", top: 200, offset: 100 });
+    // PRO's 200th hit is the newer last one: only hits up to there are in place.
+    const proLast = Date.UTC(2026, 9, 30, 12) - 199 * 60_000;
+    expect(out.items.every((c) => Date.parse(c.startTime!) >= proLast)).toBe(true);
+    // 200 PRO + 47 GL-PvdA hits in place; from 100 on, 147 of them.
+    expect(out.items).toHaveLength(147);
+    expect(out).toMatchObject({ labelsCapped: true, hasMore: true, upstreamTotal: 1000 });
+    expect(out.nextOffset).toBeUndefined();
+    const notes = gehoordSearchNotes(out, { query: "stikstof", kamer: "tk", fractie: "PRO", offset: 100 }).join(" ");
+    expect(notes).toContain("zoek dan per label (fractie 'GL-PvdA' of 'PRO')");
+  });
+
+  it("reads a query as Gehoord does: quoted phrases whole, -word excluded, woordgroep as one phrase", () => {
+    expect(gehoordQueryTerms("stikstof provincie")).toEqual({ include: ["stikstof", "provincie"], exclude: [] });
+    expect(gehoordQueryTerms('"medische isotopen" -pallas')).toEqual({ include: ["medische isotopen"], exclude: ["pallas"] });
+    expect(gehoordQueryTerms('stikstof -"Pallas reactor"', "een")).toEqual({ include: ["stikstof"], exclude: ["Pallas reactor"] });
+    expect(gehoordQueryTerms("stikstof provincie", "woordgroep")).toEqual({ include: ["stikstof provincie"], exclude: [] });
+  });
+
+  it("centres the snippet on the first search term found, not on an excluded one", () => {
+    const text = `${"Wij spreken over de begroting en vele andere zaken vandaag. ".repeat(8)}Daarna kwam de provincie ter sprake. ${"Nog meer tekst over andere dingen. ".repeat(4)}Ook stikstof werd genoemd. ${"Tot slot nog meer woorden. ".repeat(8)}`;
+    expect(gehoordSnippet(text, ["stikstof", "provincie"])).toContain("provincie ter sprake");
+    expect(gehoordSnippet(text, ["stikstof"])).toContain("Ook stikstof werd genoemd");
+    expect(gehoordSnippet(text, ["onbekend"]).startsWith("Wij spreken")).toBe(true);
   });
 
   it("matches a speaker by the words of the name or the function", () => {
@@ -122,32 +246,87 @@ describe("Gehoord.de client-side filters", () => {
     expect(matchesSpreker({ speakerName: "Jesse Klaver" }, "Klaas")).toBe(false);
   });
 
-  it("searches without filters in one request with the API's own offset", async () => {
-    const calls = mockGehoord(() => page([contribution(1, TK_LIVE)], 431, 10, 5, { query: { q: "stikstof" } }));
+  it("searches in one request with the API's own offset, match 'alle' by default", async () => {
+    const calls = mockGehoord(() => page([contribution(1, TK_LIVE)], 431, 10, 5, { query: { q: "stikstof", match: "all", terms: { include: ["stikstof"], exclude: [] } } }));
     const out = await new GehoordSource(testConfig, "test-key").search({ query: "stikstof", top: 5, offset: 10 });
     expect(calls).toHaveLength(1);
     expect(calls[0].url.pathname).toBe("/api/v1/contributions");
-    expect(Object.fromEntries(calls[0].url.searchParams)).toEqual({ q: "stikstof", limit: "5", offset: "10" });
+    expect(Object.fromEntries(calls[0].url.searchParams)).toEqual({ q: "stikstof", match: "all", limit: "5", offset: "10" });
     expect(calls[0].headers.Authorization).toBe("Bearer test-key");
-    expect(out).toMatchObject({ filtered: false, upstreamTotal: 431, hasMore: true, nextOffset: 11 });
+    expect(out).toMatchObject({ filtered: false, upstreamTotal: 431, hasMore: true, nextOffset: 11, match: "alle", terms: { include: ["stikstof"], exclude: [] } });
   });
 
-  it("applies kamer, fractie and spreker here: pages of 200, no such params upstream, and says where to go on", async () => {
-    const hits = Array.from({ length: 200 }, (_, i) =>
-      contribution(1000 + i, i % 2 ? EK_LIVE : TK_ENDED, i % 50 === 0 ? PVDD : i % 7 === 0 ? MINISTER : {}),
-    );
+  it("maps match: alle → all, een → any, woordgroep → no match parameter (the API's phrase)", async () => {
+    const calls = mockGehoord(() => page([], 0, 0, 25));
+    const src = new GehoordSource(testConfig, "k");
+    await src.search({ query: "stikstof provincie", match: "alle", top: 25, offset: 0 });
+    await src.search({ query: "stikstof provincie", match: "een", top: 25, offset: 0 });
+    const phrase = await src.search({ query: "stikstof provincie", match: "woordgroep", top: 25, offset: 0 });
+    expect(calls.map((c) => c.url.searchParams.get("match"))).toEqual(["all", "any", null]);
+    // No echo of query.terms: the same rules here.
+    expect(phrase.terms).toEqual({ include: ["stikstof provincie"], exclude: [] });
+  });
+
+  it("lets Gehoord filter kamer, fractie, a persoon-id and the debate: one request, only parameters the endpoint knows", async () => {
+    const calls = mockGehoord(() => page([contribution(1, TK_ENDED, PVDD)], 63, 0, 25, { query: { terms: { include: ["stikstof"], exclude: [] } } }));
+    const src = new GehoordSource(testConfig, "k");
+    const out = await src.search({ query: "stikstof", kamer: "tk", fractie: "VVD", spreker: "d66383ca-deef-4470-8807-924313ae15e6", debat_id: "117edd5e-a12a-4404-95e8-7cd718e17f42", date_from: "2026-10-01", date_to: "2026-10-31", top: 25, offset: 0 });
+    expect(calls).toHaveLength(1);
+    expect(Object.fromEntries(calls[0].url.searchParams)).toEqual({
+      q: "stikstof",
+      match: "all",
+      from: "2026-10-01",
+      to: "2026-10-31",
+      chamber: "tk",
+      party: "VVD",
+      speaker: "d66383ca-deef-4470-8807-924313ae15e6",
+      debateId: "117edd5e-a12a-4404-95e8-7cd718e17f42",
+      limit: "25",
+      offset: "0",
+    });
+    expect(out).toMatchObject({ filtered: false, upstreamTotal: 63, parties: ["VVD"] });
+    // An Eerste Kamer id is a persoon-id too.
+    await src.search({ query: "embryo", kamer: "ek", spreker: "vkyyicefojzk", top: 25, offset: 0 });
+    expect(calls[1].url.searchParams.get("speaker")).toBe("vkyyicefojzk");
+  });
+
+  it("sends every endpoint only the parameters it knows (Gehoord answers anything else with HTTP 400)", async () => {
+    const calls = mockGehoord((url) => {
+      if (/^\/api\/v1\/debates\/\d+$/.test(url.pathname)) return jsonResponse({ data: { ...TK_ENDED, speakers: [] } });
+      if (url.pathname.endsWith("/contributions") && url.pathname !== "/api/v1/contributions") return page([], 0, 0, 25, { debate: TK_ENDED });
+      return page([], 0, 0, 25);
+    });
+    const src = new GehoordSource(testConfig, "k");
+    await src.search({ query: "stikstof", match: "een", kamer: "ek", fractie: "VVD", spreker: "vkyyicefojzk", debat_id: 312905, date_from: "2026-10-01", top: 5, offset: 0 });
+    await src.search({ query: "stikstof", spreker: "Klaver", top: 5, offset: 0 });
+    await src.listDebates({ kamer: "tk", status: "cancelled", date_from: "2026-10-01", date_to: "2026-10-31", top: 5, offset: 0 });
+    await src.getDebate(312905);
+    await src.getContributions(312905, { limit: 5, offset: 0 });
+    const endpointOf = (path: string): keyof typeof GEHOORD_PARAMS =>
+      path === "/api/v1/contributions" ? "contributions" : path === "/api/v1/debates" ? "debates" : path.endsWith("/contributions") ? "debateContributions" : "debate";
+    expect(calls.map((c) => endpointOf(c.url.pathname))).toEqual(["contributions", "contributions", "debates", "debate", "debateContributions"]);
+    for (const c of calls) {
+      const known: readonly string[] = GEHOORD_PARAMS[endpointOf(c.url.pathname)];
+      expect([...c.url.searchParams.keys()].filter((k) => !known.includes(k)), c.url.href).toEqual([]);
+    }
+    // And the client refuses one before any request.
+    await expect((src as unknown as { get: (p: string, q: Record<string, string>) => Promise<unknown> }).get("/debates", { q: "x" })).rejects.toThrow(/kent de parameter/);
+    expect(calls).toHaveLength(5);
+  });
+
+  it("filters a spreker given by name here: pages of 200 with Gehoord's own filters, and says where to go on", async () => {
+    const hits = Array.from({ length: 200 }, (_, i) => contribution(1000 + i, TK_ENDED, i % 50 === 0 ? MINISTER : {}));
     const calls = mockGehoord((url) => {
       const offset = Number(url.searchParams.get("offset"));
       return page(offset === 0 ? hits : [], 200, offset);
     });
     const src = new GehoordSource(testConfig, "k");
-    const out = await src.search({ query: "stikstof", fractie: "PvdD", kamer: "tk", top: 25, offset: 0 });
+    const out = await src.search({ query: "stikstof", fractie: "VVD", kamer: "tk", spreker: "van Weel", top: 25, offset: 0 });
     expect(calls).toHaveLength(1);
-    const sent = Object.fromEntries(calls[0].url.searchParams);
-    expect(sent).toEqual({ q: "stikstof", limit: "200", offset: "0" });
-    // i = 0, 50, 100, 150 are PvdD; all even, so in the TK debate.
+    expect(Object.fromEntries(calls[0].url.searchParams)).toEqual({ q: "stikstof", match: "all", chamber: "tk", party: "VVD", limit: "200", offset: "0" });
     expect(out.items.map((c) => c.id)).toEqual([1000, 1050, 1100, 1150]);
     expect(out).toMatchObject({ filtered: true, scanned: 200, upstreamTotal: 200, hasMore: false });
+    expect(out.params.spreker).toBe("van Weel (hier gefilterd op naam of functie)");
     expect(out.nextOffset).toBeUndefined();
   });
 
@@ -165,7 +344,7 @@ describe("Gehoord.de client-side filters", () => {
 
     const none = await src.search({ query: "stikstof", spreker: "Klaver", top: 5, offset: 0 });
     expect(none.items).toEqual([]);
-    expect(none.scanned).toBe(600);
+    expect(none.scanned).toBe(GEHOORD_SPREKER_MAX_PAGES * 200);
     expect(none.nextOffset).toBe(600);
     // The first page of the same query comes from the response cache.
     expect(calls).toHaveLength(3);
@@ -237,7 +416,8 @@ describe("Gehoord.de tools", () => {
       expect(d, name).toContain("tweede_kamer_debatten");
       expect(d, name).toMatch(/not official/);
     }
-    expect(tools.get("gehoord_debatten_search")!.description).toMatch(/ONE literal phrase/);
+    expect(tools.get("gehoord_debatten_search")!.description).toMatch(/match 'alle' \(default\) needs every word in any order/);
+    expect(tools.get("gehoord_debatten_search")!.description).not.toMatch(/query is ONE literal phrase|search again for each other word/);
     expect(tools.get("tweede_kamer_debatten")!.description).toContain("gehoord_debatten_search");
   });
 
@@ -301,28 +481,61 @@ describe("Gehoord.de tools", () => {
     });
     expect(tk.snippet).toContain("stikstof");
     expect(ek.data.kamer).toBe("ek");
+    expect(tk.data.persoon_url).toBeUndefined();
+    expect(ek.data.persoon_url).toBe("https://www.eerstekamer.nl/id/vkyyicefojzk");
     expect(out.access_note).toContain("niet om te citeren");
     expect(out.access_note).toContain("officiele_bekendmakingen_search");
     expect(out.access_note).toContain("Debat nog live");
     expect(out.access_note).toContain("geen hoofdletters en geen leestekens");
-    expect(out.access_note).toContain("letterlijke frase 'stikstof'");
+    expect(out.access_note).toContain("vaste persoons-id van de Eerste Kamer");
+    expect(out.access_note).toContain("Gezocht op het woord 'stikstof' (match 'alle'");
+    // The hits do not say whether their subtitles are condensed: the general warning.
+    expect(out.access_note).toContain("gehoord_debat_get toont per debat of dat zo is");
     expect(out.pagination).toEqual({ offset: 0, limit: 25, total: 2, has_more: false });
   });
 
-  it("search with a filter: says how many hits were scanned, that Gehoord does not filter, and where to continue", async () => {
+  it("search with a spreker name: says how many hits were scanned, that Gehoord filters only a persoon-id, and where to continue", async () => {
     vi.stubEnv("GEHOORD_KEY", "k");
     const hits = Array.from({ length: 900 }, (_, i) => contribution(i, TK_ENDED, i === 5 ? PVDD : {}));
     mockGehoord((url) => {
       const offset = Number(url.searchParams.get("offset"));
       return page(hits.slice(offset, offset + 200), 900, offset);
     });
-    const out = await call("gehoord_debatten_search", { query: "stikstof", fractie: "PvdD", top: 10 });
+    const out = await call("gehoord_debatten_search", { query: "stikstof", fractie: "PvdD", spreker: "Kostić", top: 10 });
     expect(out.records).toHaveLength(1);
     expect(out.summary).toMatch(/^1 fragment in 1 debat \(600 van 900 treffers doorzocht\)/);
-    expect(out.access_note).toMatch(/De Gehoord-API filtert niet op kamer, fractie of spreker: fractie 'PvdD' is hier toegepast op treffer 1 t\/m 600 van 900/);
-    expect(out.access_note).toContain("Zoek verder met offset=600.");
+    expect(out.access_note).toContain("Gehoord.de filtert zelf op fractie 'PvdD'.");
+    expect(out.access_note).toMatch(/Gehoord\.de filtert alleen op een persoon-id, niet op een naam: spreker 'Kostić' is hier toegepast op naam en functie, op treffer 1 t\/m 600 van 900/);
+    expect(out.access_note).toContain("Zoek verder met offset=600, of geef als spreker de persoon_id");
     expect(out.pagination).toMatchObject({ total: null, has_more: true });
     expect(out.provenance.total_results).toBeUndefined();
+  });
+
+  it("search: shows how the query was read, the vergaderdag, the total of Gehoord's own filters and the per-hit caveats", async () => {
+    vi.stubEnv("GEHOORD_KEY", "k");
+    const condensed = { ...TK_ENDED, subtitlesCondensed: true, debateType: "Plenair debat" };
+    const calls = mockGehoord(() => page([contribution(1, condensed), contribution(2, { ...TK_LIVE, subtitlesCondensed: false })], 83, 0, 25, {
+      query: { q: "stikstof provincie -pallas", match: "all", terms: { include: ["stikstof", "provincie"], exclude: ["pallas"] } },
+    }));
+    const out = await call("gehoord_debatten_search", { query: "stikstof provincie -pallas", kamer: "tk", date_from: "2026-10-01", date_to: "2026-11-03", koppeling: "uit" });
+    expect(calls[0].url.searchParams.get("match")).toBe("all");
+    expect(out.access_note).toContain("Gezocht op alle woorden 'stikstof' EN 'provincie' (in elke volgorde), zonder 'pallas' (match 'alle'");
+    expect(out.access_note).toContain("vergaderdag 2026-10-01 t/m 2026-11-03 (zoals de Kamer dateert");
+    expect(out.access_note).toContain("samengevat en dus niet letterlijk (subtitlesCondensed; per record data.ondertiteling_samengevat)");
+    expect(out.records.map((r: { data: { ondertiteling_samengevat: boolean } }) => r.data.ondertiteling_samengevat)).toEqual([true, false]);
+    expect(out.records[0].data.debat_soort).toBe("Plenair debat");
+    expect(out.pagination).toEqual({ offset: 0, limit: 25, total: 83, has_more: true });
+    expect(out.provenance.query_params).toMatchObject({ q: "stikstof provincie -pallas", match: "all", chamber: "tk", from: "2026-10-01", to: "2026-11-03" });
+  });
+
+  it("search without hits: suggests match 'alle' for a phrase and names the party labels", async () => {
+    vi.stubEnv("GEHOORD_KEY", "k");
+    mockGehoord(() => page([], 0, 0, 25));
+    const phrase = await call("gehoord_debatten_search", { query: "stikstof provincie", match: "woordgroep" });
+    expect(phrase.access_note).toContain("Gezocht op de letterlijke woordgroep 'stikstof provincie'");
+    expect(phrase.access_note).toContain("zoek met match 'alle'");
+    const party = await call("gehoord_debatten_search", { query: "stikstof", fractie: "Groen Links" });
+    expect(party.access_note).toContain("fractie gaat als exact partijlabel naar Gehoord.de");
   });
 
   it("list: the official page as url, debate type and count, the condensed-subtitles note", async () => {
@@ -336,6 +549,19 @@ describe("Gehoord.de tools", () => {
     expect(out.records[0].data).toMatchObject({ debat_id: 312905, kamer: "tk", aantal_fragmenten: 120, gehoord_url: "https://gehoord.de/beraadslagingen/312905" });
     expect(out.access_note).toContain("samengevat en dus niet letterlijk");
     expect(out.access_note).toContain("Debat nog live");
+  });
+
+  it("list: a cancelled debate, with its status asked of Gehoord and explained", async () => {
+    vi.stubEnv("GEHOORD_KEY", "k");
+    const cancelled = { ...TK_ENDED, id: 307210, title: "Begroting Onderwijs, Cultuur en Wetenschap 2027", status: "cancelled", debateType: "Plenair debat", startedAt: null, contributionCount: 0, subtitlesCondensed: false };
+    const calls = mockGehoord(() => page([cancelled], 43, 0, 25));
+    const out = await call("gehoord_debatten_list", { status: "cancelled" });
+    expect(calls[0].url.searchParams.get("status")).toBe("cancelled");
+    expect(out.summary).toBe("1 debat van 43");
+    expect(out.records[0].snippet).toContain("geschrapt");
+    expect(out.records[0].data.debat_status).toBe("cancelled");
+    expect(out.access_note).toContain("Status 'cancelled' (geschrapt)");
+    expect(tools.get("gehoord_debatten_list")!.schema.status.parse("scheduled")).toBe("scheduled");
   });
 
   it("list: no live debate is an answer, not an error", async () => {
@@ -359,7 +585,7 @@ describe("Gehoord.de tools", () => {
     const out = await call("gehoord_debat_get", { debate_id: "312818", segment_id: 710, context: 2 });
     expect(out.summary).toBe("Debat 'Initiatiefwetsvoorstel embryo's (36.416)' (Eerste Kamer, Plenaire vergadering, live): fragment 9-13 van 30 rond fragment 710 (positie 11)");
     const [head, ...frags] = out.records;
-    expect(head.data.sprekers).toEqual([{ persoon_id: "vkyyicefojzk", naam: "Boris Dittrich", fractie: "D66", functie: "Eerste Kamerlid" }]);
+    expect(head.data.sprekers).toEqual([{ persoon_id: "vkyyicefojzk", persoon_url: "https://www.eerstekamer.nl/id/vkyyicefojzk", naam: "Boris Dittrich", fractie: "D66", functie: "Eerste Kamerlid" }]);
     expect(head.canonical_url).toBe(EK_LIVE.url);
     expect(frags.map((r: { data: { fragment_id: number } }) => r.data.fragment_id)).toEqual([708, 709, 710, 711, 712]);
     expect(frags.map((r: { data: { is_segment: boolean } }) => r.data.is_segment)).toEqual([false, false, true, false, false]);

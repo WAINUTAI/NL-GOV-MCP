@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { detectDebatIntent, detectGehoordIntent, gehoordPhrase } from "../src/router/intents.js";
+import { detectDebatIntent, detectGehoordIntent, gehoordLongestTerm, gehoordQuery } from "../src/router/intents.js";
 import { logger } from "../src/utils/logger.js";
 import { createAskHarness } from "./helpers/route-trace.js";
 
@@ -41,7 +41,7 @@ describe("detectGehoordIntent", () => {
     expect(detectGehoordIntent("Wat werd er gisteren gezegd in de Eerste Kamer?")).toEqual({ kind: "list", kamer: "ek" });
   });
 
-  it("searches a topic as one phrase: Eerste Kamer without punctuation, now/today in either Kamer", () => {
+  it("searches a topic by its terms: Eerste Kamer without punctuation, now/today in either Kamer", () => {
     expect(detectGehoordIntent("Wat zei de minister in de Eerste Kamer over embryo's?")).toEqual({ kind: "search", kamer: "ek", query: "embryos", spreker: "minister" });
     expect(detectGehoordIntent("Wat wordt er vandaag in de Tweede Kamer over stikstof besproken?")).toEqual({ kind: "search", kamer: "tk", query: "stikstof" });
     expect(detectGehoordIntent("Wat zei de VVD in de senaat over de Omgevingswet?")).toEqual({ kind: "search", kamer: "ek", query: "Omgevingswet", fractie: "VVD" });
@@ -57,7 +57,7 @@ describe("detectGehoordIntent", () => {
   });
 
   it("never reads the Kamer as a speaker", () => {
-    expect(detectGehoordIntent("Wat heeft de Eerste Kamer gezegd over de Wet op de inlichtingen- en veiligheidsdiensten?")).toEqual({ kind: "search", kamer: "ek", query: "veiligheidsdiensten" });
+    expect(detectGehoordIntent("Wat heeft de Eerste Kamer gezegd over de Wet op de inlichtingen- en veiligheidsdiensten?")).toEqual({ kind: "search", kamer: "ek", query: "Wet inlichtingen veiligheidsdiensten" });
     expect(detectGehoordIntent("Wat heeft de Kamer vandaag besproken over de zorg?")).toEqual({ kind: "search", query: "zorg" });
     // A name with a lowercase particle stays a name.
     expect(detectDebatIntent("Wat heeft van Campen gezegd in het debat over stikstof?")).toMatchObject({ spreker: "van Campen" });
@@ -75,13 +75,40 @@ describe("detectGehoordIntent", () => {
     expect(detectDebatIntent("Wat zei de minister in de Eerste Kamer over embryo's?")).toBeUndefined();
   });
 
-  it("picks the one phrase Gehoord searches: the longest term, a quoted phrase whole", () => {
-    expect(gehoordPhrase("stikstof")).toBe("stikstof");
-    expect(gehoordPhrase('stikstof "medische isotopen"')).toBe("medische isotopen");
-    expect(gehoordPhrase("Pallas reactor isotopen")).toBe("isotopen");
-    expect(gehoordPhrase("")).toBe("");
+  it("passes every term to Gehoord (match 'alle'), a quoted phrase whole", () => {
+    expect(gehoordQuery("stikstof")).toBe("stikstof");
+    expect(gehoordQuery('stikstof "medische isotopen"')).toBe('stikstof "medische isotopen"');
+    expect(gehoordQuery("Pallas reactor isotopen")).toBe("Pallas reactor isotopen");
+    expect(gehoordQuery('"Pallas"  isotopen')).toBe("Pallas isotopen");
+    expect(gehoordQuery("")).toBe("");
+    expect(detectGehoordIntent("Wat wordt er vandaag in de Tweede Kamer over stikstof en de provincie besproken?")).toEqual({ kind: "search", kamer: "tk", query: "stikstof provincie" });
+  });
+
+  it("keeps the longest term for one more search when all terms find nothing", () => {
+    expect(gehoordLongestTerm("Wet inlichtingen veiligheidsdiensten")).toBe("veiligheidsdiensten");
+    expect(gehoordLongestTerm("toekomst pensioenstelsel")).toBe("pensioenstelsel");
+    expect(gehoordLongestTerm('stikstof "medische isotopen"')).toBe('"medische isotopen"');
+    expect(gehoordLongestTerm("stikstof")).toBeUndefined();
+    expect(gehoordLongestTerm("")).toBeUndefined();
   });
 });
+
+const EK_DEBAT = { id: 312818, chamber: "ek", title: "Wijziging van de Wet op de inlichtingen- en veiligheidsdiensten 2017", status: "ended", hall: "Plenaire zaal", startsAt: "2026-10-06T08:30:00.000Z", url: "https://www.eerstekamer.nl/plenaire_vergadering/20261006" };
+const EK_HIT = {
+  id: 9001,
+  debateId: 312818,
+  text: "de veiligheidsdiensten moeten binnen de wet blijven werken",
+  speakerLabel: "vkyyicefp9z2",
+  speakerName: "Peter Nicolaï",
+  speakerParty: "PvdD",
+  speakerRole: "Eerste Kamerlid",
+  startTime: "2026-10-06T09:00:00.000Z",
+  endTime: "2026-10-06T09:01:00.000Z",
+  debate: EK_DEBAT,
+};
+function gehoordJson(data: unknown[], extra: Record<string, unknown> = {}): Response {
+  return new Response(JSON.stringify({ data, pagination: { limit: 200, offset: 0, total: data.length, hasMore: false }, ...extra }), { status: 200, headers: { "content-type": "application/json" } });
+}
 
 describe("nl_gov_ask and Gehoord.de", () => {
   const harness = createAskHarness();
@@ -149,6 +176,40 @@ describe("nl_gov_ask and Gehoord.de", () => {
     expect(trace.requests.map((r) => r.source)).toEqual(["gehoord"]);
   });
 
+  it("searches once more with the longest term when all terms together find nothing, and says so", async () => {
+    vi.stubEnv("GEHOORD_KEY", "test-key");
+    const question = "Wat heeft de Eerste Kamer gezegd over de Wet op de inlichtingen- en veiligheidsdiensten?";
+    const trace = await harness.trace(question, (url) =>
+      url.hostname === "gehoord.de" && url.searchParams.get("q") === "veiligheidsdiensten" ? gehoordJson([EK_HIT]) : undefined,
+    );
+    const asked = trace.requests.filter((r) => r.source === "gehoord").map((r) => new URL(r.url).searchParams.get("q"));
+    expect(asked).toEqual(["Wet inlichtingen veiligheidsdiensten", "veiligheidsdiensten"]);
+    expect(trace.summary).toMatch(/^Router: Gehoord\.de — 1 fragment/);
+    expect(trace.body.access_note).toContain("Met alle woorden ('Wet inlichtingen veiligheidsdiensten') vond Gehoord.de niets; daarna gezocht op alleen het langste woord 'veiligheidsdiensten'.");
+
+    // The debate route's Gehoord fallback does the same; one term is not searched twice.
+    const fallback = await harness.trace("Wat zei de VVD in het debat over stikstof en de provincie?");
+    expect(fallback.requests.filter((r) => r.source === "gehoord").map((r) => new URL(r.url).searchParams.get("q"))).toEqual(["stikstof provincie", "provincie"]);
+    const one = await harness.trace("Wat zei de VVD in het debat over stikstof?");
+    expect(one.requests.filter((r) => r.source === "gehoord")).toHaveLength(1);
+  });
+
+  it("lists today's debates that run or ran before the planned ones, without the cancelled, counted per status", async () => {
+    vi.stubEnv("GEHOORD_KEY", "test-key");
+    const debate = (id: number, status: string, title: string) => ({ id, chamber: "tk", title, status, hall: "Plenaire zaal", startsAt: "2026-10-06T12:00:00.000Z" });
+    // Gehoord's order: newest id first, so the planned debates come first.
+    const day = [debate(9, "scheduled", "Belastingplan"), debate(8, "scheduled", "Procedurevergadering"), debate(7, "cancelled", "Juridische beroepen"), debate(6, "live", "Begroting KGG"), debate(5, "ended", "Procedurevergadering IenW")];
+    const trace = await harness.trace("Welke debatten zijn er vandaag in de Tweede Kamer?", (url) => (url.hostname === "gehoord.de" && url.pathname === "/api/v1/debates" ? gehoordJson(day) : undefined));
+    const sent = trace.requests.filter((r) => r.source === "gehoord").map((r) => Object.fromEntries(new URL(r.url).searchParams));
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ chamber: "tk", limit: "200", from: "2026-10-06", to: "2026-10-06" });
+    expect(sent[0].status).toBeUndefined();
+    expect(trace.body.records.map((r: { title: string }) => r.title)).toEqual(["Begroting KGG", "Procedurevergadering IenW", "Belastingplan", "Procedurevergadering"]);
+    expect(trace.summary).toBe("Router: Gehoord.de — 4 debatten: 1 live, 1 afgelopen, 2 gepland, 1 geschrapt (niet getoond)");
+    expect(trace.body.access_note).toContain("eerst die nu live zijn, dan de afgelopen, dan de geplande");
+    expect(trace.body.access_note).not.toContain("er zijn geweest");
+  });
+
   it("asks Gehoord.de after the verslagen for a debate question they do not answer, only with the key", async () => {
     const question = "Wat zei de VVD in het debat over stikstof?";
     vi.stubEnv("GEHOORD_KEY", "test-key");
@@ -156,7 +217,10 @@ describe("nl_gov_ask and Gehoord.de", () => {
     expect(withKey.firstSources).toEqual(["tk"]);
     const gehoord = withKey.requests.filter((r) => r.source === "gehoord");
     expect(gehoord).toHaveLength(1);
-    expect(Object.fromEntries(new URL(gehoord[0].url).searchParams)).toMatchObject({ q: "stikstof", limit: "200" });
+    // Gehoord filters the Kamer and the fractie itself: one request of top hits, no scan.
+    const sent = Object.fromEntries(new URL(gehoord[0].url).searchParams);
+    expect(sent).toMatchObject({ q: "stikstof", match: "all", chamber: "tk", party: "VVD" });
+    expect(sent.limit).not.toBe("200");
 
     vi.stubEnv("GEHOORD_KEY", "");
     const without = await harness.trace(question);

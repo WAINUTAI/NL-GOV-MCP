@@ -16,22 +16,31 @@
  * - A plenary day is one Plenair vergadering; its tussenpublicaties are
  *   cumulative (the latest holds everything so far) and lag the debate by a
  *   few hours. pickVerslag takes the latest.
- * - A committee debate is a Commissie vergadering in the same zaal (spelled
- *   with or without accents: "Klompézaal" / "Klompezaal") starting within a
- *   few minutes of the planned start; its verslag follows 2-12 days later.
+ * - A committee debate is a Commissie vergadering in the same zaal starting
+ *   within minutes of the debate's real start (startedAt; startsAt is the
+ *   Debat Direct agenda time and not always the real one). The zaal is
+ *   compared on Gehoord's locationId ('klompezaal'), the Gegevensmagazijn
+ *   Zaal folded to the same key ("Klompézaal" → klompezaal), else on hall.
+ *   Its verslag follows 2-12 days later.
+ * - Gehoord's tkActivityId is the Activiteit in the Gegevensmagazijn, but an
+ *   Activiteit has no navigation to its Vergadering or Verslag (only an equal
+ *   Aanvangstijd), so zaal and time stay the link; tkActivityNumber does give
+ *   the commissievergadering page directly.
  * - Technische briefings, procedurevergaderingen, rondetafelgesprekken and
- *   constituerende vergaderingen never get a verslag.
- * - The Eerste Kamer has no VLOS and Gehoord's speakerLabel there is no GUID.
+ *   constituerende vergaderingen never get a verslag; every hit carries its
+ *   debate's debateType, so no lookup is needed. A cancelled debate is not held.
+ * - The Eerste Kamer has no VLOS; its speakerLabel is the Eerste Kamer's own
+ *   person id, not a TK GUID.
  *
  * Budgets cap what costs a request, not the hits: the vergaderingen of at
- * most KOPPELING_MAX_DAGEN days, KOPPELING_MAX_VERSLAGEN verslagen and
- * KOPPELING_MAX_TYPE_LOOKUPS Gehoord debates per call; every hit whose verslag
- * is read is linked. Everything runs within KOPPELING_DEADLINE_MS, each request
- * with the time left and no retry, so nothing keeps a connector slot after it.
- * Every failure leaves the hit with its transcript.
+ * most KOPPELING_MAX_DAGEN days and KOPPELING_MAX_VERSLAGEN verslagen per
+ * call; every hit whose verslag is read is linked. Everything runs within
+ * KOPPELING_DEADLINE_MS, each request with the time left and no retry, so
+ * nothing keeps a connector slot after it. Every failure leaves the hit with
+ * its transcript.
  */
 import type { DebatFragment, DebatVergadering, DebatVerslag, TweedeKamerDebattenSource } from "./tweede-kamer-debatten.js";
-import type { GehoordContribution, GehoordDebate } from "./gehoord.js";
+import type { GehoordContribution, GehoordDebateRef } from "./gehoord.js";
 import { foldText } from "./dso-regeltekst.js";
 import { logger } from "../utils/logger.js";
 
@@ -39,11 +48,9 @@ import { logger } from "../utils/logger.js";
 export const KOPPELING_MAX_DAGEN = 7;
 /** Verslagen read per call: a plenary day is 1-3 MB. */
 export const KOPPELING_MAX_VERSLAGEN = 4;
-/** Debates without a vergadering whose type (technische briefing, ...) is asked of Gehoord per call; for the others the date decides. */
-export const KOPPELING_MAX_TYPE_LOOKUPS = 5;
 /** Slack on both sides of an official fragment: the clocks agree to the second. */
 export const KOPPELING_TOLERANCE_MS = 3_000;
-/** A committee vergadering starts within this of the debate's planned start (seen: -23 to +0 minutes). */
+/** A committee vergadering (its Aanvangstijd is the agenda time) starts within this of the debate's start. */
 export const KOPPELING_START_WINDOW_MS = 45 * 60_000;
 /** Up to this many days after a debate a missing verslag is still expected (committee: 2-12 days). */
 export const KOPPELING_RECENT_DAYS = 21;
@@ -125,16 +132,24 @@ export function amsterdamDay(iso: string | number | undefined): string | undefin
 /** A plenary sitting never begins before this hour; a debate starting earlier is the night of the previous day's sitting. */
 const NACHT_GRENS_MS = 6 * 60 * 60_000;
 
+type DebateWhere = Pick<GehoordDebateRef, "hall" | "locationId" | "startsAt" | "startedAt">;
+
+/** The debate's start: the real one (startedAt), else the agenda time (startsAt). */
+export function debatStart(debate: Pick<GehoordDebateRef, "startsAt" | "startedAt">): string | undefined {
+  return debate.startedAt ?? debate.startsAt;
+}
+
 /**
- * The day of the vergadering a Gehoord debate belongs to. A plenary sitting
- * that runs past midnight stays the vergadering of the day it began (the
- * verslag of 14 Oct 2026 runs to 01:15 on the 15th), so a plenary debate that
- * starts after midnight but before NACHT_GRENS_MS belongs to the previous day.
+ * The day of the vergadering a Gehoord debate belongs to, for the lookup in
+ * the Gegevensmagazijn. A plenary sitting that runs past midnight stays the
+ * vergadering of the day it began (the verslag of 14 Oct 2026 runs to 01:15 on
+ * the 15th), so a plenary debate that starts after midnight but before
+ * NACHT_GRENS_MS belongs to the previous day.
  */
-export function vergaderDag(debate: { hall?: string; startsAt?: string }, fallback?: string): string | undefined {
-  const t = Date.parse(debate.startsAt ?? fallback ?? "");
+export function vergaderDag(debate: DebateWhere, fallback?: string): string | undefined {
+  const t = Date.parse(debatStart(debate) ?? fallback ?? "");
   if (!Number.isFinite(t)) return undefined;
-  return amsterdamDay(isPlenaireZaal(debate.hall) ? t - NACHT_GRENS_MS : t);
+  return amsterdamDay(isPlenair(debate) ? t - NACHT_GRENS_MS : t);
 }
 
 /** "14:25" in Amsterdam time. */
@@ -146,28 +161,40 @@ function amsterdamClock(epochMs: number): string {
 /*  Matching                                                           */
 /* ------------------------------------------------------------------ */
 
-function sameZaal(a: string | undefined, b: string | undefined): boolean {
-  const fa = foldText(a ?? "").replace(/[^\p{L}\p{N}]+/gu, "");
-  const fb = foldText(b ?? "").replace(/[^\p{L}\p{N}]+/gu, "");
-  return Boolean(fa) && fa === fb;
+/** A zaal as one key, accents, case and separators gone: "Klompézaal" and 'klompezaal' → klompezaal. */
+export function zaalKey(zaal: string | undefined): string {
+  return foldText(zaal ?? "").replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+/** The Gegevensmagazijn Zaal against Gehoord's locationId (the stable key), else its hall. */
+export function sameZaal(zaal: string | undefined, debate: Pick<GehoordDebateRef, "hall" | "locationId">): boolean {
+  const key = zaalKey(zaal);
+  if (!key) return false;
+  return debate.locationId ? key === zaalKey(debate.locationId) : key === zaalKey(debate.hall);
 }
 
 export function isPlenaireZaal(hall: string | undefined): boolean {
   return /^plenaire\s*zaal$/i.test((hall ?? "").trim());
 }
 
+/** A debate in the plenary hall: locationId 'plenaire-zaal', else the hall's name. */
+export function isPlenair(debate: Pick<GehoordDebateRef, "hall" | "locationId">): boolean {
+  return debate.locationId ? zaalKey(debate.locationId) === "plenairezaal" : isPlenaireZaal(debate.hall);
+}
+
 /**
  * The vergadering of a Gehoord debate among the vergaderingen of its day: the
  * plenary hall is the Plenair vergadering (the latest that began before the
  * hit when there are several); any other hall a Commissie vergadering in that
- * zaal starting closest to the debate's start, within KOPPELING_START_WINDOW_MS.
+ * zaal (locationId, else hall) starting closest to the debate's start
+ * (startedAt, else startsAt), within KOPPELING_START_WINDOW_MS.
  */
 export function matchVergadering(
-  debate: { hall?: string; startsAt?: string },
+  debate: DebateWhere,
   vergaderingen: DebatVergadering[],
   hitEpoch?: number,
 ): DebatVergadering | undefined {
-  if (isPlenaireZaal(debate.hall)) {
+  if (isPlenair(debate)) {
     const plenair = vergaderingen.filter((v) => v.soort === "Plenair");
     if (plenair.length <= 1 || hitEpoch === undefined) return plenair[0];
     const started = plenair
@@ -176,10 +203,10 @@ export function matchVergadering(
       .sort((a, b) => b.t - a.t);
     return started[0]?.v ?? plenair[0];
   }
-  const start = Date.parse(debate.startsAt ?? "");
+  const start = Date.parse(debatStart(debate) ?? "");
   if (!Number.isFinite(start)) return undefined;
   return vergaderingen
-    .filter((v) => v.soort === "Commissie" && sameZaal(v.zaal, debate.hall))
+    .filter((v) => v.soort === "Commissie" && sameZaal(v.zaal, debate))
     .map((v) => ({ v, d: Math.abs(Date.parse(v.aanvangstijd ?? "") - start) }))
     .filter((x) => Number.isFinite(x.d) && x.d <= KOPPELING_START_WINDOW_MS)
     .sort((a, b) => a.d - b.d)[0]?.v;
@@ -248,12 +275,9 @@ export function bestFragment(
 
 export interface KoppelingDeps {
   debatten: Pick<TweedeKamerDebattenSource, "vergaderingenOp" | "getVerslag">;
-  /** Gehoord's debate (for debateType), asked only when no vergadering is found; best without retries. */
-  getDebate?: (debateId: string | number) => Promise<Pick<GehoordDebate, "debateType" | "status" | "startedAt" | "endedAt">>;
   now?: () => number;
   maxDagen?: number;
   maxVerslagen?: number;
-  maxTypeLookups?: number;
   deadlineMs?: number;
 }
 
@@ -285,7 +309,6 @@ function short(error: unknown): string {
 export async function koppelGehoord(contributions: GehoordContribution[], deps: KoppelingDeps): Promise<KoppelingResult> {
   const maxDagen = deps.maxDagen ?? KOPPELING_MAX_DAGEN;
   const maxVerslagen = deps.maxVerslagen ?? KOPPELING_MAX_VERSLAGEN;
-  const maxTypeLookups = deps.maxTypeLookups ?? KOPPELING_MAX_TYPE_LOOKUPS;
   const now = deps.now ?? Date.now;
   const out: Koppeling[] = new Array(contributions.length);
   let verslagen = 0;
@@ -337,8 +360,7 @@ export async function koppelGehoord(contributions: GehoordContribution[], deps: 
       }),
     );
 
-    // 3. Each hit to its vergadering; the debates without one are looked up at Gehoord for their type
-    //    (at most maxTypeLookups; for the others the date decides).
+    // 3. Each hit to its vergadering; for a debate without one its type, status and date decide.
     const vergaderingOf = new Map<number, DebatVergadering>();
     const unmatched = new Map<string, number[]>();
     for (const i of todo) {
@@ -353,39 +375,32 @@ export async function koppelGehoord(contributions: GehoordContribution[], deps: 
       else unmatched.set(String(c.debate.id), [...(unmatched.get(String(c.debate.id)) ?? []), i]);
     }
 
-    let lookups = 0;
-    const typeLookups = [...unmatched.entries()].map(async ([debateId, indices]) => {
+    for (const indices of unmatched.values()) {
       const c = contributions[indices[0]];
-      let type: string | undefined;
-      let status = c.debate.status;
-      if (deps.getDebate && !isPlenaireZaal(c.debate.hall) && lookups++ < maxTypeLookups) {
-        try {
-          const d = await withDeadline(deps.getDebate(debateId), deadline);
-          type = d.debateType;
-          status = d.status || status;
-        } catch {
-          // Without the type the date decides.
-        }
-      }
-      const startMs = Date.parse(c.debate.startsAt ?? c.startTime ?? "");
+      const type = c.debate.debateType;
+      const status = c.debate.status;
+      const plenair = isPlenair(c.debate);
+      const startMs = Date.parse(debatStart(c.debate) ?? c.startTime ?? "");
       const ageDays = Number.isFinite(startMs) ? (now() - startMs) / 86_400_000 : 0;
       let k: Koppeling;
       if (type && GEEN_VERSLAG_TYPES.has(type.toLowerCase())) {
         k = { status: "geen_verslag_verwacht", reden: `een ${type.toLowerCase()} krijgt geen verslag in het Gegevensmagazijn` };
+      } else if (status === "cancelled") {
+        k = { status: "geen_verslag_verwacht", reden: "Gehoord.de meldt dit debat als geschrapt (cancelled): het is niet doorgegaan" };
       } else if (status === "live" || ageDays <= KOPPELING_RECENT_DAYS) {
         k = {
           status: "nog_geen_verslag",
           reden: status === "live"
             ? "het debat is nog bezig; het verslag volgt"
-            : isPlenaireZaal(c.debate.hall)
+            : plenair
               ? "nog geen verslag van deze plenaire vergadering"
               : "nog geen verslag van dit debat (een commissiedebat krijgt het na 2 tot 12 dagen)",
         };
       } else {
-        k = { status: "niet_gekoppeld", reden: `geen vergadering met verslag gevonden${isPlenaireZaal(c.debate.hall) ? " (plenaire zaal)" : ` in de ${c.debate.hall ?? "zaal"} rond het begin van het debat`}` };
+        k = { status: "niet_gekoppeld", reden: `geen vergadering met verslag gevonden${plenair ? " (plenaire zaal)" : ` in de ${c.debate.hall ?? "zaal"} rond het begin van het debat`}` };
       }
       for (const i of indices) out[i] = { ...k };
-    });
+    }
 
     // 4. The verslagen, at most maxVerslagen, side by side; the hits of the others keep their transcript.
     //    A speaker without a TK Persoon id cannot be linked: that hit spends no verslag.
@@ -404,7 +419,7 @@ export async function koppelGehoord(contributions: GehoordContribution[], deps: 
         loaded.set(id, error instanceof Error ? error : new Error(String(error)));
       }
     });
-    await Promise.all([...typeLookups, ...loads]);
+    await Promise.all(loads);
     verslagen = [...loaded.values()].filter((v) => !(v instanceof Error)).length;
 
     // 5. The fragment of the same person with the largest overlap.
