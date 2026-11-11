@@ -3150,6 +3150,7 @@ export function registerTools(server: McpServer): void {
         bouwjaar_max: z.number().int().min(1000).max(2100).optional().describe("Only objects with bouwjaar <= this year."),
         gebruiksdoel: z.enum(BAG_GEBRUIKSDOELEN).optional().describe("Only objects with this gebruiksdoel (a pand matches when any of its verblijfsobjecten has it)."),
         includeGeometry: z.boolean().default(false).describe("Include the GeoJSON geometry in WGS84 (footprint polygon for a pand, point for a verblijfsobject)."),
+        beeindigd_timeout_ms: z.number().int().min(1000).max(60000).optional().describe("Optional time budget in ms for the ended statuses from the OGC API, all pages together, without retry. A status not complete in time is reported in failures. Omit for the default (30 s per page, one retry)."),
         top: z.number().int().min(1).max(config.limits.maxRows).default(50),
         ...paginationInputSchema,
         outputFormat: outputFormatSchema,
@@ -3157,7 +3158,7 @@ export function registerTools(server: McpServer): void {
         dryRun: z.boolean().default(false),
       },
       annotations: TOOL_ANNOTATIONS,
-    }, async ({ bbox, bbox_crs, status, inclusief_beeindigd, bouwjaar_min, bouwjaar_max, gebruiksdoel, includeGeometry, top, offset, limit, outputFormat, verbose, dryRun }) => {
+    }, async ({ bbox, bbox_crs, status, inclusief_beeindigd, bouwjaar_min, bouwjaar_max, gebruiksdoel, includeGeometry, beeindigd_timeout_ms, top, offset, limit, outputFormat, verbose, dryRun }) => {
       const connector = objecttype === "pand" ? "bag_panden" : "bag_verblijfsobjecten";
       try {
         const effectiveLimit = Math.min(config.limits.maxRows, limit ?? top);
@@ -3188,6 +3189,7 @@ export function registerTools(server: McpServer): void {
           offset,
           limit: effectiveLimit,
           includeGeometry,
+          endedTimeoutMs: beeindigd_timeout_ms,
         });
         const responseTimeMs = Date.now() - started;
         const records = out.items.map(bagObjectRecord);

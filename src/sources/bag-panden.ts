@@ -139,6 +139,12 @@ export interface BagObjectSearchArgs {
   offset: number;
   limit: number;
   includeGeometry: boolean;
+  /**
+   * Total time for the ended statuses (OGC API), over all their pages. Without
+   * it each page gets 30 s and one retry; with it, no retry, and a status not
+   * complete in time is a failure, not a partial list.
+   */
+  endedTimeoutMs?: number;
 }
 
 export interface BagObjectSearchResult {
@@ -436,7 +442,8 @@ export class BagPandenSource {
   }
 
   /** Every feature of one ended status in the bbox, by cursor; `capped` when the page cap cut it. */
-  private async ogcStatus(objecttype: BagObjecttype, status: string, bbox: string, crs: BagBboxCrs): Promise<{ features: GeoJsonFeature[]; capped: boolean; url: string }> {
+  private async ogcStatus(objecttype: BagObjecttype, status: string, bbox: string, crs: BagBboxCrs, budgetMs?: number): Promise<{ features: GeoJsonFeature[]; capped: boolean; url: string }> {
+    const deadline = budgetMs !== undefined ? Date.now() + budgetMs : undefined;
     const features: GeoJsonFeature[] = [];
     let url: string | undefined = `${BAG_OGC_BASE}/collections/${objecttype}/items`;
     let query: Record<string, string> | undefined = {
@@ -449,11 +456,15 @@ export class BagPandenSource {
     };
     let firstUrl = url;
     for (let page = 0; page < OGC_MAX_PAGES && url; page += 1) {
+      const remaining = deadline !== undefined ? deadline - Date.now() : undefined;
+      if (remaining !== undefined && remaining < 250) {
+        throw new Error(`BAG OGC API: '${status}' niet binnen ${budgetMs} ms compleet`);
+      }
       const { data, meta }: { data: GeoJsonCollection; meta: { url: string } } = await getJson<GeoJsonCollection>(url, {
         ...(query ? { query } : {}),
         connector: BAG_OGC_CONNECTOR,
-        timeoutMs: 30_000,
-        retries: 1,
+        timeoutMs: remaining !== undefined ? Math.min(30_000, remaining) : 30_000,
+        retries: remaining !== undefined ? 0 : 1,
       });
       if (page === 0) firstUrl = meta.url;
       features.push(...(data.features ?? []));
@@ -493,7 +504,7 @@ export class BagPandenSource {
     // The ended statuses are fetched whole: they have no count to page against,
     // and the http cache keeps them for the next page of the same query.
     const endedPromise = split.ended.length
-      ? Promise.allSettled(split.ended.map((s) => this.ogcStatus(objecttype, s, args.bbox, args.bboxCrs)))
+      ? Promise.allSettled(split.ended.map((s) => this.ogcStatus(objecttype, s, args.bbox, args.bboxCrs, args.endedTimeoutMs)))
       : Promise.resolve([]);
 
     let activeTotal = 0;

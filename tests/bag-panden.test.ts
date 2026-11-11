@@ -235,6 +235,32 @@ describe("BagPandenSource", () => {
     expect(out.access_note).toContain("alleen de bestaande objecten");
   });
 
+  it("gives up on a hanging OGC API after beeindigd_timeout_ms, without retry, and keeps the WFS answer", async () => {
+    let ogcCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: unknown, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.href.startsWith(BAG_WFS_ENDPOINT)) {
+        if (url.searchParams.get("resultType") === "hits") return hitsResponse(1);
+        return jsonResponse({ features: [wfsPand("0344100000000010", "Bouw gestart")] });
+      }
+      ogcCalls += 1;
+      // Hangs until aborted, like the OGC API on a bad day.
+      return new Promise<Response>((_, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+      });
+    }));
+
+    const started = Date.now();
+    const out = await new BagPandenSource(config).search({
+      objecttype: "pand", bbox: BBOX, bboxCrs: "EPSG:28992", statuses: ["Bouw gestart", "Pand gesloopt"], includeEnded: false, offset: 0, limit: 10, includeGeometry: false, endedTimeoutMs: 1_000,
+    });
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(ogcCalls).toBe(1);
+    expect(out.items.map((x) => x.status)).toEqual(["Bouw gestart"]);
+    expect(out.failures).toHaveLength(1);
+    expect(out.failures[0].connector).toBe("bag_panden_ogc");
+  });
+
   it("answers an invalid bbox with a note and no request", async () => {
     const fetchMock = routedFetch({});
     vi.stubGlobal("fetch", fetchMock);
