@@ -124,8 +124,21 @@ describe("BAG panden helpers", () => {
       url: "https://bagviewer.kadaster.nl/lvbag/bag-viewer/?objectId=0344100000000405",
       bron: "wfs",
     });
-    expect(pand.lon).toBeCloseTo(5.0901, 6);
-    expect(pand.lat).toBeCloseTo(52.0801, 6);
+    // The fixture is a triangle: its area centroid, not the bbox middle (which lies on its long side).
+    expect(pand.lon).toBeCloseTo(5.0901333, 6);
+    expect(pand.lat).toBeCloseTo(52.0800667, 6);
+    expect(pand.bbox).toEqual([5.09, 52.08, 5.0902, 52.0802]);
+
+    // A block around a courtyard: centroid and bbox middle both fall in the courtyard; the point goes onto the roof.
+    const ring = (a: number, b: number) => [[5.09 + a, 52.08 + a], [5.09 + b, 52.08 + a], [5.09 + b, 52.08 + b], [5.09 + a, 52.08 + b], [5.09 + a, 52.08 + a]];
+    const courtyard = toBagItem("pand", {
+      geometry: { type: "Polygon", coordinates: [ring(0, 0.0004), ring(0.0001, 0.0003)] },
+      properties: { identificatie: "0344100000000999", status: "Pand in gebruik" },
+    }, "wfs", false);
+    const inBlock = (v: number, base: number) => v - base > 0 && v - base < 0.0004;
+    const inYard = (v: number, base: number) => v - base > 0.0001 && v - base < 0.0003;
+    expect(inBlock(courtyard.lon!, 5.09) && inBlock(courtyard.lat!, 52.08)).toBe(true);
+    expect(inYard(courtyard.lon!, 5.09) && inYard(courtyard.lat!, 52.08)).toBe(false);
     expect(pand.geometry).toBeUndefined();
 
     const vbo = toBagItem("verblijfsobject", {

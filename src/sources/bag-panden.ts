@@ -1,6 +1,7 @@
 import type { AppConfig } from "../types.js";
 import { getJson, getText } from "../utils/http.js";
 import { validateRdBbox } from "../utils/geo.js";
+import { inLocalMetres, interiorPoint, parseGeoJson, representativePoint } from "../utils/geometry.js";
 
 // BAG panden and verblijfsobjecten per bbox, with bouwjaar, status and gebruiksdoel.
 //
@@ -117,6 +118,11 @@ export interface BagObjectItem {
   documentnummer?: string;
   /** "J" when the object was registered from observation rather than from a permit (OGC API only). */
   geconstateerd?: string;
+  /**
+   * WGS84 point on the object: a verblijfsobject's own point; for a pand its
+   * area centroid, or a point inside the pand when the centroid falls outside
+   * it (courtyard, U shape).
+   */
   lat?: number;
   lon?: number;
   bbox?: [number, number, number, number];
@@ -279,6 +285,19 @@ function boundsOf(feature: GeoJsonFeature): Bounds | undefined {
   return Number.isFinite(minX) ? [minX, minY, maxX, maxY] : undefined;
 }
 
+/**
+ * Lon/lat of the object: a verblijfsobject's point as given; a pand's area
+ * centroid when that lies on the pand, else a point inside it (a U-shaped
+ * block or one around a courtyard has its centroid outside). Undefined when
+ * the feature has no usable geometry.
+ */
+function pointOf(feature: GeoJsonFeature): [number, number] | undefined {
+  const geometry = parseGeoJson(feature.geometry);
+  if (!geometry) return undefined;
+  if (geometry.type !== "polygon") return representativePoint(geometry);
+  return inLocalMetres(geometry, (local) => (local.type === "polygon" ? interiorPoint(local.polygons) : undefined));
+}
+
 function splitDoelen(value: string | undefined): string[] {
   return value ? value.split(",").map((s) => s.trim()).filter(Boolean) : [];
 }
@@ -321,8 +340,9 @@ export function toBagItem(
   if (bouwjaar !== undefined) item.bouwjaar = bouwjaar;
   if (bounds) {
     item.bbox = bounds;
-    item.lon = (bounds[0] + bounds[2]) / 2;
-    item.lat = (bounds[1] + bounds[3]) / 2;
+    const point = pointOf(feature) ?? [(bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2];
+    item.lon = point[0];
+    item.lat = point[1];
   }
   const uri = str(p.rdf_seealso);
   if (uri) item.bagUri = uri;

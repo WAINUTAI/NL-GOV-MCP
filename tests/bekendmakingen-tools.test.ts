@@ -218,7 +218,7 @@ describe("officiele_bekendmakingen_search tool — bbox_rd and location", () => 
     const sent = new URL(String((fetchMock.mock.calls[0] as unknown[])[0])).searchParams.get("query");
     expect(sent).toContain('AND cd.afgeleideLocatieGebied within/nwse.rd "134028 454790 135114 453672"');
     expect(out.provenance.query_params.query).toContain("cd.afgeleideLocatieGebied");
-    expect(out.records[0].data.location).toMatchObject({ kind: "Vlak", rd_x: 134630, rd_y: 453950, lat: 52.0735, lon: 5.0902 });
+    expect(out.records[0].data.location).toMatchObject({ kind: "Vlak", rd_x: 134630, rd_y: 453950, lat: 52.0734589, lon: 5.0900909, area_m2: 400 });
     expect(out.summary).toBe("1 bekendmakingen (van 120 treffers)");
   });
 

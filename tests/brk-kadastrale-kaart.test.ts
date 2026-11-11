@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../src/config.js";
-import { BrkKadastraleKaartSource } from "../src/sources/brk-kadastrale-kaart.js";
+import { BrkKadastraleKaartSource, interiorLatLon } from "../src/sources/brk-kadastrale-kaart.js";
+import { parseGeoJson, pointInGeometry } from "../src/utils/geometry.js";
 
 const config = loadConfig();
 
@@ -54,6 +55,24 @@ describe("BrkKadastraleKaartSource", () => {
     expect(item.kadastraleGrootteM2).toBe("100");
     expect(item.bbox).toBeDefined();
     expect(item.geometry).toBeUndefined();
+    // The bbox midpoint stays as it was; interiorPoint is new, here the square's centre.
+    expect(item.centroid).toEqual([4.8805, 52.3605]);
+    expect(item.interiorPoint?.lon).toBeCloseTo(4.8805, 8);
+    expect(item.interiorPoint?.lat).toBeCloseTo(52.3605, 8);
+  });
+
+  it("puts interiorPoint inside an L-shaped parcel and in the largest part of a multipart one", () => {
+    // An L of 1-wide arms in units of 0.0001 degree (about 7 m by 11 m per unit); its bbox midpoint lies outside.
+    const l = [[0, 0], [10, 0], [10, 1], [1, 1], [1, 10], [0, 10], [0, 0]].map(([x, y]) => [4.88 + x * 0.0001, 52.36 + y * 0.0001]);
+    const small = [[5.0, 52.0], [5.00001, 52.0], [5.00001, 52.00001], [5.0, 52.0]];
+    const geometry = { type: "MultiPolygon", coordinates: [[small], [l]] };
+    const point = interiorLatLon(geometry)!;
+    expect(pointInGeometry([point.lon, point.lat], { type: "polygon", polygons: [[l as [number, number][]]] })).toBe(true);
+    const bboxMid: [number, number] = [4.8805, 52.3605];
+    expect(pointInGeometry(bboxMid, parseGeoJson({ type: "Polygon", coordinates: [l] })!)).toBe(false);
+    // Lines and points get none.
+    expect(interiorLatLon({ type: "LineString", coordinates: [[4.88, 52.36], [4.89, 52.36]] })).toBeUndefined();
+    expect(interiorLatLon(undefined)).toBeUndefined();
   });
 
   it("uses the tekst property as title for openbareruimtenaam", async () => {

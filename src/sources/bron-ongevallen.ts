@@ -34,6 +34,16 @@ export interface BronOngevalItem {
   provincie: string;
   maximumSnelheid: number | string;
   rd: [number, number] | null;
+  /**
+   * How the source tied the crash to the road network: "Ongeval gekoppeld op
+   * straat niveau." means only the street is known and rd is a point on it,
+   * not the crash spot.
+   */
+  niveauKoppelen?: string;
+  /** NWB wegvak the crash is coupled to; rd is then on that wegvak (its middle). */
+  wegvakId?: number | string;
+  /** NWB junction (knooppunt) the crash is coupled to; rd is then that junction. */
+  junctieId?: number | string;
   url: string;
 }
 
@@ -80,6 +90,13 @@ function toRdPoint(coordinates: unknown): [number, number] | null {
   const y = Number(coordinates[1]);
   if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
   return [x, y];
+}
+
+/** An NWB id as the source gives it (a number), or its text; undefined when null or empty. */
+function idValue(value: unknown): number | string | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  const text = String(value ?? "").trim();
+  return text ? text : undefined;
 }
 
 // Verzamel alle "partij_N_objecttype" waarden (betrokken vervoerswijzen), niet-leeg.
@@ -202,6 +219,9 @@ export class BronOngevallenSource {
       const aantalRaw = props.aantal_partijen;
       const snelheidRaw = props.maximum_snelheid;
       const featureId = f.id ?? `${typeName}.${id}`;
+      const niveau = String(props.niveau_koppelen ?? "").trim();
+      const wegvak = idValue(props.wegvak_id);
+      const junctie = idValue(props.junctie_id);
       const url = `${OWS_ENDPOINT}?service=WFS&version=2.0.0&request=GetFeature&typeNames=${encodeURIComponent(
         typeName,
       )}&featureID=${encodeURIComponent(featureId)}&outputFormat=application/json`;
@@ -219,6 +239,9 @@ export class BronOngevallenSource {
         provincie: String(props.provincie ?? ""),
         maximumSnelheid: typeof snelheidRaw === "number" ? snelheidRaw : String(snelheidRaw ?? ""),
         rd: toRdPoint(f.geometry?.coordinates),
+        ...(niveau ? { niveauKoppelen: niveau } : {}),
+        ...(wegvak !== undefined ? { wegvakId: wegvak } : {}),
+        ...(junctie !== undefined ? { junctieId: junctie } : {}),
         url,
       };
     });

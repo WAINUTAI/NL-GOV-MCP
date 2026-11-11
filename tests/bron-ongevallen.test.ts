@@ -116,9 +116,28 @@ describe("BronOngevallenSource", () => {
     expect(item.rd).toEqual([193338.1182, 443705.0693]);
     expect(item.gemeente).toBe("Arnhem");
     expect(item.url).toContain("featureID=ongevallen_2023.15");
+    // No coupling fields in the fixture: none in the item.
+    expect(item).not.toHaveProperty("niveauKoppelen");
+    expect(item).not.toHaveProperty("wegvakId");
+    expect(item).not.toHaveProperty("junctieId");
     // total reflects numberMatched, not the returned page size.
     expect(out.total).toBe(530);
     expect(out.endpoint).toContain("verkeersongevallen_nederland/ows");
+  });
+
+  it("passes through how the crash is coupled to the road network", async () => {
+    const fetchMock = vi.fn(async () =>
+      fcResponse([
+        makeFeature({ verkeersongeval_nummer: 1, niveau_koppelen: "Ongeval gekoppeld op straat niveau.", wegvak_id: 268308026, junctie_id: null }),
+        makeFeature({ verkeersongeval_nummer: 2, niveau_koppelen: "Ongeval gekoppeld op kruispunt niveau.", wegvak_id: null, junctie_id: 401234567 }),
+      ]),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const out = await new BronOngevallenSource(config).search({ bbox: "190000,442000,195000,445000", jaar: "2023", afloop: "all", rows: 20 });
+    expect(out.items[0]).toMatchObject({ niveauKoppelen: "Ongeval gekoppeld op straat niveau.", wegvakId: 268308026 });
+    expect(out.items[0]).not.toHaveProperty("junctieId");
+    expect(out.items[1]).toMatchObject({ niveauKoppelen: "Ongeval gekoppeld op kruispunt niveau.", junctieId: 401234567 });
+    expect(out.items[1]).not.toHaveProperty("wegvakId");
   });
 
   it("maps jaar to the combined 2022_2024 feature type", async () => {
