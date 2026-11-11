@@ -3,7 +3,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../src/server.js";
 import { clearHttpCache, markConnectorSuccess } from "../src/utils/connector-runtime.js";
-import { GMB_RECORD, KST_RECORD, SRU_DIAGNOSTIC, creatorRecord, sruResponse } from "./helpers/bekendmakingen-fixtures.js";
+import { GMB_RECORD, KST_RECORD, MARKING, SRU_DIAGNOSTIC, creatorRecord, locatedRecord, sruResponse } from "./helpers/bekendmakingen-fixtures.js";
 import { xmlResponse } from "./helpers/config.js";
 
 async function callToolRaw(name: string, args: Record<string, unknown>): Promise<{ isError?: boolean; text: string }> {
@@ -201,5 +201,56 @@ describe("officiele_bekendmakingen_record_get tool", () => {
     expect(out.records).toEqual([]);
     expect(out.summary).toBe("Bekendmaking kst-37020-IX-40 niet opgehaald — bron niet bereikbaar");
     expect(out.failures[0].connector).toBe("officiele_bekendmakingen");
+  });
+});
+
+describe("officiele_bekendmakingen_search tool — bbox_rd and location", () => {
+  it("sends the spatial clause and returns each record's location", async () => {
+    const fetchMock = stubSru(() => xmlResponse(sruResponse([locatedRecord("gmb-2026-1", [MARKING.vlak])], 120)));
+    const out = await callTool("officiele_bekendmakingen_search", {
+      query: "",
+      authority: "Utrecht",
+      authority_type: "gemeente",
+      bbox_rd: [134028, 453672, 135114, 454790],
+      sort: "date_newest",
+      top: 100,
+    });
+    const sent = new URL(String((fetchMock.mock.calls[0] as unknown[])[0])).searchParams.get("query");
+    expect(sent).toContain('AND cd.afgeleideLocatieGebied within/nwse.rd "134028 454790 135114 453672"');
+    expect(out.provenance.query_params.query).toContain("cd.afgeleideLocatieGebied");
+    expect(out.records[0].data.location).toMatchObject({ kind: "Vlak", rd_x: 134630, rd_y: 453950, lat: 52.0735, lon: 5.0902 });
+    expect(out.summary).toBe("1 bekendmakingen (van 120 treffers)");
+  });
+
+  it("takes bbox_rd as a string too", async () => {
+    const fetchMock = stubSru(() => xmlResponse(sruResponse([], 0)));
+    await callTool("officiele_bekendmakingen_search", { query: "", bbox_rd: "134028,453672,135114,454790" });
+    const sent = new URL(String((fetchMock.mock.calls[0] as unknown[])[0])).searchParams.get("query");
+    expect(sent).toContain('cd.afgeleideLocatieGebied within/nwse.rd "134028 454790 135114 453672"');
+  });
+
+  it("refuses a bbox_rd it cannot use, with a clear message and no request", async () => {
+    const fetchMock = stubSru(() => xmlResponse(sruResponse([], 0)));
+    for (const bbox_rd of [[1, 2, 3], [5.08, 52.07, 5.09, 52.08], "134028,453672,abc,454790", [135114, 453672, 134028, 454790]]) {
+      const out = await callTool("officiele_bekendmakingen_search", { query: "", bbox_rd });
+      expect(out.error).toBe("unexpected");
+      expect(out.message).toMatch(/^bbox_rd/);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("shows bbox_rd in a dry run", async () => {
+    stubSru(() => xmlResponse(sruResponse([], 0)));
+    const out = await callTool("officiele_bekendmakingen_search", { query: "parkeren", bbox_rd: [134028, 453672, 135114, 454790], dryRun: true });
+    expect(out.planned_requests[0].params.bbox_rd).toBe("134028,453672,135114,454790");
+  });
+
+  it("adds no location fields to records without a geometry", async () => {
+    stubSru(() => xmlResponse(sruResponse([GMB_RECORD, KST_RECORD], 2)));
+    const out = await callTool("officiele_bekendmakingen_search", { query: "afvalinzameling" });
+    for (const record of out.records) {
+      expect(record.data).not.toHaveProperty("location");
+      expect(record.data).not.toHaveProperty("locations");
+    }
   });
 });
