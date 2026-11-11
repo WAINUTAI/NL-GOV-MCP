@@ -51,13 +51,18 @@ export class PdokSource {
     query?: string;
     postcode?: string;
     huisnummer?: string;
+    woonplaats?: string;
     rows: number;
   }) {
     const q = args.query?.trim() || `${args.postcode ?? ""} ${args.huisnummer ?? ""}`.trim();
+    // The free search is fuzzy: "Oudegracht 245 Utrecht" also scores Oudegracht 245
+    // in Alkmaar. A woonplaats narrows it in Solr itself, so the rows that come back
+    // are all in that place instead of being filtered away afterwards.
+    const woonplaats = args.woonplaats?.trim().replace(/["\\]/g, "");
     const params = {
       q,
       rows: String(args.rows),
-      fq: "type:adres",
+      fq: woonplaats ? `type:adres AND woonplaatsnaam:"${woonplaats}"` : "type:adres",
       fl: "id,weergavenaam,type,straatnaam,huisnummer,postcode,woonplaatsnaam,gemeentenaam,centroide_ll,centroide_rd,score",
     };
 

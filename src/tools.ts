@@ -1633,12 +1633,12 @@ export function registerTools(server: McpServer): void {
     }
   });
 
-  server.registerTool("bag_lookup_address", { inputSchema: { query: z.string().optional(), postcode: z.string().optional(), huisnummer: z.string().optional(), rows: z.number().int().min(1).max(config.limits.maxRows).default(10) }, description: "Lookup BAG (Basisregistratie Adressen en Gebouwen) address details via PDOK Locatieserver. Search by free text, postcode, or house number.", annotations: TOOL_ANNOTATIONS }, async ({ query, postcode, huisnummer, rows }) => {
+  server.registerTool("bag_lookup_address", { inputSchema: { query: z.string().optional(), postcode: z.string().optional(), huisnummer: z.string().optional(), woonplaats: z.string().describe("Only addresses in this woonplaats (exact BAG name, e.g. 'Utrecht'). The free-text search is fuzzy and otherwise also returns the same street and number in other places.").optional(), rows: z.number().int().min(1).max(config.limits.maxRows).default(10) }, description: "Lookup BAG (Basisregistratie Adressen en Gebouwen) address details via PDOK Locatieserver. Search by free text, postcode, or house number; pass woonplaats to keep the results in one place.", annotations: TOOL_ANNOTATIONS }, async ({ query, postcode, huisnummer, woonplaats, rows }) => {
     if (!query && !postcode) {
       return toMcpToolPayload(errorResponse({ error: "unexpected", message: "Geef minimaal query of postcode op", suggestion: "Gebruik query='Damrak 1 Amsterdam' of postcode+huisnummer" }));
     }
     try {
-      const out = await pdok.bagLookupAddress({ query, postcode, huisnummer, rows });
+      const out = await pdok.bagLookupAddress({ query, postcode, huisnummer, woonplaats, rows });
       const records = out.items.map((x) => record("bag", String(x.weergavenaam ?? x.id ?? "BAG adres"), "https://www.pdok.nl", x, String(x.straatnaam ?? "")));
       return toMcpToolPayload(successResponse({ summary: `${records.length} BAG adressen`, records, provenance: prov("bag_lookup_address", out.endpoint, out.params, records.length, out.total) }));
     } catch {

@@ -144,6 +144,7 @@ Automatische transcripties (spraak-naar-tekst) van elk debat van Tweede en Eerst
   - default field list bevat `centroide_ll` en `centroide_rd` zodat adres-records direct lat/lon (EPSG:4326) en RD (EPSG:28992) coördinaten meeleveren
 - `bag_lookup_address`
   - gebruikt PDOK Locatieserver v3_1
+  - optioneel `woonplaats` (exacte BAG-naam, bv. `Utrecht`): filtert in de Locatieserver zelf op die woonplaats; zonder dit geeft de vrije zoekopdracht ook dezelfde straat en hetzelfde huisnummer in andere plaatsen terug
   - bij tijdelijke onbereikbaarheid: deterministische fallback met duidelijke `access_note`
 - `bag_address_detail`
   - resolves an address (free-text `query` or PDOK `pdok_id`) to authoritative BAG detail
