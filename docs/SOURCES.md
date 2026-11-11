@@ -139,6 +139,14 @@
 - bbox-gedreven: geef een RD New (EPSG:28992) bbox 'minx,miny,maxx,maxy' (met `bbox-crs`). Geeft de kadastrale aanduiding (gemeente/sectie/perceelnummer), grootte (m2), berekende bbox/centroïde en optioneel de volledige GeoJSON-geometrie terug. Geen persoonsgegevens.
 - LET OP: host api.pdok.nl matcht in inferConnectorName op "pdok.nl" → "pdok_bag"; de bron geeft daarom altijd expliciet `connector: "brk_kadastrale_kaart"` mee.
 
+## PDOK BAG panden en verblijfsobjecten (bag_panden_wfs, bag_panden_ogc)
+
+- Endpoints: BAG WFS `https://service.pdok.nl/lv/bag/wfs/v2_0` (feature types `bag:pand`, `bag:verblijfsobject`; GeoJSON in `srsName=EPSG:4326`, max 1.000 per pagina, `startIndex`, `resultType=hits`) en BAG OGC API Features v2 `https://api.pdok.nl/kadaster/bag/ogc/v2` (collecties `pand`, `verblijfsobject`; cursor-paginering, geen `numberMatched`).
+- Keyless. Category: semi_live (10m cache); brondata dagelijks bijgewerkt.
+- De WFS bevat alleen bestaande objecten (geen 'Pand gesloopt', 'Niet gerealiseerd pand', 'Pand ten onrechte opgevoerd', 'Verblijfsobject ingetrokken' e.d.); die komen uit de OGC API, die ook `documentdatum`, `documentnummer` en `geconstateerd` geeft. De WFS antwoordt in honderden milliseconden, de OGC API in seconden tot een minuut (gemeten november 2026), daarom twee connectors met elk een eigen circuit.
+- Filter: FES 2.0 met de bbox in het filter (WFS staat `bbox` naast `filter` niet toe); WGS84-envelopes in `urn:ogc:def:crs:EPSG::4326` zijn lat/lon.
+- LET OP: beide hosts matchen in inferConnectorName op "pdok.nl" → "pdok_bag"; de bron geeft daarom altijd expliciet `connector` mee.
+
 ## BRON Verkeersongevallen (Rijkswaterstaat WFS)
 
 - **Connector:** `bron_ongevallen` (category: static — jaarlijkse update)

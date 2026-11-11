@@ -32,6 +32,7 @@ import { BWB_SRU_ENDPOINT, BWB_TEXT_DEFAULT_CHARS, BWB_TEXT_MAX_CHARS, BwbTekstE
 import { CvdrSource, CVDR_ORGANIZATION_TYPES, CvdrQueryError } from "./sources/cvdr.js";
 import { BestuurlijkeGebiedenSource } from "./sources/bestuurlijke-gebieden.js";
 import { BrkKadastraleKaartSource } from "./sources/brk-kadastrale-kaart.js";
+import { BagPandenSource, BAG_GEBRUIKSDOELEN, BAG_OGC_BASE, BAG_OGC_CONNECTOR, BAG_WFS_CONNECTOR, BAG_WFS_ENDPOINT, PAND_STATUSES, VBO_STATUSES, type BagObjectItem, type BagObjecttype } from "./sources/bag-panden.js";
 import { BronOngevallenSource } from "./sources/bron-ongevallen.js";
 import { NzaZorgbeeldSource } from "./sources/nza-zorgbeeld.js";
 import { OverheidsorganisatiesSource } from "./sources/overheidsorganisaties.js";
@@ -98,6 +99,7 @@ const wettenBwb = new WettenBwbSource(config);
 const cvdr = new CvdrSource(config);
 const bestuurlijkeGebieden = new BestuurlijkeGebiedenSource(config);
 const brkKadastraleKaart = new BrkKadastraleKaartSource(config);
+const bagPanden = new BagPandenSource(config);
 const bronOngevallen = new BronOngevallenSource(config);
 const nzaZorgbeeld = new NzaZorgbeeldSource(config);
 const overheidsorganisaties = new OverheidsorganisatiesSource(config);
@@ -3102,6 +3104,135 @@ export function registerTools(server: McpServer): void {
       return toMcpToolPayload(mapSourceError(e, "PDOK BRK Kadastrale Kaart", "https://api.pdok.nl/kadaster/brk-kadastrale-kaart/ogc/v1"));
     }
   });
+
+  /** One BAG pand or verblijfsobject as bag_panden_search and bag_verblijfsobjecten_search show it. */
+  const bagObjectRecord = (x: BagObjectItem): MCPRecord => {
+    const data: Record<string, unknown> = {
+      identificatie: x.identificatie,
+      objecttype: x.objecttype,
+      status: x.status,
+      bouwjaar: x.bouwjaar,
+      gebruiksdoel: x.gebruiksdoel,
+      gebruiksdoelen: x.gebruiksdoelen,
+      ...(x.objecttype === "pand"
+        ? { oppervlakte_min_m2: x.oppervlakteMinM2, oppervlakte_max_m2: x.oppervlakteMaxM2, aantal_verblijfsobjecten: x.aantalVerblijfsobjecten }
+        : { oppervlakte_m2: x.oppervlakteM2, adres: x.adres, postcode: x.postcode, woonplaats: x.woonplaats, pand_identificatie: x.pandIdentificatie, pand_status: x.pandStatus }),
+      documentdatum: x.documentdatum,
+      documentnummer: x.documentnummer,
+      geconstateerd: x.geconstateerd,
+      lat: x.lat,
+      lon: x.lon,
+      bbox: x.bbox,
+      bag_uri: x.bagUri,
+      bag_viewer_url: x.url,
+      bron: x.bron === "wfs" ? "PDOK BAG WFS" : "PDOK BAG OGC API",
+      ...(x.geometry ? { geometry: x.geometry } : {}),
+    };
+    const snippet = [x.status, x.bouwjaar !== undefined ? `bouwjaar ${x.bouwjaar}` : "", x.gebruiksdoelen.join(", ")].filter(Boolean).join(" · ");
+    return record(x.objecttype === "pand" ? "bag_panden" : "bag_verblijfsobjecten", x.title, x.url, data, snippet, x.documentdatum);
+  };
+
+  const registerBagObjectTool = (
+    name: "bag_panden_search" | "bag_verblijfsobjecten_search",
+    objecttype: BagObjecttype,
+    statuses: readonly [string, ...string[]],
+    endedNote: string,
+    description: string,
+  ) => {
+    server.registerTool(name, {
+      description,
+      inputSchema: {
+        bbox: z.string().describe("Required bounding box 'minx,miny,maxx,maxy': RD New (EPSG:28992) metres by default, or 'minlon,minlat,maxlon,maxlat' with bbox_crs=WGS84."),
+        bbox_crs: z.enum(["EPSG:28992", "WGS84"]).default("EPSG:28992").describe("Coordinate system of bbox."),
+        status: z.array(z.enum(statuses as [string, ...string[]])).min(1).max(statuses.length).optional().describe("Only these BAG statuses (exact BAG spelling). Omit for every existing object."),
+        inclusief_beeindigd: z.boolean().default(false).describe(`Without status: also return ${endedNote} (slower PDOK OGC API).`),
+        bouwjaar_min: z.number().int().min(1000).max(2100).optional().describe("Only objects with bouwjaar >= this year."),
+        bouwjaar_max: z.number().int().min(1000).max(2100).optional().describe("Only objects with bouwjaar <= this year."),
+        gebruiksdoel: z.enum(BAG_GEBRUIKSDOELEN).optional().describe("Only objects with this gebruiksdoel (a pand matches when any of its verblijfsobjecten has it)."),
+        includeGeometry: z.boolean().default(false).describe("Include the GeoJSON geometry in WGS84 (footprint polygon for a pand, point for a verblijfsobject)."),
+        top: z.number().int().min(1).max(config.limits.maxRows).default(50),
+        ...paginationInputSchema,
+        outputFormat: outputFormatSchema,
+        verbose: z.boolean().default(false),
+        dryRun: z.boolean().default(false),
+      },
+      annotations: TOOL_ANNOTATIONS,
+    }, async ({ bbox, bbox_crs, status, inclusief_beeindigd, bouwjaar_min, bouwjaar_max, gebruiksdoel, includeGeometry, top, offset, limit, outputFormat, verbose, dryRun }) => {
+      const connector = objecttype === "pand" ? "bag_panden" : "bag_verblijfsobjecten";
+      try {
+        const effectiveLimit = Math.min(config.limits.maxRows, limit ?? top);
+        if (dryRun) {
+          const plan = bagPanden.plan({ objecttype, statuses: status, includeEnded: inclusief_beeindigd });
+          const ogc = plan.ogcStatuses.map((s) => ({
+            connector: BAG_OGC_CONNECTOR,
+            url: `${BAG_OGC_BASE}/collections/${objecttype}/items`,
+            params: { bbox, bbox_crs, status: s, limit: 1000 },
+          }));
+          const wfs = {
+            connector: BAG_WFS_CONNECTOR,
+            url: BAG_WFS_ENDPOINT,
+            params: { typeNames: `bag:${objecttype}`, bbox, bbox_crs, status: status ?? [], bouwjaar_min, bouwjaar_max, gebruiksdoel, startIndex: offset, count: effectiveLimit },
+          };
+          return plan.wfs || !ogc.length ? dryRunPayload({ ...wfs, also: ogc }) : dryRunPayload({ ...ogc[0], also: ogc.slice(1) });
+        }
+        const started = Date.now();
+        const out = await bagPanden.search({
+          objecttype,
+          bbox,
+          bboxCrs: bbox_crs,
+          statuses: status,
+          includeEnded: inclusief_beeindigd,
+          bouwjaarMin: bouwjaar_min,
+          bouwjaarMax: bouwjaar_max,
+          gebruiksdoel,
+          offset,
+          limit: effectiveLimit,
+          includeGeometry,
+        });
+        const responseTimeMs = Date.now() - started;
+        const records = out.items.map(bagObjectRecord);
+        const noun = objecttype === "pand" ? "panden" : "verblijfsobjecten";
+        const failures = out.failures.map((f) => {
+          const mapped = mapSourceError(f.error, "PDOK BAG OGC API", BAG_OGC_BASE);
+          return { connector: f.connector, error_type: mapped.error, message: mapped.message };
+        });
+        const response = buildFormattedResponse({
+          summary: out.total !== null ? `${records.length} van ${out.total} BAG ${noun}` : `${records.length} BAG ${noun}`,
+          records,
+          provenance: prov(name, out.endpoint, out.params, records.length, out.total),
+          outputFormat,
+          // The source pages upstream (WFS startIndex), so this page goes out whole
+          // and the pagination is set from the source below.
+          offset: 0,
+          limit: effectiveLimit,
+          total: null,
+          access_note: out.access_note,
+          ...(failures.length ? { failures } : {}),
+          verbose: singleConnectorVerbose({ enabled: verbose, connector, endpoint: out.endpoint, responseTimeMs }),
+        });
+        response.pagination = { offset, limit: effectiveLimit, total: out.total, has_more: out.hasMore };
+        return toMcpToolPayload(response);
+      } catch (e) {
+        return toMcpToolPayload(mapSourceError(e, "PDOK BAG", BAG_WFS_ENDPOINT));
+      }
+    });
+  };
+
+  registerBagObjectTool(
+    "bag_panden_search",
+    "pand",
+    PAND_STATUSES,
+    "'Pand gesloopt', 'Niet gerealiseerd pand' and 'Pand ten onrechte opgevoerd'",
+    "Search BAG buildings (panden) in a bbox with bouwjaar, status and gebruiksdoel, via PDOK (Kadaster, keyless). For permits, supervision and enforcement (VTH): filter on status such as 'Bouwvergunning verleend', 'Bouw gestart', 'Verbouwing pand', 'Sloopvergunning verleend', 'Pand in gebruik (niet ingemeten)' or 'Pand gesloopt'. Existing panden come from the BAG WFS (fast, exact total); 'Pand gesloopt', 'Niet gerealiseerd pand' and 'Pand ten onrechte opgevoerd' only from the slower BAG OGC API (ask them by status, or inclusief_beeindigd=true), and those records add documentdatum, documentnummer and geconstateerd. Optional filters bouwjaar_min/max and gebruiksdoel. Ordered by identificatie (existing first, then ended); offset/limit page through the whole bbox and pagination.total is the exact count. Returns per pand: identificatie, status, bouwjaar, gebruiksdoelen, oppervlakte_min/max_m2 (of its verblijfsobjecten), aantal_verblijfsobjecten, centroid lat/lon, bbox, BAG URI and a BAG viewer link (canonical_url); the footprint with includeGeometry. No addresses: use bag_verblijfsobjecten_search or bag_lookup_address for those.",
+  );
+
+  registerBagObjectTool(
+    "bag_verblijfsobjecten_search",
+    "verblijfsobject",
+    VBO_STATUSES,
+    "'Verblijfsobject ingetrokken', 'Niet gerealiseerd verblijfsobject' and 'Verblijfsobject ten onrechte opgevoerd'",
+    "Search BAG verblijfsobjecten (units with an address: dwellings, shops, offices) in a bbox with status, gebruiksdoel, oppervlakte and the bouwjaar and status of their pand, via PDOK (Kadaster, keyless). For permits, supervision and enforcement (VTH): filter on status such as 'Verblijfsobject gevormd' (registered, not yet in use), 'Verblijfsobject in gebruik (niet ingemeten)', 'Verbouwing verblijfsobject' or 'Verblijfsobject buiten gebruik'. Existing objects come from the BAG WFS (fast, exact total); 'Verblijfsobject ingetrokken', 'Niet gerealiseerd verblijfsobject' and 'Verblijfsobject ten onrechte opgevoerd' only from the slower BAG OGC API (ask them by status, or inclusief_beeindigd=true). Optional filters bouwjaar_min/max (of the pand) and gebruiksdoel. Ordered by identificatie (existing first, then ended); offset/limit page through the whole bbox and pagination.total is the exact count. Returns per object: identificatie, status, gebruiksdoelen, oppervlakte_m2, adres, postcode, woonplaats, pand_identificatie, pand_status, bouwjaar, point lat/lon, BAG URI and a BAG viewer link (canonical_url).",
+  );
 
   server.registerTool("bron_ongevallen_search", {
     inputSchema: {
