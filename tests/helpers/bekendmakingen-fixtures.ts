@@ -160,5 +160,58 @@ export function creatorRecord(id: string, creator: string, kind = "gemeente"): s
   });
 }
 
+const GM = (inner: string) =>
+  `<overheidwetgeving:gebiedsmarkering scheme="OVERHEIDop.locatietype">${inner}</overheidwetgeving:gebiedsmarkering>`;
+
+/** Gebiedsmarkering elements shaped like those of live Utrecht records (gmb-2026-513293 and others, November 2026). */
+export const MARKING = {
+  /** A 20 m square in RD, Marshalllaan; its WGS84 twin in lon lat order. */
+  vlak: GM(
+    "<overheidwetgeving:Vlak><overheidwetgeving:geometrie>POLYGON ((134620 453940, 134640 453940, 134640 453960, 134620 453960, 134620 453940))</overheidwetgeving:geometrie>" +
+      "<overheidwetgeving:locatiegebied>POLYGON((5.0900 52.0734,5.0904 52.0734,5.0904 52.0736,5.0900 52.0736,5.0900 52.0734))</overheidwetgeving:locatiegebied>" +
+      "<overheidwetgeving:geometrielabel>Marshalllaan 289, 3527TH Utrecht</overheidwetgeving:geometrielabel>" +
+      "<overheidwetgeving:ligtInGemeente>Utrecht</overheidwetgeving:ligtInGemeente></overheidwetgeving:Vlak>",
+  ),
+  adres: GM(
+    "<overheidwetgeving:Adres><overheidwetgeving:geometrie>POINT(135981.725 457114.403)</overheidwetgeving:geometrie>" +
+      "<overheidwetgeving:locatiepunt>52.101948376299 5.10963045531699</overheidwetgeving:locatiepunt>" +
+      "<overheidwetgeving:locatiegebied>52.101948,5.1096305</overheidwetgeving:locatiegebied>" +
+      "<overheidwetgeving:huisnummer>42</overheidwetgeving:huisnummer><overheidwetgeving:huisletter>a</overheidwetgeving:huisletter>" +
+      "<overheidwetgeving:huisnummertoevoeging>bis</overheidwetgeving:huisnummertoevoeging>" +
+      "<overheidwetgeving:ligtInGemeente>Utrecht</overheidwetgeving:ligtInGemeente><overheidwetgeving:postcode>3513GL</overheidwetgeving:postcode>" +
+      "<overheidwetgeving:straatnaam>Oude Pijlsweerdstraat</overheidwetgeving:straatnaam><overheidwetgeving:woonplaats>Utrecht</overheidwetgeving:woonplaats></overheidwetgeving:Adres>",
+  ),
+  punt: (x: number, y: number, lat: number, lon: number, label: string) =>
+    GM(
+      `<overheidwetgeving:Punt><overheidwetgeving:geometrie>POINT (${x} ${y})</overheidwetgeving:geometrie>` +
+        `<overheidwetgeving:locatiepunt>${lat} ${lon}</overheidwetgeving:locatiepunt><overheidwetgeving:locatiegebied>${lat},${lon}</overheidwetgeving:locatiegebied>` +
+        `<overheidwetgeving:geometrielabel>${label}</overheidwetgeving:geometrielabel><overheidwetgeving:ligtInGemeente>Utrecht</overheidwetgeving:ligtInGemeente></overheidwetgeving:Punt>`,
+    ),
+  /** A street: MULTILINESTRING in RD, LINESTRING in WGS84 (as the source sends a Weg). */
+  weg: GM(
+    "<overheidwetgeving:Weg><overheidwetgeving:geometrie>MULTILINESTRING((132548 454970,133071 454966))</overheidwetgeving:geometrie>" +
+      "<overheidwetgeving:locatiegebied>LINESTRING(5.0596564 52.082546,5.0672866 52.082531)</overheidwetgeving:locatiegebied>" +
+      "<overheidwetgeving:geometrielabel>Zandweg, Utrecht</overheidwetgeving:geometrielabel><overheidwetgeving:ligtInGemeente>Utrecht</overheidwetgeving:ligtInGemeente></overheidwetgeving:Weg>",
+  ),
+  gemeente: GM(
+    '<overheidwetgeving:Gemeente><overheidwetgeving:gemeentenaam scheme="OVERHEID.Gemeente">Utrecht</overheidwetgeving:gemeentenaam></overheidwetgeving:Gemeente>',
+  ),
+};
+
+/** A Gemeenteblad permit of gemeente Utrecht with the given gebiedsmarkering elements. */
+export function locatedRecord(id: string, markings: string[], type = "omgevingsvergunning"): string {
+  return record({
+    kern:
+      `<dcterms:identifier>${id}</dcterms:identifier><dcterms:title>Aanvraag omgevingsvergunning ${id}</dcterms:title>` +
+      `<dcterms:type>${type}</dcterms:type><dcterms:creator>Utrecht</dcterms:creator>`,
+    mantel: "<dcterms:available>2026-11-04</dcterms:available><dcterms:date>2026-11-04</dcterms:date>",
+    tp:
+      "<overheidwetgeving:organisatietype>gemeente</overheidwetgeving:organisatietype>" +
+      "<overheidwetgeving:publicatienaam>Gemeenteblad</overheidwetgeving:publicatienaam>" +
+      markings.join(""),
+    enriched: `<gzd:preferredUrl>https://zoek.officielebekendmakingen.nl/${id}.html</gzd:preferredUrl>`,
+  });
+}
+
 /** Trimmed publication XML (the "xml" manifestation). */
 export const GMB_XML = `<officiele-publicatie><metadata><meta name="OVERHEIDop.externMetadataRecord" content="https://zoek.officielebekendmakingen.nl/gmb-2026-104512/metadata.xml" /></metadata><kop><titel>GEMEENTEBLAD</titel><subtitel>Officiële uitgave van de gemeente Pijnacker-Nootdorp</subtitel></kop><gemeenteblad><regeling><aanhef><preambule><al>Het college van burgemeester en wethouders;</al><al>gelet op artikel 4:81 van de Algemene wet bestuursrecht &amp; de <nadruk type="vet">A</nadruk>fvalstoffenverordening;</al></preambule></aanhef></regeling></gemeenteblad></officiele-publicatie>`;

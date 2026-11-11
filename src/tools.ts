@@ -6,7 +6,7 @@ import { CbsSource, cbsCatalogItemUrl } from "./sources/cbs.js";
 import { TweedeKamerSource, mapTweedeKamerError, tkRecordView, tkSubjectTitle } from "./sources/tweede-kamer.js";
 import { DEBAT_DEFAULT_CHARS, DEBAT_DEFAULT_DAYS, DEBAT_MAX_CHARS, DEBAT_MAX_VERSLAGEN, TweedeKamerDebattenSource, commissieUrlVoorNummer, snippetAt, termsPosition, type DebatFragment, type DebatHit, type DebatSearchResult } from "./sources/tweede-kamer-debatten.js";
 import { koppelGehoord, koppelingCounts, KOPPELING_MAX_DAGEN, KOPPELING_MAX_VERSLAGEN, type Koppeling, type KoppelingMode, type KoppelingResult } from "./sources/debat-koppeling.js";
-import { BekendmakingenSource, AUTHORITY_TYPES, MAX_TEXT_CHARS, SRU_MAX_START_RECORD, bekendmakingSnippet, normalizeBekendmakingIdentifier, rewriteKeepingSyntax } from "./sources/bekendmakingen.js";
+import { BekendmakingenSource, AUTHORITY_TYPES, MAX_TEXT_CHARS, SRU_MAX_START_RECORD, bekendmakingSnippet, normalizeBekendmakingIdentifier, parseRdBbox, rewriteKeepingSyntax } from "./sources/bekendmakingen.js";
 import { RijksoverheidSource } from "./sources/rijksoverheid.js";
 import { RijksbegrotingSource } from "./sources/rijksbegroting.js";
 import { DuoSource } from "./sources/duo.js";
@@ -1109,7 +1109,8 @@ export function registerTools(server: McpServer): void {
     description:
       "Search Officiële Bekendmakingen (Dutch official publications: Gemeenteblad, Staatscourant, Staatsblad, Provinciaal blad, Waterschapsblad, Kamerstukken, Handelingen). Use legal/policy topic keywords; every word must occur (Dutch stopwords such as 'en' are ignored; a quoted phrase such as \"zorg en veiligheid\" and a citation such as '2016/679' match exactly; for a hyphenated term like 'OV-visie' the publications with that exact term come first, followed by those where both words occur separately). " +
       "To find what one municipality, province or water board published, set 'authority' (and 'authority_type') rather than putting the place name in the query: a place name in the query also matches national documents that merely mention it, and the response suggests the filter when it spots one. " +
-      "Filter by 'publicatieblad' (journal), 'type' (document kind) and a date range, and use sort='date_newest' for the latest publications. Each record carries the document date (date, dagtekening), the publication date, the citation (vindplaats) and direct PDF/HTML/XML links. Only the first ~10,000 hits of a result set can be paged through (upstream limit).",
+      "Filter by 'publicatieblad' (journal), 'type' (document kind) and a date range, and use sort='date_newest' for the latest publications. Each record carries the document date (date, dagtekening), the publication date, the citation (vindplaats) and direct PDF/HTML/XML links. Only the first ~10,000 hits of a result set can be paged through (upstream limit). " +
+      "For what was published about one place (permits, verkeersbesluiten, evenementen in a neighbourhood or around an address), set 'bbox_rd' together with 'authority': most municipal publications carry a location, and each record that has one gets 'location' (lat, lon, rd_x, rd_y, kind, label, address) to put it on a map.",
     inputSchema: {
       query: z.string().describe("Legal or policy topic keywords. Examples: 'bestemmingsplan', 'subsidieregeling', 'parkeerbeleid'. Do NOT pass full questions, and put an organisation name in 'authority' instead."),
       top: z.number().int().min(1).max(100).default(20),
@@ -1122,13 +1123,18 @@ export function registerTools(server: McpServer): void {
       date_to: z.string().optional().describe("YYYY-MM-DD (YYYY and YYYY-MM are widened, DD-MM-YYYY is accepted). Applies to date_field."),
       date_field: z.enum(["dagtekening", "publicatiedatum"]).default("dagtekening").describe("Date used by date_from/date_to and sort: 'dagtekening' = the date on the document (field date); 'publicatiedatum' = the date it was published (field publication_date). They differ for e.g. Kamerstukken and Handelingen."),
       sort: z.enum(["relevance", "date_newest", "date_oldest"]).default("relevance").describe("Use 'date_newest' for recent/latest publications (sorted server-side on date_field). 'relevance' for general searches."),
+      bbox_rd: z.union([z.array(z.number()), z.string()]).optional().describe("Only publications whose location touches this RD New (EPSG:28992) rectangle: [minX, minY, maxX, maxY] in metres, or the string 'minX,minY,maxX,maxY'. Example (Kanaleneiland-Noord, Utrecht): [134028, 453672, 135114, 454790]. An area partly inside counts; publications without a location (most national ones) drop out. query may then be empty."),
       ...paginationInputSchema,
       outputFormat: outputFormatSchema,
       verbose: z.boolean().default(false),
       dryRun: z.boolean().default(false),
     },
     annotations: TOOL_ANNOTATIONS,
-  }, async ({ query, top, startRecord, type, publicatieblad, authority, authority_type, date_from, date_to, date_field, sort, offset, limit, outputFormat, verbose, dryRun }) => {
+  }, async ({ query, top, startRecord, type, publicatieblad, authority, authority_type, date_from, date_to, date_field, sort, bbox_rd, offset, limit, outputFormat, verbose, dryRun }) => {
+    const bbox = bbox_rd === undefined ? undefined : parseRdBbox(bbox_rd);
+    if (bbox && "invalid" in bbox) {
+      return toMcpToolPayload(errorResponse({ error: "unexpected", message: bbox.invalid, suggestion: "Give bbox_rd as [minX, minY, maxX, maxY] in RD New metres, e.g. [134028, 453672, 135114, 454790], or leave it out." }));
+    }
     // The rewriter strips question frames but also every quote, slash and
     // apostrophe; phrases, citations and words like 's-Gravenhage are kept out of it.
     const rw = rewriteKeepingSyntax(query, (text) => rewriteQuery(text, "moderate"));
@@ -1149,6 +1155,7 @@ export function registerTools(server: McpServer): void {
       // The rewriter lowercases; place-name detection needs the caller's casing.
       originalQuery: query,
       expandCompounds: true,
+      ...(bbox ? { bbox_rd: bbox.bbox } : {}),
     };
 
     if (dryRun) {
@@ -1167,6 +1174,7 @@ export function registerTools(server: McpServer): void {
           date_to,
           date_field,
           sort,
+          ...(bbox ? { bbox_rd: bbox.bbox.join(",") } : {}),
         },
       });
     }
