@@ -23,7 +23,7 @@ Technical overview of how NL-GOV-MCP is structured internally.
                                    │
                      ┌─────────────┴─────────────┐
                      │   tools.ts                 │
-                     │   94 tool handlers         │
+                     │   96 tool handlers         │
                      │   Zod schemas + logic      │
                      └───┬────────┬────────┬─────┘
                          │        │        │
@@ -80,7 +80,7 @@ A single tool call flows through these steps:
 |------|------|
 | `src/index.ts` | Entry point. Reads `--sse` / `--streamable-http` flags or `MCP_TRANSPORT` env, starts the matching transport. |
 | `src/server.ts` | Creates `McpServer` with the server `instructions` (`SERVER_INSTRUCTIONS`, sent at `initialize`), calls `registerTools()`, sets up Express routes for HTTP transports, adds `/health` and `/health/sources` endpoints. |
-| `src/tools.ts` | All 94 tool registrations. Each tool has a Zod input schema and an async handler that calls a source, transforms results, and returns via `toMcpToolPayload()`. |
+| `src/tools.ts` | All 96 tool registrations. Each tool has a Zod input schema and an async handler that calls a source, transforms results, and returns via `toMcpToolPayload()`. |
 | `src/router/` | The `nl_gov_ask` router: `nl-gov-ask.ts` holds its registration and handler (called from `registerTools()`), `intents.ts` what it reads from a question (places, EU acts, policy and council questions, debates, Algoritmeregister, DSO documents, ECLIs, law articles, research bodies, population questions, subsidies and funding calls), `routes.ts` the route chain: which routes a question takes and in what order, shared by the handler and `dryRun`. |
 | `src/types.ts` | Shared TypeScript interfaces: `MCPRecord`, `Provenance`, `MCPToolResponse`, `MCPErrorResponse`, `AppConfig`. |
 | `src/config.ts` | Loads `config/default.json`, merges env var overrides. |
@@ -135,6 +135,7 @@ The tool handler in `tools.ts` maps `items` to `MCPRecord[]` and wraps provenanc
 | `cvdr.ts` | SRU/XML (KOOP) | `cvdr` |
 | `bestuurlijke-gebieden.ts` | OGC API Features | `bestuurlijke_gebieden` |
 | `brk-kadastrale-kaart.ts` | OGC API Features | `brk_kadastrale_kaart` |
+| `bag-panden.ts` | OGC WFS (GeoJSON) + OGC API Features | `bag_panden_wfs`, `bag_panden_ogc` |
 | `bron-ongevallen.ts` | OGC WFS (GeoJSON) | `bron_ongevallen` |
 | `nza-zorgbeeld.ts` | REST | `nza_zorgbeeld` |
 | `overheidsorganisaties.ts` | REST (ROO) + TOOI SPARQL | `overheidsorganisaties`, `tooi_sparql` |
@@ -266,7 +267,7 @@ The HTTP client, caching, circuit breaker, retry, and concurrency limiting are a
 
 ## Transport modes
 
-All three transports expose the same 94 tools and are created by `server.ts`:
+All three transports expose the same 96 tools and are created by `server.ts`:
 
 | Mode | Protocol | Session model | Use case |
 |------|----------|---------------|----------|

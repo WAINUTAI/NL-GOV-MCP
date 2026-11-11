@@ -435,6 +435,15 @@ Search Dutch administrative areas (gemeente/provincie/land) via PDOK Bestuurlijk
 
 Search Dutch cadastral parcels and map objects (BRK Kadastrale Kaart) via PDOK OGC API Features. bbox-driven (RD New / EPSG:28992). Read-only, keyless. Collections: perceel, kadastralegrens, openbareruimtenaam, bebouwing, nummeraanduidingreeks. Returns kadastrale aanduiding (gemeente/sectie/perceelnummer), grootte (m2), bbox/centroid and optional GeoJSON geometry (set `includeGeometry=true` for `outputFormat=geojson`). Supports pagination, outputFormat (json/csv/geojson/markdown_table), verbose and dryRun. A `bbox` is required.
 
+## bag_panden_search / bag_verblijfsobjecten_search
+
+BAG-panden en -verblijfsobjecten in een bbox met bouwjaar, status en gebruiksdoel (PDOK, keyless). Bedoeld voor vergunningen, toezicht en handhaving: welke panden hebben status 'Bouwvergunning verleend', 'Bouw gestart', 'Verbouwing pand', 'Sloopvergunning verleend' of 'Pand gesloopt', welke verblijfsobjecten zijn 'gevormd', 'in gebruik (niet ingemeten)' of in 'Verbouwing verblijfsobject'.
+
+- **Input:** `bbox` (verplicht; RD New `minx,miny,maxx,maxy`, of `minlon,minlat,maxlon,maxlat` met `bbox_crs=WGS84`), `status` (lijst exacte BAG-statussen), `inclusief_beeindigd` (zonder `status`: ook gesloopt/ingetrokken, niet gerealiseerd en ten onrechte opgevoerd), `bouwjaar_min`/`bouwjaar_max`, `gebruiksdoel`, `includeGeometry` (footprint of punt in WGS84), `beeindigd_timeout_ms` (optioneel tijdsbudget voor de beëindigde statussen uit de OGC API, alle pagina's samen en zonder retry; niet op tijd compleet staat in `failures`), plus `top`/`offset`/`limit`/`outputFormat` (incl. `geojson`)/`verbose`/`dryRun`.
+- **Output pand:** `identificatie`, `status`, `bouwjaar`, `gebruiksdoelen`, `oppervlakte_min_m2`/`oppervlakte_max_m2` (van de verblijfsobjecten erin), `aantal_verblijfsobjecten`, centroïde `lat`/`lon`, `bbox`, `bag_uri`, `bag_viewer_url` (= `canonical_url`), `bron`.
+- **Output verblijfsobject:** `identificatie`, `status`, `gebruiksdoelen`, `oppervlakte_m2`, `adres`, `postcode`, `woonplaats`, `pand_identificatie`, `pand_status`, `bouwjaar` (van het pand), `lat`/`lon`, `bag_uri`, `bag_viewer_url`.
+- **Bronnen:** bestaande objecten uit de BAG WFS (`service.pdok.nl/lv/bag/wfs/v2_0`): status, bouwjaar en gebruiksdoel worden server-side gefilterd, `pagination.total` is de exacte telling (`resultType=hits`) en `offset` pagineert via `startIndex` door de hele bbox, gesorteerd op identificatie. De beëindigde statussen staan niet in de WFS en komen uit de BAG OGC API v2 (`api.pdok.nl/kadaster/bag/ogc/v2`, per status, cursor-paginering, max 5.000 per status); die records hebben ook `documentdatum`, `documentnummer` en `geconstateerd`. Ze volgen in de lijst ná de bestaande objecten. De OGC API is traag (seconden tot een minuut); valt hij uit terwijl de WFS antwoordt, dan komen de bestaande objecten terug met een `failures`-regel.
+
 ## bron_ongevallen_search
 
 Zoekt Nederlandse verkeersongevallen (Rijkswaterstaat BRON) via WFS 2.0.0 GetFeature binnen een EPSG:28992 (RD New) bounding box.

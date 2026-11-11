@@ -29,7 +29,7 @@ Examples:
 
 `NL-GOV-MCP` actively retrieves and normalizes data across many sources, can combine cross-source results, and returns a consistent MCP response contract ready for assistants and automations.
 
-## Sources (54 connectors, 94 tools)
+## Sources (55 connectors, 96 tools)
 
 | Source | What it covers |
 |---|---|
@@ -62,6 +62,7 @@ Examples:
 | CBS Iv3 | Municipal & provincial finances — budgets, annual accounts, task fields (dataderden OData) |
 | PDOK Bestuurlijke Gebieden | Official municipality/province boundaries and codes (OGC API Features) |
 | PDOK Kadastrale Kaart (BRK) | Cadastral parcels, boundaries and designations (OGC API Features) |
+| PDOK BAG panden en verblijfsobjecten | Buildings and units per bbox with bouwjaar, status and gebruiksdoel, filterable on status (bouwvergunning verleend, bouw gestart, verbouwing, gesloopt, gevormd), bouwjaar and gebruiksdoel, with an exact count (BAG WFS; ended statuses from the BAG OGC API) |
 | wetten.overheid.nl (BWB) | Consolidated national laws, decrees and regulations (KOOP SRU): one current version per regeling, or the version on a peildatum; the text of an artikel (or lid), the artikelen with a term or the table of contents, as geldig on any day |
 | CVDR | Local & regional regulations of municipalities, provinces and water authorities, filterable by issuing organisation (KOOP SRU) |
 | NED | National Energy Dashboard — generation/consumption per source + forecasts (requires `NED_API_KEY`) |
@@ -190,7 +191,7 @@ npm run test:live    # integration test suite (live API calls)
 
 ### Transport modes
 
-Three transport modes are supported. All expose the same 94 tools.
+Three transport modes are supported. All expose the same 96 tools.
 
 #### stdio (Claude Desktop, Claude Code)
 

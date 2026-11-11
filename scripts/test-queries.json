@@ -623,6 +623,32 @@
     "minRecords": 1
   },
   {
+    "id": "bag_panden_search",
+    "description": "BAG panden search (bouwvergunning verleend, Utrecht Kanaleneiland)",
+    "tool": "bag_panden_search",
+    "args": {
+      "bbox": "132800,453500,134600,455300",
+      "status": [
+        "Bouwvergunning verleend"
+      ],
+      "top": 3
+    },
+    "minRecords": 1
+  },
+  {
+    "id": "bag_verblijfsobjecten_search",
+    "description": "BAG verblijfsobjecten search (gevormd, Utrecht Kanaleneiland)",
+    "tool": "bag_verblijfsobjecten_search",
+    "args": {
+      "bbox": "132800,453500,134600,455300",
+      "status": [
+        "Verblijfsobject gevormd"
+      ],
+      "top": 3
+    },
+    "minRecords": 1
+  },
+  {
     "id": "bron_ongevallen_search",
     "description": "BRON verkeersongevallen search",
     "tool": "bron_ongevallen_search",
