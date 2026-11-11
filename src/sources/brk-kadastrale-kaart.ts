@@ -1,5 +1,6 @@
 import type { AppConfig } from "../types.js";
 import { getJson } from "../utils/http.js";
+import { inLocalMetres, interiorPoint, parseGeoJson } from "../utils/geometry.js";
 
 // PDOK Kadaster BRK Kadastrale Kaart — OGC API Features (GeoJSON).
 // LET OP: host api.pdok.nl matcht in inferConnectorName op "pdok.nl" → "pdok_bag".
@@ -28,7 +29,10 @@ export interface BrkKadastraleKaartItem {
   tekst?: string;
   bronhouder?: string;
   bbox?: [number, number, number, number];
+  /** Midpoint of the bbox, [lon, lat]; can fall outside a strip, a bend or a multipart parcel. */
   centroid?: [number, number];
+  /** A WGS84 point inside the polygon (largest part of a multipolygon): its area centroid, or a point inside when that falls outside. */
+  interiorPoint?: { lat: number; lon: number };
   url: string;
   geometry?: Record<string, unknown>;
 }
@@ -101,6 +105,14 @@ function computeBounds(geometry: Record<string, unknown> | undefined):
   };
 }
 
+/** A point inside a (Multi)Polygon in CRS84 lon/lat; undefined for other geometry. */
+export function interiorLatLon(geometry: unknown): { lat: number; lon: number } | undefined {
+  const parsed = parseGeoJson(geometry);
+  if (parsed?.type !== "polygon") return undefined;
+  const point = inLocalMetres(parsed, (local) => (local.type === "polygon" ? interiorPoint(local.polygons) : undefined));
+  return point ? { lat: Math.round(point[1] * 1e8) / 1e8, lon: Math.round(point[0] * 1e8) / 1e8 } : undefined;
+}
+
 function buildTitle(collectie: BrkCollection, props: Record<string, unknown>, id: string): string {
   if (collectie === "perceel") {
     const gemeente = String(props.kadastrale_gemeente_waarde ?? "").trim();
@@ -152,6 +164,8 @@ function toItem(
     item.bbox = bounds.bbox;
     item.centroid = bounds.centroid;
   }
+  const inside = interiorLatLon(feature.geometry);
+  if (inside) item.interiorPoint = inside;
   if (includeGeometry && feature.geometry) item.geometry = feature.geometry;
   return item;
 }

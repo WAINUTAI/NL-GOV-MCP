@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { BrpGewasperceelSource } from "../src/sources/brp-gewaspercelen.js";
+import { BrpGewasperceelSource, gewasperceelUrl, interiorPointRd } from "../src/sources/brp-gewaspercelen.js";
+import { rdToWgs84 } from "../src/utils/rd.js";
 import { clearHttpCache } from "../src/utils/connector-runtime.js";
 import { jsonResponse, testConfig, xmlResponse } from "./helpers/config.js";
 
@@ -49,6 +50,27 @@ function urls(fetchMock: ReturnType<typeof stubPdok>): string[] {
   return fetchMock.mock.calls.map((c) => (c as unknown as [string])[0]);
 }
 
+describe("BRP parcel point and link", () => {
+  it("puts interiorPoint inside a bent strip whose bbox midpoint lies outside", () => {
+    // A 10 m wide strip bending round a corner (an L of 300 m arms), as ditch-side parcels are.
+    const ring = [[0, 0], [300, 0], [300, 10], [10, 10], [10, 300], [0, 300], [0, 0]].map(([x, y]) => [140000 + x, 440000 + y]);
+    const point = interiorPointRd({ type: "Polygon", coordinates: [ring] })!;
+    const inArm = (point.rd_x - 140000 < 10 && point.rd_y - 440000 < 300) || (point.rd_y - 440000 < 10 && point.rd_x - 140000 < 300);
+    expect(inArm).toBe(true);
+    expect(point.rd_x).toBeGreaterThan(140000);
+    expect(point.rd_y).toBeGreaterThan(440000);
+    expect(interiorPointRd({ type: "Point", coordinates: [1, 2] })).toBeUndefined();
+  });
+
+  it("links one parcel by resourceId with the type-name prefix", () => {
+    expect(gewasperceelUrl("brp_gewas.1843e914-a644-4c4f-ac4a-1a73f11ace80")).toBe(
+      "https://service.pdok.nl/rvo/brpgewaspercelen/wfs/v1_0?service=WFS&version=2.0.0&request=GetFeature&typeNames=brpgewaspercelen%3ABrpGewas&resourceId=BrpGewas.1843e914-a644-4c4f-ac4a-1a73f11ace80&outputFormat=application/json",
+    );
+    expect(gewasperceelUrl("abc")).toContain("resourceId=BrpGewas.abc");
+    expect(gewasperceelUrl("")).toBe("https://service.pdok.nl/rvo/brpgewaspercelen/wfs/v1_0");
+  });
+});
+
 describe("BrpGewasperceelSource", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -83,6 +105,14 @@ describe("BrpGewasperceelSource", () => {
       oppervlakteHa: 1,
     });
     expect(out.items[0].centroid).toEqual([165050, 505050]);
+    // New next to centroid: a point inside the parcel, in RD and WGS84.
+    expect(out.items[0].interiorPoint).toMatchObject({ rd_x: 165050, rd_y: 505050 });
+    const wgs = rdToWgs84(165050, 505050);
+    expect(out.items[0].interiorPoint?.lat).toBeCloseTo(wgs.lat, 7);
+    expect(out.items[0].interiorPoint?.lon).toBeCloseTo(wgs.lon, 7);
+    // The link names the feature as MapServer wants it (BrpGewas.<id>), not as the GeoJSON id (brp_gewas.<id>).
+    expect(out.items[0].url).toContain("resourceId=BrpGewas.1");
+    expect(out.items[0].url).not.toContain("brp_gewas.");
     expect(out.items[0].geometry).toBeUndefined();
     // total comes from the separate resultType=hits request
     expect(out.total).toBe(266);

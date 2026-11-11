@@ -1,6 +1,8 @@
 import type { AppConfig } from "../types.js";
 import { getJson, getText } from "../utils/http.js";
 import { resolveGemeenteBbox, validateRdBbox } from "../utils/geo.js";
+import { interiorPoint, parseGeoJson } from "../utils/geometry.js";
+import { rdToWgs84 } from "../utils/rd.js";
 
 /**
  * BRP Gewaspercelen (RVO) — the agricultural parcel registry.
@@ -47,7 +49,14 @@ export interface GewasperceelItem {
   status: string;
   oppervlakteM2: number | null;
   oppervlakteHa: number | null;
+  /** Midpoint of the bbox in RD [x, y]; can fall outside a strip or a bend. */
   centroid: [number, number] | null;
+  /**
+   * A point inside the polygon (largest part of a multipolygon): its area
+   * centroid, or a point inside when that falls outside. RD as computed;
+   * lat/lon from it by the RD polynomial (within a few decimetres).
+   */
+  interiorPoint?: { lat: number; lon: number; rd_x: number; rd_y: number };
   bbox: [number, number, number, number] | null;
   geometry?: Record<string, unknown>;
   url: string;
@@ -143,6 +152,33 @@ function polygonAreaM2(geometry: GewasFeature["geometry"]): number | null {
 function centroidOfBbox(bbox: [number, number, number, number] | null): [number, number] | null {
   if (!bbox) return null;
   return [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2];
+}
+
+/** A point inside an RD (Multi)Polygon, with its WGS84 twin; undefined for other geometry. */
+export function interiorPointRd(geometry: unknown): { lat: number; lon: number; rd_x: number; rd_y: number } | undefined {
+  const parsed = parseGeoJson(geometry);
+  const point = parsed?.type === "polygon" ? interiorPoint(parsed.polygons) : undefined;
+  if (!point) return undefined;
+  const { lat, lon } = rdToWgs84(point[0], point[1]);
+  return {
+    lat: Math.round(lat * 1e7) / 1e7,
+    lon: Math.round(lon * 1e7) / 1e7,
+    rd_x: Math.round(point[0] * 1000) / 1000,
+    rd_y: Math.round(point[1] * 1000) / 1000,
+  };
+}
+
+/**
+ * Link to one parcel. MapServer wants the feature id with the type name as
+ * prefix (BrpGewas.<uuid>); the id the GeoJSON carries (brp_gewas.<uuid>)
+ * gives an ExceptionReport.
+ */
+export function gewasperceelUrl(id: string): string {
+  if (!id) return WFS_ENDPOINT;
+  const resourceId = `BrpGewas.${id.includes(".") ? id.slice(id.indexOf(".") + 1) : id}`;
+  return `${WFS_ENDPOINT}?service=WFS&version=2.0.0&request=GetFeature&typeNames=${encodeURIComponent(
+    TYPE_NAME,
+  )}&resourceId=${encodeURIComponent(resourceId)}&outputFormat=application/json`;
 }
 
 function matchesText(haystack: string, needle: string | undefined): boolean {
@@ -278,6 +314,7 @@ export class BrpGewasperceelSource {
       const featureBbox = bboxOfCoordinates(feature.geometry?.coordinates);
       const areaM2 = polygonAreaM2(feature.geometry);
       const id = String(feature.id ?? "");
+      const inside = interiorPointRd(feature.geometry);
 
       return {
         id,
@@ -290,15 +327,12 @@ export class BrpGewasperceelSource {
         oppervlakteM2: areaM2 === null ? null : Math.round(areaM2),
         oppervlakteHa: areaM2 === null ? null : Number((areaM2 / 10_000).toFixed(2)),
         centroid: centroidOfBbox(featureBbox),
+        ...(inside ? { interiorPoint: inside } : {}),
         bbox: featureBbox,
         ...(args.includeGeometry && feature.geometry
           ? { geometry: feature.geometry as Record<string, unknown> }
           : {}),
-        url: id
-          ? `${WFS_ENDPOINT}?service=WFS&version=2.0.0&request=GetFeature&typeNames=${encodeURIComponent(
-              TYPE_NAME,
-            )}&featureID=${encodeURIComponent(id)}&outputFormat=application/json`
-          : WFS_ENDPOINT,
+        url: gewasperceelUrl(id),
       };
     });
 

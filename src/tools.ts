@@ -1112,7 +1112,7 @@ export function registerTools(server: McpServer): void {
       "Search Officiële Bekendmakingen (Dutch official publications: Gemeenteblad, Staatscourant, Staatsblad, Provinciaal blad, Waterschapsblad, Kamerstukken, Handelingen). Use legal/policy topic keywords; every word must occur (Dutch stopwords such as 'en' are ignored; a quoted phrase such as \"zorg en veiligheid\" and a citation such as '2016/679' match exactly; for a hyphenated term like 'OV-visie' the publications with that exact term come first, followed by those where both words occur separately). " +
       "To find what one municipality, province or water board published, set 'authority' (and 'authority_type') rather than putting the place name in the query: a place name in the query also matches national documents that merely mention it, and the response suggests the filter when it spots one. " +
       "Filter by 'publicatieblad' (journal), 'type' (document kind) and a date range, and use sort='date_newest' for the latest publications. Each record carries the document date (date, dagtekening), the publication date, the citation (vindplaats) and direct PDF/HTML/XML links. Only the first ~10,000 hits of a result set can be paged through (upstream limit). " +
-      "For what was published about one place (permits, verkeersbesluiten, evenementen in a neighbourhood or around an address), set 'bbox_rd' together with 'authority': most municipal publications carry a location, and each record that has one gets 'location' (lat, lon, rd_x, rd_y, kind, label, address) to put it on a map.",
+      "For what was published about one place (permits, verkeersbesluiten, evenementen in a neighbourhood or around an address), set 'bbox_rd' together with 'authority': most municipal publications carry a location, and each record that has one gets 'location' (lat, lon, rd_x, rd_y, kind, label, address; area_m2 for an area, length_m for a road or line) to put it on a map.",
     inputSchema: {
       query: z.string().describe("Legal or policy topic keywords. Examples: 'bestemmingsplan', 'subsidieregeling', 'parkeerbeleid'. Do NOT pass full questions, and put an organisation name in 'authority' instead."),
       top: z.number().int().min(1).max(100).default(20),
@@ -3065,7 +3065,7 @@ export function registerTools(server: McpServer): void {
   });
 
   server.registerTool("brk_kadastrale_kaart_search", {
-    description: "Search Dutch cadastral parcels and map objects (BRK Kadastrale Kaart) via PDOK OGC API Features. bbox-driven (EPSG:28992). Collections: perceel, kadastralegrens, openbareruimtenaam, bebouwing, nummeraanduidingreeks. Returns kadastrale aanduiding (gemeente/sectie/perceelnummer), grootte, bbox/centroid and optional GeoJSON geometry.",
+    description: "Search Dutch cadastral parcels and map objects (BRK Kadastrale Kaart) via PDOK OGC API Features. bbox-driven (EPSG:28992). Collections: perceel, kadastralegrens, openbareruimtenaam, bebouwing, nummeraanduidingreeks. Returns kadastrale aanduiding (gemeente/sectie/perceelnummer), grootte, bbox/centroid (centroid is the bbox middle, which can fall outside a strip or bent parcel), interior_point {lat, lon} (a point inside the polygon, for putting the parcel on a map) and optional GeoJSON geometry.",
     inputSchema: {
       collectie: z.enum(["perceel", "kadastralegrens", "openbareruimtenaam", "bebouwing", "nummeraanduidingreeks"]).default("perceel").describe("BRK collection to query."),
       bbox: z.string().describe("Required RD New (EPSG:28992) bounding box 'minx,miny,maxx,maxy'. Keep it small; this API is bbox-driven."),
@@ -3091,7 +3091,7 @@ export function registerTools(server: McpServer): void {
         "brk_kadastrale_kaart",
         x.title,
         x.url,
-        { id: x.id, collectie: x.collectie, kadastrale_aanduiding: x.kadastraleAanduiding, kadastrale_gemeente: x.kadastraleGemeente, sectie: x.sectie, perceelnummer: x.perceelnummer, kadastrale_grootte_m2: x.kadastraleGrootteM2, tekst: x.tekst, bronhouder: x.bronhouder, bbox: x.bbox, centroid: x.centroid, ...(x.geometry ? { geometry: x.geometry } : {}) },
+        { id: x.id, collectie: x.collectie, kadastrale_aanduiding: x.kadastraleAanduiding, kadastrale_gemeente: x.kadastraleGemeente, sectie: x.sectie, perceelnummer: x.perceelnummer, kadastrale_grootte_m2: x.kadastraleGrootteM2, tekst: x.tekst, bronhouder: x.bronhouder, bbox: x.bbox, centroid: x.centroid, ...(x.interiorPoint ? { interior_point: x.interiorPoint } : {}), ...(x.geometry ? { geometry: x.geometry } : {}) },
         x.kadastraleAanduiding ?? x.collectie,
       ));
       const response = buildFormattedResponse({
@@ -3233,7 +3233,7 @@ export function registerTools(server: McpServer): void {
     "pand",
     PAND_STATUSES,
     "'Pand gesloopt', 'Niet gerealiseerd pand' and 'Pand ten onrechte opgevoerd'",
-    "Search BAG buildings (panden) in a bbox with bouwjaar, status and gebruiksdoel, via PDOK (Kadaster, keyless). For permits, supervision and enforcement (VTH): filter on status such as 'Bouwvergunning verleend', 'Bouw gestart', 'Verbouwing pand', 'Sloopvergunning verleend', 'Pand in gebruik (niet ingemeten)' or 'Pand gesloopt'. Existing panden come from the BAG WFS (fast, exact total); 'Pand gesloopt', 'Niet gerealiseerd pand' and 'Pand ten onrechte opgevoerd' only from the slower BAG OGC API (ask them by status, or inclusief_beeindigd=true), and those records add documentdatum, documentnummer and geconstateerd. Optional filters bouwjaar_min/max and gebruiksdoel. Ordered by identificatie (existing first, then ended); offset/limit page through the whole bbox and pagination.total is the exact count. Returns per pand: identificatie, status, bouwjaar, gebruiksdoelen, oppervlakte_min/max_m2 (of its verblijfsobjecten), aantal_verblijfsobjecten, centroid lat/lon, bbox, BAG URI and a BAG viewer link (canonical_url); the footprint with includeGeometry. No addresses: use bag_verblijfsobjecten_search or bag_lookup_address for those.",
+    "Search BAG buildings (panden) in a bbox with bouwjaar, status and gebruiksdoel, via PDOK (Kadaster, keyless). For permits, supervision and enforcement (VTH): filter on status such as 'Bouwvergunning verleend', 'Bouw gestart', 'Verbouwing pand', 'Sloopvergunning verleend', 'Pand in gebruik (niet ingemeten)' or 'Pand gesloopt'. Existing panden come from the BAG WFS (fast, exact total); 'Pand gesloopt', 'Niet gerealiseerd pand' and 'Pand ten onrechte opgevoerd' only from the slower BAG OGC API (ask them by status, or inclusief_beeindigd=true), and those records add documentdatum, documentnummer and geconstateerd. Optional filters bouwjaar_min/max and gebruiksdoel. Ordered by identificatie (existing first, then ended); offset/limit page through the whole bbox and pagination.total is the exact count. Returns per pand: identificatie, status, bouwjaar, gebruiksdoelen, oppervlakte_min/max_m2 (of its verblijfsobjecten), aantal_verblijfsobjecten, lat/lon on the pand (its area centroid, or a point inside it when the centroid falls outside, e.g. in a courtyard), bbox, BAG URI and a BAG viewer link (canonical_url); the footprint with includeGeometry. No addresses: use bag_verblijfsobjecten_search or bag_lookup_address for those.",
   );
 
   registerBagObjectTool(
@@ -3257,7 +3257,7 @@ export function registerTools(server: McpServer): void {
       verbose: z.boolean().default(false),
       dryRun: z.boolean().default(false),
     },
-    description: "Search Dutch road traffic accidents (Rijkswaterstaat BRON, verkeersongevallen) via WFS GetFeature within an EPSG:28992 bbox. Returns severity (afloop), crash type (aard), involved vehicle types, location and RD coordinates as GeoJSON-capable records. Keywords: verkeersongeval, ongeval, letsel, dodelijk, aanrijding.",
+    description: "Search Dutch road traffic accidents (Rijkswaterstaat BRON, verkeersongevallen) via WFS GetFeature within an EPSG:28992 bbox. Returns severity (afloop), crash type (aard), involved vehicle types, location and RD coordinates as GeoJSON-capable records, plus niveauKoppelen, wegvakId and junctieId: the point is the middle of the NWB wegvak or the junction the crash is coupled to, and with 'Ongeval gekoppeld op straat niveau.' only the street is known. Keywords: verkeersongeval, ongeval, letsel, dodelijk, aanrijding.",
     annotations: TOOL_ANNOTATIONS,
   }, async ({ bbox, jaar, afloop, gemeente, query, top, offset, limit, outputFormat, verbose, dryRun }) => {
     try {
@@ -3271,7 +3271,7 @@ export function registerTools(server: McpServer): void {
         "bron_ongevallen",
         x.title,
         x.url,
-        { id: x.id, jaar: x.jaar, afloop: x.afloop, aardOngeval: x.aardOngeval, aantalPartijen: x.aantalPartijen, vervoerswijzen: x.vervoerswijzen, straatnaam: x.straatnaam, woonplaats: x.woonplaats, gemeente: x.gemeente, provincie: x.provincie, maximumSnelheid: x.maximumSnelheid, rd: x.rd },
+        { id: x.id, jaar: x.jaar, afloop: x.afloop, aardOngeval: x.aardOngeval, aantalPartijen: x.aantalPartijen, vervoerswijzen: x.vervoerswijzen, straatnaam: x.straatnaam, woonplaats: x.woonplaats, gemeente: x.gemeente, provincie: x.provincie, maximumSnelheid: x.maximumSnelheid, rd: x.rd, ...(x.niveauKoppelen ? { niveauKoppelen: x.niveauKoppelen } : {}), ...(x.wegvakId !== undefined ? { wegvakId: x.wegvakId } : {}), ...(x.junctieId !== undefined ? { junctieId: x.junctieId } : {}) },
         `${x.afloop} — ${x.aardOngeval} — ${x.gemeente}`.trim(),
         String(x.jaar ?? ""),
       ));
@@ -3945,7 +3945,7 @@ server.registerTool(
   });
 
   server.registerTool("brp_gewaspercelen_search", {
-    description: "Search Dutch agricultural parcels (BRP Gewaspercelen, RVO) — the crop grown on every registered farm parcel, with polygon, area and year. Query by gemeente (auto-converted to a bbox) or by an EPSG:28992 bbox, and filter on crop name, category (bouwland/grasland/natuurterrein/landschapselement/braakland) or year. Use for land use, nitrogen, water quality and agriculture questions.",
+    description: "Search Dutch agricultural parcels (BRP Gewaspercelen, RVO) — the crop grown on every registered farm parcel, with polygon, area, year, centroid (bbox middle, RD) and interior_point {lat, lon, rd_x, rd_y} (a point inside the parcel). Query by gemeente (auto-converted to a bbox) or by an EPSG:28992 bbox, and filter on crop name, category (bouwland/grasland/natuurterrein/landschapselement/braakland) or year. Use for land use, nitrogen, water quality and agriculture questions.",
     inputSchema: {
       gemeente: z.string().optional().describe("Municipality name; resolved to a bbox via the PDOK Locatieserver. Example: 'Dronten'."),
       bbox: z.string().optional().describe("RD New (EPSG:28992) bounding box 'minx,miny,maxx,maxy'. Takes precedence over gemeente."),
@@ -3972,7 +3972,7 @@ server.registerTool(
         "brp_gewaspercelen",
         x.title,
         x.url,
-        { id: x.id, gewas: x.gewas, gewascode: x.gewascode, categorie: x.categorie, jaar: x.jaar, status: x.status, oppervlakte_m2: x.oppervlakteM2, oppervlakte_ha: x.oppervlakteHa, centroid: x.centroid, bbox: x.bbox, ...(x.geometry ? { geometry: x.geometry } : {}) },
+        { id: x.id, gewas: x.gewas, gewascode: x.gewascode, categorie: x.categorie, jaar: x.jaar, status: x.status, oppervlakte_m2: x.oppervlakteM2, oppervlakte_ha: x.oppervlakteHa, centroid: x.centroid, ...(x.interiorPoint ? { interior_point: x.interiorPoint } : {}), bbox: x.bbox, ...(x.geometry ? { geometry: x.geometry } : {}) },
         `${x.categorie}${x.oppervlakteHa !== null ? ` — ${x.oppervlakteHa} ha` : ""}`,
         x.jaar,
       ));

@@ -20,6 +20,7 @@ import {
   wktRepresentativePoint,
 } from "../src/sources/bekendmakingen.js";
 import { rewriteQuery } from "../src/utils/query-rewriter.js";
+import { rdToWgs84 } from "../src/utils/rd.js";
 import { clearHttpCache, markConnectorSuccess } from "../src/utils/connector-runtime.js";
 import { parseXml } from "../src/utils/xml-parser.js";
 import {
@@ -987,6 +988,11 @@ describe("helpers", () => {
   });
 });
 
+/** One gebiedsmarkering holding one element of the given kind. */
+function marking(kind: string, inner: string): string {
+  return `<overheidwetgeving:gebiedsmarkering scheme="OVERHEIDop.locatietype"><overheidwetgeving:${kind}>${inner}</overheidwetgeving:${kind}></overheidwetgeving:gebiedsmarkering>`;
+}
+
 describe("search — location (gebiedsmarkering) and bbox_rd", () => {
   const KANALENEILAND: [number, number, number, number] = [134028.4, 453672.6, 135114.2, 454790.1];
 
@@ -1021,15 +1027,16 @@ describe("search — location (gebiedsmarkering) and bbox_rd", () => {
     expect(out.access_note).toContain("publicaties zonder locatie vallen erbuiten");
   });
 
-  it("gives a Vlak its centroid, in RD from geometrie and in WGS84 from locatiegebied (lon lat)", async () => {
+  it("gives a Vlak its centroid in RD from geometrie, the same point in WGS84, and its area", async () => {
     stubFetch(() => xmlResponse(sruResponse([locatedRecord("gmb-2026-1", [MARKING.vlak])], 1)));
     const [item] = (await source().search({ query: "", maximumRecords: 5 })).items;
     expect(item.location).toEqual({
       kind: "Vlak",
-      lat: 52.0735,
-      lon: 5.0902,
+      lat: 52.0734589,
+      lon: 5.0900909,
       rd_x: 134630,
       rd_y: 453950,
+      area_m2: 400,
       label: "Marshalllaan 289, 3527TH Utrecht",
     });
     expect(item).not.toHaveProperty("locations");
@@ -1048,10 +1055,53 @@ describe("search — location (gebiedsmarkering) and bbox_rd", () => {
     expect(location).not.toHaveProperty("label");
   });
 
-  it("puts a Weg at the middle of its line", async () => {
+  it("puts a Weg at the middle of its line, with its length", async () => {
     stubFetch(() => xmlResponse(sruResponse([locatedRecord("gmb-2026-3", [MARKING.weg], "verkeersbesluit of -mededeling")], 1)));
     const [item] = (await source().search({ query: "", maximumRecords: 5 })).items;
-    expect(item.location).toEqual({ kind: "Weg", lat: 52.0825385, lon: 5.0634715, rd_x: 132809.5, rd_y: 454968, label: "Zandweg, Utrecht" });
+    expect(item.location).toEqual({ kind: "Weg", lat: 52.0825386, lon: 5.0634715, rd_x: 132809.5, rd_y: 454968, length_m: 523, label: "Zandweg, Utrecht" });
+  });
+
+  it("places a Weg in several pieces over all of them, lat/lon the same point as rd", async () => {
+    // As gmb-2026-516866 sends a road: one RD MULTILINESTRING, a LINESTRING per piece in locatiegebied.
+    // The first piece is a 100 m stub far from the rest.
+    const weg = marking(
+      "Weg",
+      "<overheidwetgeving:geometrie>MULTILINESTRING((130000 450000,130100 450000),(133000 452000,133000 453000),(133000 453000,133000 454000))</overheidwetgeving:geometrie>" +
+        "<overheidwetgeving:locatiegebied>LINESTRING(5.03 52.04,5.0315 52.04)</overheidwetgeving:locatiegebied>" +
+        "<overheidwetgeving:locatiegebied>LINESTRING(5.07 52.06,5.07 52.07)</overheidwetgeving:locatiegebied>" +
+        "<overheidwetgeving:geometrielabel>Lange weg</overheidwetgeving:geometrielabel>",
+    );
+    stubFetch(() => xmlResponse(sruResponse([locatedRecord("gmb-2026-5", [weg], "verkeersbesluit of -mededeling")], 1)));
+    const [item] = (await source().search({ query: "", maximumRecords: 5 })).items;
+    const location = item.location as Record<string, number>;
+    // The length-weighted centre of the pieces is (132859.5, 452857.14); the nearest point on them is on x = 133000.
+    expect(location.rd_x).toBe(133000);
+    expect(location.rd_y).toBeCloseTo(452857.14, 1);
+    expect(location.length_m).toBe(2100);
+    const back = rdToWgs84(location.rd_x, location.rd_y);
+    expect(location.lat).toBeCloseTo(back.lat, 6);
+    expect(location.lon).toBeCloseTo(back.lon, 6);
+  });
+
+  it("without an RD geometrie uses every locatiegebied piece, converted to RD", async () => {
+    const vlak = marking(
+      "Vlak",
+      "<overheidwetgeving:locatiegebied>POLYGON((5.0900 52.0734,5.0904 52.0734,5.0904 52.0736,5.0900 52.0736,5.0900 52.0734))</overheidwetgeving:locatiegebied>" +
+        "<overheidwetgeving:locatiegebied>POLYGON((5.1000 52.0734,5.1004 52.0734,5.1004 52.0736,5.1000 52.0736,5.1000 52.0734))</overheidwetgeving:locatiegebied>",
+    );
+    stubFetch(() => xmlResponse(sruResponse([locatedRecord("gmb-2026-6", [vlak])], 1)));
+    const [item] = (await source().search({ query: "", maximumRecords: 5 })).items;
+    const location = item.location as Record<string, number>;
+    // Two equal squares 680 m apart: their joint centroid lies between them, so the point goes inside one of them.
+    const inFirst = location.lon > 5.09 && location.lon < 5.0904;
+    const inSecond = location.lon > 5.1 && location.lon < 5.1004;
+    expect(inFirst || inSecond).toBe(true);
+    expect(location.lat).toBeGreaterThan(52.0734);
+    expect(location.lat).toBeLessThan(52.0736);
+    expect(location.rd_x).toBeGreaterThan(134000);
+    // Each square is about 27.4 m by 22.2 m.
+    expect(location.area_m2).toBeGreaterThan(1150);
+    expect(location.area_m2).toBeLessThan(1300);
   });
 
   it("adds no location to a record with only a Gemeente marking", async () => {
@@ -1103,20 +1153,30 @@ describe("wktRepresentativePoint", () => {
     expect(wktRepresentativePoint("POINT(5.1 52.1)")).toEqual([5.1, 52.1]);
   });
 
-  it("puts a polygon at its centroid, ignoring holes", () => {
-    expect(wktRepresentativePoint("POLYGON ((0 0, 4 0, 4 4, 0 4, 0 0), (1 1, 2 1, 2 2, 1 2, 1 1))")).toEqual([2, 2]);
+  it("puts a polygon at its area centroid, the hole subtracted", () => {
+    const [x, y] = wktRepresentativePoint("POLYGON ((0 0, 4 0, 4 4, 0 4, 0 0), (1 1, 2 1, 2 2, 1 2, 1 1))")!;
+    expect(x).toBeCloseTo(30.5 / 15, 9);
+    expect(y).toBeCloseTo(30.5 / 15, 9);
   });
 
   it("keeps the point inside an L-shape whose centroid lies outside it", () => {
     const [x, y] = wktRepresentativePoint("POLYGON ((0 0, 10 0, 10 1, 1 1, 1 10, 0 10, 0 0))")!;
-    expect(x).toBeCloseTo(0.5, 6);
-    expect(y).toBeGreaterThan(1);
-    expect(y).toBeLessThan(10);
+    // Inside one of the 1-wide arms, near its middle line.
+    expect(Math.min(x, y)).toBeGreaterThan(0.3);
+    expect(Math.min(x, y)).toBeLessThan(0.7);
+    expect(Math.max(x, y)).toBeLessThan(10);
   });
 
-  it("uses the largest polygon of a multipolygon and the longest line of a multilinestring", () => {
-    expect(wktRepresentativePoint("MULTIPOLYGON (((0 0, 1 0, 1 1, 0 1, 0 0)), ((10 10, 14 10, 14 14, 10 14, 10 10)))")).toEqual([12, 12]);
-    expect(wktRepresentativePoint("MULTILINESTRING ((0 0, 1 0), (0 5, 10 5))")).toEqual([5, 5]);
+  it("counts every piece of a multipolygon and a multilinestring", () => {
+    // Joint centroid of a 1 m2 and a 16 m2 square, inside the large one.
+    const [px, py] = wktRepresentativePoint("MULTIPOLYGON (((0 0, 1 0, 1 1, 0 1, 0 0)), ((10 10, 14 10, 14 14, 10 14, 10 10)))")!;
+    expect(px).toBeCloseTo((0.5 + 12 * 16) / 17, 9);
+    expect(py).toBeCloseTo((0.5 + 12 * 16) / 17, 9);
+    // Two pieces: the point on them nearest their length-weighted centre (4.59, 4.55).
+    const [lx, ly] = wktRepresentativePoint("MULTILINESTRING ((0 0, 1 0), (0 5, 10 5))")!;
+    expect(lx).toBeCloseTo(50.5 / 11, 9);
+    expect(ly).toBe(5);
+    // One line: halfway along it.
     expect(wktRepresentativePoint("LINESTRING (0 0, 3 0, 3 4)")).toEqual([3, 0.5]);
   });
 

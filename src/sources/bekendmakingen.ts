@@ -6,6 +6,16 @@ import { placeKey, placeVariants } from "../utils/place-aliases.js";
 import { rewriteNote, type RewriteResult } from "../utils/query-rewriter.js";
 import { extractSruRecords, parseXml } from "../utils/xml-parser.js";
 import { compoundSearchParts, escapeSruValue, freeTextCqlPlan } from "../utils/sru-cql.js";
+import {
+  geometryArea,
+  geometryLength,
+  mapGeometry,
+  mergeGeometries,
+  parseWkt,
+  representativePoint,
+  type Geometry,
+} from "../utils/geometry.js";
+import { rdToWgs84, wgs84ToRd } from "../utils/rd.js";
 
 /*
  * Officiële Bekendmakingen via the KOOP SRU endpoint (repository.overheid.nl/sru,
@@ -541,10 +551,23 @@ export function bboxCql(bbox: RdBbox): string {
 export interface BekendmakingLocation {
   /** The marking's element name: Punt, Adres, Vlak, Perceel, GeometrieRef, Weg, Lijn. */
   kind: string;
+  /**
+   * The point in WGS84. A Punt or Adres keeps the source's locatiepunt; for a
+   * line or area it is the RD point below converted, so the two agree.
+   */
   lat?: number;
   lon?: number;
+  /**
+   * The point in RD New, over all pieces of the geometry: a line's middle (or,
+   * for a road in several pieces, the point on them nearest their centre), an
+   * area's centroid when it lies inside, else a point inside its largest part.
+   */
   rd_x?: number;
   rd_y?: number;
+  /** Areas only: total area in m2 of all polygons, holes subtracted (RD). */
+  area_m2?: number;
+  /** Lines only: total length in metres of all pieces (RD). */
+  length_m?: number;
   /** The source's geometrielabel ("Marmerplein te Utrecht", "Perceel Utrecht (UTT00) O 12"). */
   label?: string;
   /** Adres only: "Oude Pijlsweerdstraat 42, 3513GL Utrecht". */
@@ -556,128 +579,14 @@ const MAX_LOCATIONS = 50;
 
 type Coord = [number, number];
 
-function pairs(text: string): Coord[] {
-  const out: Coord[] = [];
-  for (const chunk of text.split(",")) {
-    const [a, b] = chunk.trim().split(/\s+/).map(Number);
-    if (Number.isFinite(a) && Number.isFinite(b)) out.push([a, b]);
-  }
-  return out;
-}
-
-/** Innermost coordinate lists of a WKT body: "((a b, c d), (e f, g h))" gives two lists. */
-function coordinateLists(body: string): Coord[][] {
-  return [...body.matchAll(/\(([^()]+)\)/g)].map((match) => pairs(match[1])).filter((list) => list.length);
-}
-
-function lineLength(line: Coord[]): number {
-  return line.slice(1).reduce((sum, point, i) => sum + Math.hypot(point[0] - line[i][0], point[1] - line[i][1]), 0);
-}
-
-function ringArea(ring: Coord[]): number {
-  let sum = 0;
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i, i += 1) {
-    sum += ring[j][0] * ring[i][1] - ring[i][0] * ring[j][1];
-  }
-  return sum / 2;
-}
-
-function inRing([x, y]: Coord, ring: Coord[]): boolean {
-  let inside = false;
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i, i += 1) {
-    const [xi, yi] = ring[i];
-    const [xj, yj] = ring[j];
-    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
-  }
-  return inside;
-}
-
 /**
- * A point inside a ring: its centroid, or, for a shape whose centroid falls
- * outside it (an L or a U), the middle of the widest stretch of the ring on
- * the centroid's horizontal line.
- */
-function pointInRing(absolute: Coord[]): Coord {
-  // Relative to the first vertex: the shoelace sums on raw RD metres or
-  // degrees around 52 lose the last digits to cancellation.
-  const [ox, oy] = absolute[0];
-  const [x, y] = pointInRelativeRing(absolute.map(([px, py]) => [px - ox, py - oy]));
-  return [x + ox, y + oy];
-}
-
-function pointInRelativeRing(ring: Coord[]): Coord {
-  const area = ringArea(ring);
-  if (Math.abs(area) <= 1e-12) {
-    return [ring.reduce((sum, [x]) => sum + x, 0) / ring.length, ring.reduce((sum, [, y]) => sum + y, 0) / ring.length];
-  }
-  let cx = 0;
-  let cy = 0;
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i, i += 1) {
-    const cross = ring[j][0] * ring[i][1] - ring[i][0] * ring[j][1];
-    cx += (ring[j][0] + ring[i][0]) * cross;
-    cy += (ring[j][1] + ring[i][1]) * cross;
-  }
-  cx /= 6 * area;
-  cy /= 6 * area;
-  if (inRing([cx, cy], ring)) return [cx, cy];
-  const crossings: number[] = [];
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i, i += 1) {
-    const [xi, yi] = ring[i];
-    const [xj, yj] = ring[j];
-    if (yi > cy !== yj > cy) crossings.push(((xj - xi) * (cy - yi)) / (yj - yi) + xi);
-  }
-  crossings.sort((a, b) => a - b);
-  let best: Coord = [cx, cy];
-  let widest = -1;
-  for (let k = 0; k + 1 < crossings.length; k += 2) {
-    const width = crossings[k + 1] - crossings[k];
-    if (width > widest) {
-      widest = width;
-      best = [(crossings[k] + crossings[k + 1]) / 2, cy];
-    }
-  }
-  return best;
-}
-
-/** The point halfway along a line. */
-function midpointOfLine(line: Coord[]): Coord {
-  let remaining = lineLength(line) / 2;
-  for (let i = 0; i + 1 < line.length; i += 1) {
-    const length = Math.hypot(line[i + 1][0] - line[i][0], line[i + 1][1] - line[i][1]);
-    if (length > 0 && remaining <= length) {
-      const t = remaining / length;
-      return [line[i][0] + t * (line[i + 1][0] - line[i][0]), line[i][1] + t * (line[i + 1][1] - line[i][1])];
-    }
-    remaining -= length;
-  }
-  return line[line.length - 1];
-}
-
-/**
- * A representative point of a WKT geometry, in its own coordinate order: the
- * point itself, a point inside the largest polygon, or the middle of the
- * longest line. Undefined for anything it cannot read.
+ * A representative point of a WKT geometry, in its own coordinate order and
+ * over all its pieces (see representativePoint). Undefined for anything it
+ * cannot read.
  */
 export function wktRepresentativePoint(wkt: string | undefined): Coord | undefined {
-  const match = /^\s*(MULTIPOLYGON|POLYGON|MULTILINESTRING|LINESTRING|MULTIPOINT|POINT)\s*(?:ZM|Z|M)?\s*(\(.*\))\s*$/is.exec(wkt ?? "");
-  if (!match) return undefined;
-  const type = match[1].toUpperCase();
-  const body = match[2];
-  if (type === "POINT" || type === "MULTIPOINT") return pairs(body.replace(/[()]/g, ""))[0];
-  if (type === "LINESTRING" || type === "MULTILINESTRING") {
-    const lines = coordinateLists(body);
-    if (!lines.length) return undefined;
-    return midpointOfLine(lines.reduce((longest, line) => (lineLength(line) > lineLength(longest) ? line : longest)));
-  }
-  // A polygon's first list is its exterior; in a multipolygon each polygon is
-  // its own "((...))". Holes are left out: a point that lands in one is rare,
-  // and still marks the place.
-  const exteriors = type === "POLYGON"
-    ? coordinateLists(body).slice(0, 1)
-    : body.split(/\)\s*\)\s*,\s*\(\s*\(/).map((part) => coordinateLists(`(${part.replace(/^[\s(]+|[\s)]+$/g, "")})`)[0]).filter(Boolean);
-  const rings = exteriors.filter((ring) => ring.length >= 3);
-  if (!rings.length) return exteriors[0]?.[0];
-  return pointInRing(rings.reduce((largest, ring) => (Math.abs(ringArea(ring)) > Math.abs(ringArea(largest)) ? ring : largest)));
+  const geometry = parseWkt(wkt);
+  return geometry ? representativePoint(geometry) : undefined;
 }
 
 function rounded(value: number, digits: number): number {
@@ -691,15 +600,54 @@ function numberPair(text: string | undefined): Coord | undefined {
   return parts.length === 2 && parts.every(Number.isFinite) ? [parts[0], parts[1]] : undefined;
 }
 
-/** Lat/lon of a marking: locatiepunt ("lat lon"), or locatiegebied ("lat,lon", or WKT in lon lat order). */
-function wgs84Point(marking: Record<string, unknown>): { lat: number; lon: number } | undefined {
-  const area = first(marking.locatiegebied);
-  const asWkt = area && /[a-z]/i.test(area) ? wktRepresentativePoint(area) : undefined;
-  const latLon = numberPair(first(marking.locatiepunt)) ?? (asWkt ? [asWkt[1], asWkt[0]] as Coord : numberPair(area));
-  if (!latLon) return undefined;
-  const [lat, lon] = latLon;
-  if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return undefined;
-  return { lat: rounded(lat, 7), lon: rounded(lon, 7) };
+function validLatLon([lat, lon]: Coord): boolean {
+  return Math.abs(lat) <= 90 && Math.abs(lon) <= 180;
+}
+
+/** The source's own lat/lon for a point marking: locatiepunt ("lat lon") or a "lat,lon" locatiegebied. */
+function sourceLatLon(marking: Record<string, unknown>): Coord | undefined {
+  const point = numberPair(first(marking.locatiepunt)) ?? numberPair(first(marking.locatiegebied));
+  return point && validLatLon(point) ? point : undefined;
+}
+
+/**
+ * The marking's geometry in RD: its geometrie, or else every locatiegebied
+ * piece (WGS84 WKT in lon lat order) converted to RD. A road comes as one RD
+ * MULTILINESTRING but as many separate locatiegebied LINESTRINGs.
+ */
+function rdGeometry(marking: Record<string, unknown>): Geometry | undefined {
+  const own = parseWkt(first(marking.geometrie));
+  if (own) return own;
+  const pieces = mergeGeometries(strings(marking.locatiegebied).filter((text) => /[a-z]/i.test(text)).map(parseWkt));
+  if (!pieces) return undefined;
+  return mapGeometry(pieces, ([lon, lat]) => {
+    const { x, y } = wgs84ToRd(lon, lat);
+    return [x, y];
+  });
+}
+
+/** The point and measures of one marking; undefined when it has no usable geometry. */
+function placeOf(marking: Record<string, unknown>): Omit<BekendmakingLocation, "kind" | "label" | "address"> | undefined {
+  const geometry = rdGeometry(marking);
+  const rd = geometry ? representativePoint(geometry) : undefined;
+  let latLon = geometry?.type === "line" || geometry?.type === "polygon" ? undefined : sourceLatLon(marking);
+  if (!latLon && rd) {
+    const { lat, lon } = rdToWgs84(rd[0], rd[1]);
+    latLon = [lat, lon];
+  }
+  if (!rd && !latLon) return undefined;
+  const place: Omit<BekendmakingLocation, "kind" | "label" | "address"> = {};
+  if (latLon) Object.assign(place, { lat: rounded(latLon[0], 7), lon: rounded(latLon[1], 7) });
+  if (rd) {
+    Object.assign(place, { rd_x: rounded(rd[0], 2), rd_y: rounded(rd[1], 2) });
+  } else if (latLon) {
+    // A point with only a lat/lon: its RD twin, so a bbox can select it.
+    const { x, y } = wgs84ToRd(latLon[1], latLon[0]);
+    Object.assign(place, { rd_x: rounded(x, 2), rd_y: rounded(y, 2) });
+  }
+  if (geometry?.type === "polygon") place.area_m2 = Math.round(geometryArea(geometry));
+  if (geometry?.type === "line") place.length_m = rounded(geometryLength(geometry), 1);
+  return place;
 }
 
 function addressText(marking: Record<string, unknown>): string | undefined {
@@ -723,12 +671,9 @@ function extractLocations(tpmeta: Record<string, unknown>): BekendmakingLocation
     for (const [kind, value] of Object.entries(asObject(marking))) {
       for (const entry of Array.isArray(value) ? value : [value]) {
         const element = asObject(entry);
-        const rd = wktRepresentativePoint(first(element.geometrie));
-        const wgs = wgs84Point(element);
-        if (!rd && !wgs) continue;
-        const location: BekendmakingLocation = { kind };
-        if (wgs) Object.assign(location, wgs);
-        if (rd) Object.assign(location, { rd_x: rounded(rd[0], 2), rd_y: rounded(rd[1], 2) });
+        const place = placeOf(element);
+        if (!place) continue;
+        const location: BekendmakingLocation = { kind, ...place };
         const label = first(element.geometrielabel);
         if (label) location.label = label;
         const address = kind === "Adres" ? addressText(element) : undefined;
